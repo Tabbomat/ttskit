@@ -1,7 +1,7 @@
 //! Lossless Tabletop Simulator save model.
 //!
 //! A [`Save`] wraps a [`serde_json::Value`] and writes it back in the exact
-//! format Tabletop Simulator itself writes (see [`write`]), so a save written
+//! format Tabletop Simulator itself writes (see [`mod@write`]), so a save written
 //! by the game round-trips byte for byte.
 //!
 //! # Why the model is value-backed
@@ -35,12 +35,15 @@
 //!   written by Tabletop Simulator are unchanged.
 //! - A leading UTF-8 byte order mark on input is accepted and dropped.
 
+pub mod view;
 pub mod write;
 
 use std::io::Write;
 use std::str::FromStr;
 
-use serde_json::Value;
+use serde_json::{Map, Value};
+
+pub use view::{ObjectView, ObjectViewMut, SaveView, SaveViewMut};
 
 /// Errors produced while reading or writing a save.
 #[derive(Debug, thiserror::Error)]
@@ -94,11 +97,35 @@ impl Save {
         &self.value
     }
 
-    /// Mutable access to the underlying value.
+    /// The top-level JSON object.
+    pub fn map(&self) -> &Map<String, Value> {
+        match &self.value {
+            Value::Object(map) => map,
+            // `value` is private, set to an object by `from_value`, and
+            // `map_mut` cannot change its variant.
+            _ => unreachable!("Save invariant: top level is an object"),
+        }
+    }
+
+    /// Mutable access to the top-level JSON object.
     ///
-    /// Callers must keep the top level an object.
-    pub fn value_mut(&mut self) -> &mut Value {
-        &mut self.value
+    /// Returns the map rather than the value so the top level cannot be
+    /// replaced by a non-object.
+    pub fn map_mut(&mut self) -> &mut Map<String, Value> {
+        match &mut self.value {
+            Value::Object(map) => map,
+            _ => unreachable!("Save invariant: top level is an object"),
+        }
+    }
+
+    /// A read-only typed view of the save.
+    pub fn view(&self) -> SaveView<'_> {
+        SaveView::new(self.map())
+    }
+
+    /// A mutable typed view of the save.
+    pub fn view_mut(&mut self) -> SaveViewMut<'_> {
+        SaveViewMut::new(self.map_mut())
     }
 
     /// Consumes the save and returns the underlying value.

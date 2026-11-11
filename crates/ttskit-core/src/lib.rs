@@ -12,4 +12,4 @@
 
 pub mod save;
 
-pub use save::{Save, SaveError};
+pub use save::{ObjectView, ObjectViewMut, Save, SaveError, SaveView, SaveViewMut};
