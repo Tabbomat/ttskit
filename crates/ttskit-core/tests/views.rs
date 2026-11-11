@@ -1,18 +1,10 @@
 //! Typed views over the synthetic fixture.
 
-use std::path::Path;
-
 use serde_json::Value;
 use ttskit_core::Save;
 
 fn fixture_bytes() -> Vec<u8> {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-        .join("tests")
-        .join("fixtures")
-        .join("minimal_save.json");
-    std::fs::read(path).expect("fixture should be readable")
+    ttskit_testutil::read_fixture("minimal_save.json")
 }
 
 fn fixture() -> Save {

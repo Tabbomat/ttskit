@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/ttskit-core", "crates/ttskit"]
+members = ["crates/ttskit-core", "crates/ttskit", "crates/ttskit-testutil"]
 
 [workspace.package]
 version = "0.1.0"
