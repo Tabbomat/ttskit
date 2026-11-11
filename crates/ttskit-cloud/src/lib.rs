@@ -9,11 +9,16 @@
 //! injection and a call log, and never need Steam.
 
 mod backend;
+mod index;
 mod memory;
 #[cfg(feature = "steam")]
 mod steam;
 
 pub use backend::{CloudBackend, CloudError, CloudFile, Op, Quota, UgcHandle};
+pub use index::{
+    CLOUD_FOLDER_FILE, CLOUD_INFO_FILE, CloudIndex, GAME_INTERNAL_FILES, IndexEntry, IndexError,
+    UgcUrl, is_game_internal,
+};
 pub use memory::{Call, MemoryCloud};
 #[cfg(feature = "steam")]
 pub use steam::{SteamCloud, TTS_APP_ID};
