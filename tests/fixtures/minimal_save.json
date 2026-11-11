@@ -1,0 +1,134 @@
+{
+  "SaveName": "Minimal Test Save",
+  "GameMode": "Synthetic",
+  "Date": "1/1/2000 12:00:00 AM",
+  "VersionNumber": "v0.0.0",
+  "GameType": "Game",
+  "GameComplexity": "",
+  "Tags": [],
+  "Gravity": 0.5,
+  "PlayArea": 0.5,
+  "Table": "Table_RPG",
+  "Sky": "Sky_Museum",
+  "Note": "",
+  "TabStates": {},
+  "LuaScript": "print(\"hello\")\r\n\tlocal path = \"C:\\\\temp\\\\x\"\r\n\tprint(path)\r\n",
+  "LuaScriptState": "{\"counter\":3,\"names\":[\"a\",\"b\"]}",
+  "XmlUI": "<Panel id=\"main\"><Text>1 < 2 > 0 & more</Text></Panel>",
+  "ObjectStates": [
+    {
+      "GUID": "aaaaaa",
+      "Name": "Bag",
+      "Nickname": "Tüte 日本語 🎲",
+      "Description": "Control chars \u0001 and separator \u2028 here",
+      "Transform": {
+        "posX": 1.0,
+        "posY": 1E-05,
+        "posZ": -0.0,
+        "rotX": -5.039668E-05,
+        "rotY": 180.0,
+        "rotZ": 0.0,
+        "scaleX": 1.0,
+        "scaleY": 1.0,
+        "scaleZ": 1.0
+      },
+      "Locked": false,
+      "Grid": true,
+      "Snap": null,
+      "Memo": 12345678901234567890123,
+      "Count": 42,
+      "Negative": -7,
+      "LuaScript": "function onLoad()\r\n\tprint(\"bag\")\r\nend",
+      "LuaScriptState": "",
+      "XmlUI": "",
+      "Tags": [],
+      "CustomData": {},
+      "SomeFutureField": {
+        "Nested": [
+          1,
+          2
+        ]
+      },
+      "ContainedObjects": [
+        {
+          "GUID": "bbbbbb",
+          "Name": "Card",
+          "Nickname": "Ace",
+          "Transform": {
+            "posX": 0.0,
+            "posY": 0.0,
+            "posZ": 0.0,
+            "rotX": 0.0,
+            "rotY": 0.0,
+            "rotZ": 0.0,
+            "scaleX": 1.0,
+            "scaleY": 1.0,
+            "scaleZ": 1.0
+          },
+          "LuaScript": "",
+          "LuaScriptState": "",
+          "XmlUI": ""
+        }
+      ]
+    },
+    {
+      "GUID": "cccccc",
+      "Name": "Custom_Model",
+      "Nickname": "",
+      "Transform": {
+        "posX": 2.5,
+        "posY": 3.0,
+        "posZ": -4.25,
+        "rotX": 0.0,
+        "rotY": 90.0,
+        "rotZ": 0.0,
+        "scaleX": 1.5,
+        "scaleY": 1.5,
+        "scaleZ": 1.5
+      },
+      "LuaScript": "",
+      "LuaScriptState": "",
+      "XmlUI": "",
+      "States": {
+        "2": {
+          "GUID": "dddddd",
+          "Name": "Custom_Model",
+          "Nickname": "State two",
+          "Transform": {
+            "posX": 0.0,
+            "posY": 0.0,
+            "posZ": 0.0,
+            "rotX": 0.0,
+            "rotY": 0.0,
+            "rotZ": 0.0,
+            "scaleX": 1.0,
+            "scaleY": 1.0,
+            "scaleZ": 1.0
+          },
+          "LuaScript": "",
+          "LuaScriptState": "",
+          "XmlUI": ""
+        },
+        "3": {
+          "GUID": "eeeeee",
+          "Name": "Custom_Model",
+          "Nickname": "State three",
+          "Transform": {
+            "posX": 0.0,
+            "posY": 0.0,
+            "posZ": 0.0,
+            "rotX": 0.0,
+            "rotY": 0.0,
+            "rotZ": 0.0,
+            "scaleX": 1.0,
+            "scaleY": 1.0,
+            "scaleZ": 1.0
+          },
+          "LuaScript": "",
+          "LuaScriptState": "",
+          "XmlUI": ""
+        }
+      }
+    }
+  ]
+}

@@ -8,3 +8,7 @@ repository.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+serde_json = { version = "1", features = ["preserve_order", "arbitrary_precision"] }
+thiserror = "2"
