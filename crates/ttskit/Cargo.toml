@@ -7,8 +7,18 @@ license.workspace = true
 repository.workspace = true
 readme = "../../README.md"
 
+[features]
+default = []
+# Steam Cloud access. Off by default so that builds without it never need the
+# Steamworks SDK. An executable built with it needs steam_api64.dll next to it
+# at runtime (`cargo run` and `cargo test` find it without that).
+steam = ["ttskit-cloud/steam"]
+
 [dependencies]
 clap = { version = "4", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+ttskit-cloud = { path = "../ttskit-cloud" }
 
 [lints]
 workspace = true
