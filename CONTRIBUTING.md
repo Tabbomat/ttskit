@@ -32,6 +32,14 @@ either goes behind a trait so the tests can use a mock.
   Steam ID.
 - Tests use `ttskit_cloud::MemoryCloud`, which also supports failure injection
   and a call log.
+- Write the cloud index only through `CloudIndex::save` or
+  `ttskit_cloud::restore`. Both back up the current index files first (see
+  `BackupStore`). Tests that touch backups use a temporary directory, never
+  the default backup directory.
+- Manual check after changing how the index is written: close the game, run a
+  write command against a real cloud, check that the backup appears in
+  `cloud restore`, start the game and confirm the Cloud Manager shows the
+  folders and files as expected, then restore the backup if needed.
 
 ## Test fixtures
 

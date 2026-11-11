@@ -4,8 +4,8 @@ An unofficial command line toolkit (and MCP server) for developing
 [Tabletop Simulator](https://store.steampowered.com/app/286160/Tabletop_Simulator/)
 mods. Not affiliated with or endorsed by Berserk Games.
 
-> **Status:** early development. Only `cloud list` works so far; see the
-> issue tracker for the roadmap.
+> **Status:** early development. Only `cloud list` and `cloud restore` work
+> so far; see the issue tracker for the roadmap.
 
 ## Planned features
 
@@ -87,7 +87,31 @@ Requirements:
   from the Steamworks SDK (`redistributable_bin/win64`) next to it.
 
 Without the `steam` feature, ttskit builds and runs without the Steamworks
-SDK, and the `cloud` commands exit with an error.
+SDK, and the `cloud` commands that talk to Steam exit with an error.
+
+### Index backups and restore
+
+Before ttskit changes the cloud index, it saves a copy of both index files
+to a local backup folder named after the UTC time, for example
+`20261111T184948Z`. By default backups live in
+`%LOCALAPPDATA%\ttskit\cloud-backups` (the local data directory on other
+systems). `--backup-dir DIR` or the `TTSKIT_BACKUP_DIR` environment variable
+picks another directory. ttskit never deletes backups.
+
+```
+ttskit cloud restore                         # list backups, newest first
+ttskit cloud restore 20261111T184948Z        # show what a restore would change
+ttskit cloud restore 20261111T184948Z --yes  # restore it
+```
+
+Without `--yes`, `cloud restore` only prints the plan: per index file
+`write`, `delete` (the file did not exist when the backup was taken) or
+`unchanged`. With `--yes` it first backs up the current index, so a restore
+can itself be undone. A backup whose files are not a valid index is refused.
+Listing backups does not need Steam.
+
+Close the game before restoring: whether the game notices index changes
+made while it runs, or overwrites them, has not been checked yet.
 
 ### Known limitations
 
@@ -101,9 +125,9 @@ SDK, and the `cloud` commands exit with an error.
 ### Can the game stay open?
 
 Yes, for reading. `cloud list` gave the same result with the game closed and
-with the game running at its main menu, and the game kept running. Commands
-that change the cloud do not exist yet; whether they are safe while the game
-runs will be checked when they are added.
+with the game running at its main menu, and the game kept running. For
+commands that change the cloud (`cloud restore --yes`) this has not been
+checked yet, so close the game first.
 
 ### steam_api64.dll and releases
 
