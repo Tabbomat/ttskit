@@ -20,8 +20,16 @@ either goes behind a trait so the tests can use a mock.
 ## Cloud code
 
 - Steam Cloud code lives in `ttskit-cloud`, behind the `CloudBackend` trait.
-- The Steam backend is behind the `steam` Cargo feature, which is off by
-  default, so default builds never need the Steamworks SDK or `steam_api64.dll`.
+- The Steam backend (`ttskit_cloud::SteamCloud`) is behind the `steam` Cargo
+  feature of `ttskit-cloud` and of the `ttskit` binary. It is off by default,
+  so default builds never need the Steamworks SDK or `steam_api64.dll`.
+- Also check the Steam build before sending cloud changes:
+  `cargo clippy --workspace --all-targets --features ttskit/steam -- -D warnings`.
+- `SteamCloud` itself is not covered by tests; check it by hand against a real
+  cloud. Only use read-only commands for this (`cargo run -p ttskit --features
+  steam -- cloud list`) unless you are working on a write command and have a
+  backup, and never paste the stderr output into issues: it contains your
+  Steam ID.
 - Tests use `ttskit_cloud::MemoryCloud`, which also supports failure injection
   and a call log.
 
