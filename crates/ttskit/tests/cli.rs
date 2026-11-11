@@ -21,6 +21,13 @@ fn no_arguments_shows_help_and_fails() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("Usage"));
 }
 
+#[test]
+fn cloud_list_help_mentions_folder() {
+    let output = ttskit(&["cloud", "list", "--help"]);
+    assert_eq!(output.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("--folder"));
+}
+
 #[cfg(not(feature = "steam"))]
 #[test]
 fn cloud_list_without_steam_feature_fails() {

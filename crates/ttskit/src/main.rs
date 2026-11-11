@@ -25,9 +25,12 @@ enum Command {
 
 #[derive(Subcommand)]
 enum CloudCommand {
-    /// List the files in the Steam Cloud (read-only)
+    /// List the folders and files in the Steam Cloud (read-only)
     List {
-        /// Print machine-readable JSON instead of a table
+        /// Only show this folder and its subfolders (separator `/`)
+        #[arg(long, value_name = "FOLDER")]
+        folder: Option<String>,
+        /// Print machine-readable JSON instead of a tree
         #[arg(long)]
         json: bool,
     },
@@ -51,11 +54,12 @@ fn connect() -> Result<Box<dyn CloudBackend>, String> {
 fn run(cli: Cli) -> Result<(), String> {
     match cli.command {
         Command::Cloud {
-            command: CloudCommand::List { json },
+            command: CloudCommand::List { folder, json },
         } => {
             let backend = connect()?;
             let mut out = std::io::stdout().lock();
-            cloud::list(backend.as_ref(), json, &mut out).map_err(|e| e.to_string())?;
+            cloud::list(backend.as_ref(), folder.as_deref(), json, &mut out)
+                .map_err(|e| e.to_string())?;
             out.flush().map_err(|e| e.to_string())
         }
     }
