@@ -1,10 +1,12 @@
 mod cloud;
 
 use std::io::Write;
+use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::SystemTime;
 
 use clap::{Parser, Subcommand};
-use ttskit_cloud::CloudBackend;
+use ttskit_cloud::{BackupStore, CloudBackend};
 
 /// Unofficial command line toolkit for Tabletop Simulator mod development.
 #[derive(Parser)]
@@ -34,6 +36,17 @@ enum CloudCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Restore the cloud index from a local backup (dry run unless --yes)
+    Restore {
+        /// Backup to restore; omit to list the backups
+        backup: Option<String>,
+        /// Restore for real; without it only the plan is printed
+        #[arg(long)]
+        yes: bool,
+        /// Directory holding the backups [default: <local app data>/ttskit/cloud-backups]
+        #[arg(long, env = "TTSKIT_BACKUP_DIR", value_name = "DIR")]
+        backup_dir: Option<PathBuf>,
+    },
 }
 
 #[cfg(feature = "steam")]
@@ -60,6 +73,36 @@ fn run(cli: Cli) -> Result<(), String> {
             let mut out = std::io::stdout().lock();
             cloud::list(backend.as_ref(), folder.as_deref(), json, &mut out)
                 .map_err(|e| e.to_string())?;
+            out.flush().map_err(|e| e.to_string())
+        }
+        Command::Cloud {
+            command:
+                CloudCommand::Restore {
+                    backup,
+                    yes,
+                    backup_dir,
+                },
+        } => {
+            let dir = cloud::backup_dir(backup_dir).map_err(|e| e.to_string())?;
+            let store = BackupStore::new(dir);
+            let mut out = std::io::stdout().lock();
+            match backup {
+                None => cloud::list_backups(&store, &mut out).map_err(|e| e.to_string())?,
+                Some(name) => {
+                    // Validate the name before connecting to Steam.
+                    let backup = store.get(&name).map_err(|e| e.to_string())?;
+                    let mut backend = connect()?;
+                    cloud::restore_backup(
+                        backend.as_mut(),
+                        &store,
+                        &backup,
+                        yes,
+                        SystemTime::now(),
+                        &mut out,
+                    )
+                    .map_err(|e| e.to_string())?;
+                }
+            }
             out.flush().map_err(|e| e.to_string())
         }
     }

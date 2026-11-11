@@ -15,10 +15,14 @@ default = []
 steam = ["ttskit-cloud/steam"]
 
 [dependencies]
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
+dirs = "6"
 serde_json = "1"
 thiserror = "2"
 ttskit-cloud = { path = "../ttskit-cloud" }
+
+[dev-dependencies]
+tempfile = "3"
 
 [lints]
 workspace = true

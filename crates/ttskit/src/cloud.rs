@@ -2,9 +2,14 @@
 
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Write as _};
+use std::path::PathBuf;
+use std::time::SystemTime;
 
 use serde_json::json;
-use ttskit_cloud::{CloudBackend, CloudError, CloudIndex, IndexError, is_game_internal};
+use ttskit_cloud::{
+    Backup, BackupError, BackupStore, CloudBackend, CloudError, CloudIndex, IndexError,
+    RestoreAction, is_game_internal, plan_restore, restore,
+};
 
 /// Errors of the `cloud` subcommands.
 #[derive(Debug, thiserror::Error)]
@@ -18,9 +23,98 @@ pub enum CommandError {
     /// The requested folder does not exist.
     #[error("no cloud folder \"{0}\"")]
     FolderNotFound(String),
+    /// A backup or restore failed.
+    #[error(transparent)]
+    Backup(#[from] BackupError),
+    /// No default backup directory can be determined.
+    #[error("cannot determine the local data directory; use --backup-dir")]
+    NoBackupDir,
     /// Writing the output failed.
     #[error("cannot write output: {0}")]
     Io(#[from] io::Error),
+}
+
+/// The directory holding the cloud index backups: `explicit` if given,
+/// otherwise `<local app data>/ttskit/cloud-backups`.
+pub fn backup_dir(explicit: Option<PathBuf>) -> Result<PathBuf, CommandError> {
+    match explicit {
+        Some(dir) => Ok(dir),
+        None => dirs::data_local_dir()
+            .map(|d| d.join("ttskit").join("cloud-backups"))
+            .ok_or(CommandError::NoBackupDir),
+    }
+}
+
+/// Lists the backups in `store`, newest first.
+pub fn list_backups(store: &BackupStore, out: &mut dyn io::Write) -> Result<(), CommandError> {
+    let backups = store.list()?;
+    let dir = store.root().display();
+    let mut buf: Vec<u8> = Vec::new();
+    if backups.is_empty() {
+        writeln!(buf, "No backups in {dir}")?;
+    } else {
+        writeln!(buf, "Backups in {dir}:")?;
+        let width = backups.iter().map(|b| b.name.len()).max().unwrap_or(0);
+        for backup in &backups {
+            let files: Vec<String> = backup
+                .files
+                .iter()
+                .map(|f| match f.size {
+                    Some(size) => format!("{} {size} bytes", f.name),
+                    None => format!("{} absent", f.name),
+                })
+                .collect();
+            writeln!(buf, "  {:<width$}  {}", backup.name, files.join(", "))?;
+        }
+    }
+    out.write_all(&buf)?;
+    Ok(())
+}
+
+/// Plans restoring `backup` and prints the plan. With `yes` the restore is
+/// carried out too (after backing up the current index); without it nothing
+/// is changed.
+pub fn restore_backup(
+    backend: &mut dyn CloudBackend,
+    store: &BackupStore,
+    backup: &Backup,
+    yes: bool,
+    now: SystemTime,
+    out: &mut dyn io::Write,
+) -> Result<(), CommandError> {
+    let plan = plan_restore(backend, backup)?;
+    let mut buf: Vec<u8> = Vec::new();
+    writeln!(buf, "Restore backup {}:", backup.name)?;
+    for step in &plan.steps {
+        let (action, detail) = match step.action {
+            RestoreAction::Write { size } => ("write", format!(" ({size} bytes)")),
+            RestoreAction::Delete => ("delete", String::new()),
+            RestoreAction::Unchanged => ("unchanged", String::new()),
+        };
+        writeln!(buf, "  {action:<9}  {}{detail}", step.file)?;
+    }
+    if plan.is_noop() {
+        writeln!(
+            buf,
+            "Nothing to do: the cloud index already matches this backup."
+        )?;
+    } else if !yes {
+        writeln!(
+            buf,
+            "Dry run: nothing was changed. Run again with --yes to restore."
+        )?;
+    }
+    out.write_all(&buf)?;
+    if plan.is_noop() || !yes {
+        return Ok(());
+    }
+
+    let outcome = restore(backend, store, &plan, now)?;
+    if let Some(pre) = &outcome.pre_restore_backup {
+        writeln!(out, "Backed up the current cloud index to {}.", pre.name)?;
+    }
+    writeln!(out, "Restored backup {}.", backup.name)?;
+    Ok(())
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -708,6 +802,222 @@ mod tests {
                 CommandError::Cloud(CloudError::Backend(_))
             ));
             assert!(text.is_empty());
+        }
+    }
+
+    mod restore_tests {
+        use std::fs;
+        use std::time::{Duration, UNIX_EPOCH};
+
+        use super::*;
+
+        fn index_cloud(name: &str) -> MemoryCloud {
+            let mut index = CloudIndex::empty();
+            index.entries = vec![entry(&format!("AA_{name}"), name, Some(1), "")];
+            seed(MemoryCloud::new(), &index)
+        }
+
+        fn time(secs: u64) -> SystemTime {
+            UNIX_EPOCH + Duration::from_secs(1_700_000_000 + secs)
+        }
+
+        fn names(store: &BackupStore) -> Vec<String> {
+            store.list().unwrap().into_iter().map(|b| b.name).collect()
+        }
+
+        fn restore_run(
+            cloud: &mut MemoryCloud,
+            store: &BackupStore,
+            name: &str,
+            yes: bool,
+        ) -> (Result<(), CommandError>, String) {
+            let mut out = Vec::new();
+            let result = store
+                .get(name)
+                .map_err(CommandError::from)
+                .and_then(|b| restore_backup(cloud, store, &b, yes, time(100), &mut out));
+            (result, String::from_utf8(out).unwrap())
+        }
+
+        /// A store holding one backup of `index_cloud("a.png")`, and a cloud
+        /// that differs from it.
+        fn setup() -> (tempfile::TempDir, BackupStore, MemoryCloud, String) {
+            let dir = tempfile::tempdir().unwrap();
+            let store = BackupStore::new(dir.path());
+            let backup = store.create(&index_cloud("a.png"), time(0)).unwrap();
+            // The backup lacks CloudFolder.bson: it did not exist in that cloud.
+            fs::remove_file(backup.path.join(CLOUD_FOLDER_FILE)).unwrap();
+            (dir, store, index_cloud("b.png"), backup.name)
+        }
+
+        fn list_text(store: &BackupStore) -> String {
+            let mut out = Vec::new();
+            list_backups(store, &mut out).unwrap();
+            String::from_utf8(out).unwrap()
+        }
+
+        #[test]
+        fn list_without_backups() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = BackupStore::new(dir.path());
+            assert_eq!(
+                list_text(&store),
+                format!("No backups in {}\n", dir.path().display())
+            );
+        }
+
+        #[test]
+        fn list_with_missing_dir() {
+            let dir = tempfile::tempdir().unwrap();
+            let missing = dir.path().join("nope");
+            let store = BackupStore::new(&missing);
+            assert_eq!(
+                list_text(&store),
+                format!("No backups in {}\n", missing.display())
+            );
+        }
+
+        #[test]
+        fn list_shows_newest_first_with_absent_files() {
+            let dir = tempfile::tempdir().unwrap();
+            let older = dir.path().join("20261110T090000Z");
+            fs::create_dir(&older).unwrap();
+            fs::write(older.join(CLOUD_INFO_FILE), vec![0; 1200]).unwrap();
+            let newer = dir.path().join("20261111T184948Z");
+            fs::create_dir(&newer).unwrap();
+            fs::write(newer.join(CLOUD_INFO_FILE), vec![0; 1234]).unwrap();
+            fs::write(newer.join(CLOUD_FOLDER_FILE), vec![0; 56]).unwrap();
+            fs::create_dir(dir.path().join("not-a-backup")).unwrap();
+            let store = BackupStore::new(dir.path());
+            assert_eq!(
+                list_text(&store),
+                format!(
+                    "Backups in {}:\n\
+                     \x20 20261111T184948Z  CloudInfo.bson 1234 bytes, CloudFolder.bson 56 bytes\n\
+                     \x20 20261110T090000Z  CloudInfo.bson 1200 bytes, CloudFolder.bson absent\n",
+                    dir.path().display()
+                )
+            );
+        }
+
+        #[test]
+        fn dry_run_prints_the_plan_and_changes_nothing() {
+            let (_dir, store, mut cloud, name) = setup();
+            cloud.clear_calls();
+            let (result, text) = restore_run(&mut cloud, &store, &name, false);
+            result.unwrap();
+            let size = store.get(&name).unwrap().files[0].size.unwrap();
+            assert_eq!(
+                text,
+                format!(
+                    "Restore backup {name}:\n\
+                     \x20 write      CloudInfo.bson ({size} bytes)\n\
+                     \x20 delete     CloudFolder.bson\n\
+                     Dry run: nothing was changed. Run again with --yes to restore.\n"
+                )
+            );
+            assert!(cloud.mutating_calls().is_empty());
+            assert_eq!(names(&store), [name]);
+        }
+
+        #[test]
+        fn yes_restores_and_backs_up_the_current_index() {
+            let (_dir, store, mut cloud, name) = setup();
+            let old_info = cloud.contents(CLOUD_INFO_FILE).unwrap();
+            let old_folders = cloud.contents(CLOUD_FOLDER_FILE).unwrap();
+            let (result, text) = restore_run(&mut cloud, &store, &name, true);
+            result.unwrap();
+
+            let backup = store.get(&name).unwrap();
+            assert_eq!(
+                cloud.contents(CLOUD_INFO_FILE),
+                backup.read(CLOUD_INFO_FILE).unwrap()
+            );
+            // The backup has no CloudFolder.bson, so it is deleted.
+            assert_eq!(backup.read(CLOUD_FOLDER_FILE).unwrap(), None);
+            assert_eq!(cloud.contents(CLOUD_FOLDER_FILE), None);
+
+            let all = names(&store);
+            assert_eq!(all.len(), 2);
+            let pre = store.get(&all[0]).unwrap();
+            assert_ne!(pre.name, name);
+            assert_eq!(pre.read(CLOUD_INFO_FILE).unwrap(), Some(old_info));
+            assert_eq!(pre.read(CLOUD_FOLDER_FILE).unwrap(), Some(old_folders));
+            assert!(text.contains("  delete     CloudFolder.bson\n"));
+            assert!(text.ends_with(&format!(
+                "Backed up the current cloud index to {}.\nRestored backup {name}.\n",
+                pre.name
+            )));
+        }
+
+        #[test]
+        fn matching_cloud_is_a_noop_with_and_without_yes() {
+            let (_dir, store, _, name) = setup();
+            for yes in [false, true] {
+                let mut cloud = index_cloud("a.png");
+                cloud.delete(CLOUD_FOLDER_FILE).unwrap();
+                cloud.clear_calls();
+                let (result, text) = restore_run(&mut cloud, &store, &name, yes);
+                result.unwrap();
+                assert!(text.contains("  unchanged  CloudInfo.bson\n"));
+                assert!(
+                    text.ends_with("Nothing to do: the cloud index already matches this backup.\n")
+                );
+                assert!(!text.contains("Dry run"));
+                assert!(cloud.mutating_calls().is_empty());
+                assert_eq!(names(&store).as_slice(), std::slice::from_ref(&name));
+            }
+        }
+
+        #[test]
+        fn invalid_backup_content_is_an_error_without_writes() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = BackupStore::new(dir.path());
+            let bad = dir.path().join("20260101T000000Z");
+            fs::create_dir(&bad).unwrap();
+            fs::write(bad.join(CLOUD_INFO_FILE), b"not bson").unwrap();
+            let mut cloud = index_cloud("b.png");
+            cloud.clear_calls();
+            let (result, text) = restore_run(&mut cloud, &store, "20260101T000000Z", true);
+            assert!(matches!(
+                result.unwrap_err(),
+                CommandError::Backup(BackupError::InvalidBackup { .. })
+            ));
+            assert!(text.is_empty());
+            assert!(cloud.mutating_calls().is_empty());
+            assert_eq!(names(&store), ["20260101T000000Z"]);
+        }
+
+        #[test]
+        fn missing_and_invalid_names_are_errors() {
+            let (_dir, store, mut cloud, _) = setup();
+            let (result, text) = restore_run(&mut cloud, &store, "20200101T000000Z", true);
+            assert!(matches!(
+                result.unwrap_err(),
+                CommandError::Backup(BackupError::NotFound { .. })
+            ));
+            assert!(text.is_empty());
+            let (result, _) = restore_run(&mut cloud, &store, "nope", true);
+            assert!(matches!(
+                result.unwrap_err(),
+                CommandError::Backup(BackupError::InvalidName { .. })
+            ));
+        }
+
+        #[test]
+        fn backup_dir_prefers_the_explicit_value() {
+            let dir = PathBuf::from("some/where");
+            assert_eq!(backup_dir(Some(dir.clone())).unwrap(), dir);
+        }
+
+        #[test]
+        fn backup_dir_default_ends_with_ttskit_cloud_backups() {
+            // Nothing to check on machines without a local data directory.
+            if let Ok(dir) = backup_dir(None) {
+                let parts: Vec<_> = dir.components().rev().take(2).collect();
+                assert_eq!(parts[0].as_os_str(), "cloud-backups");
+                assert_eq!(parts[1].as_os_str(), "ttskit");
+            }
         }
     }
 }
