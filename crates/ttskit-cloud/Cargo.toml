@@ -12,8 +12,11 @@ workspace = true
 [features]
 default = []
 # Steam Remote Storage backend. Off by default so that builds without it never
-# need the Steamworks SDK or steam_api64.dll. Not implemented yet.
-steam = []
+# need the Steamworks SDK. An executable built with it needs steam_api64.dll
+# next to it at runtime.
+steam = ["dep:steamworks", "dep:steamworks-sys"]
 
 [dependencies]
 thiserror = "2"
+steamworks = { version = "0.13.1", optional = true }
+steamworks-sys = { version = "0.13", optional = true }

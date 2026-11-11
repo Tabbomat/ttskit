@@ -4,12 +4,16 @@
 //! Everything that reads or changes the user's cloud goes through the
 //! [`CloudBackend`] trait. The real backend talks to Steam Remote Storage and
 //! is only built with the `steam` feature, so builds without it never need the
-//! Steamworks SDK or `steam_api64.dll`. Tests use [`MemoryCloud`], an
-//! in-memory backend with failure injection and a call log, and never need
-//! Steam.
+//! Steamworks SDK or `steam_api64.dll`. With the feature, `SteamCloud` is that
+//! backend. Tests use [`MemoryCloud`], an in-memory backend with failure
+//! injection and a call log, and never need Steam.
 
 mod backend;
 mod memory;
+#[cfg(feature = "steam")]
+mod steam;
 
 pub use backend::{CloudBackend, CloudError, CloudFile, Op, Quota, UgcHandle};
 pub use memory::{Call, MemoryCloud};
+#[cfg(feature = "steam")]
+pub use steam::{SteamCloud, TTS_APP_ID};
