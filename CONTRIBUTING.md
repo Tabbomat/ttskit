@@ -17,6 +17,14 @@ cargo test --workspace
 Tests must not need Steam or a running Tabletop Simulator. Code that talks to
 either goes behind a trait so the tests can use a mock.
 
+## Cloud code
+
+- Steam Cloud code lives in `ttskit-cloud`, behind the `CloudBackend` trait.
+- The Steam backend is behind the `steam` Cargo feature, which is off by
+  default, so default builds never need the Steamworks SDK or `steam_api64.dll`.
+- Tests use `ttskit_cloud::MemoryCloud`, which also supports failure injection
+  and a call log.
+
 ## Test fixtures
 
 ### Policy
