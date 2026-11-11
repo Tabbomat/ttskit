@@ -1,0 +1,249 @@
+{
+  "SaveName": "Custom Assets Test Save",
+  "GameMode": "Synthetic",
+  "Date": "1/1/2000 12:00:00 AM",
+  "VersionNumber": "v0.0.0",
+  "GameType": "Game",
+  "GameComplexity": "",
+  "Tags": [],
+  "Gravity": 0.5,
+  "PlayArea": 0.5,
+  "Table": "Table_RPG",
+  "Sky": "Sky_Museum",
+  "Note": "",
+  "TabStates": {},
+  "LuaScript": "",
+  "LuaScriptState": "",
+  "XmlUI": "",
+  "SkyURL": "https://example.com/sky.jpg",
+  "TableURL": "https://example.com/table.jpg",
+  "CustomUIAssets": [
+    {
+      "Type": 0,
+      "Name": "logo",
+      "URL": "https://example.com/ui/logo.png"
+    },
+    {
+      "Type": 1,
+      "Name": "font",
+      "URL": "https://example.com/ui/font.ttf"
+    }
+  ],
+  "MusicPlayer": {
+    "CurrentAudioTitle": "Synthetic Song",
+    "CurrentAudioURL": "https://example.com/audio/song.mp3",
+    "AudioLibrary": [
+      {
+        "Item1": "https://example.com/audio/song.mp3",
+        "Item2": "Synthetic Song"
+      },
+      {
+        "Item1": "https://example.com/audio/loop.ogg",
+        "Item2": "Synthetic Loop"
+      }
+    ]
+  },
+  "ObjectStates": [
+    {
+      "GUID": "img001",
+      "Name": "Custom_Image",
+      "Nickname": "Image",
+      "Description": "",
+      "Transform": {
+        "posX": 1.0,
+        "posY": 1.0,
+        "posZ": 0.0,
+        "rotX": 0.0,
+        "rotY": 0.0,
+        "rotZ": 0.0,
+        "scaleX": 1.0,
+        "scaleY": 1.0,
+        "scaleZ": 1.0
+      },
+      "Locked": false,
+      "LuaScript": "",
+      "LuaScriptState": "",
+      "XmlUI": "",
+      "CustomImage": {
+        "ImageURL": "https://example.com/image.png",
+        "ImageSecondaryURL": "https://example.com/image_back.png",
+        "ImageScalar": 1.0,
+        "WidthScale": 0.0,
+        "CustomTile": {
+          "Type": 0,
+          "Thickness": 0.2,
+          "Stackable": false,
+          "Stretch": true
+        }
+      }
+    },
+    {
+      "GUID": "mdl001",
+      "Name": "Custom_Model",
+      "Nickname": "Model",
+      "Description": "",
+      "Transform": {
+        "posX": 2.0,
+        "posY": 1.0,
+        "posZ": 0.0,
+        "rotX": 0.0,
+        "rotY": 0.0,
+        "rotZ": 0.0,
+        "scaleX": 1.0,
+        "scaleY": 1.0,
+        "scaleZ": 1.0
+      },
+      "Locked": false,
+      "LuaScript": "",
+      "LuaScriptState": "",
+      "XmlUI": "",
+      "CustomMesh": {
+        "MeshURL": "https://example.com/model.obj",
+        "DiffuseURL": "https://example.com/model_d.png",
+        "NormalURL": "https://example.com/model_n.png",
+        "ColliderURL": "https://example.com/model_c.obj",
+        "Convex": true,
+        "MaterialIndex": 1,
+        "TypeIndex": 0,
+        "CustomShader": {
+          "SpecularColor": {
+            "r": 1.0,
+            "g": 1.0,
+            "b": 1.0
+          },
+          "SpecularIntensity": 0.1,
+          "SpecularSharpness": 3.0,
+          "FresnelStrength": 0.0
+        },
+        "CastShadows": true
+      }
+    },
+    {
+      "GUID": "abd001",
+      "Name": "Custom_Assetbundle",
+      "Nickname": "Assetbundle",
+      "Description": "",
+      "Transform": {
+        "posX": 3.0,
+        "posY": 1.0,
+        "posZ": 0.0,
+        "rotX": 0.0,
+        "rotY": 0.0,
+        "rotZ": 0.0,
+        "scaleX": 1.0,
+        "scaleY": 1.0,
+        "scaleZ": 1.0
+      },
+      "Locked": false,
+      "LuaScript": "",
+      "LuaScriptState": "",
+      "XmlUI": "",
+      "CustomAssetbundle": {
+        "AssetbundleURL": "https://example.com/bundle.unity3d",
+        "AssetbundleSecondaryURL": "",
+        "MaterialIndex": 0,
+        "TypeIndex": 0,
+        "LoopingEffectIndex": 0
+      }
+    },
+    {
+      "GUID": "pdf001",
+      "Name": "Custom_PDF",
+      "Nickname": "PDF",
+      "Description": "",
+      "Transform": {
+        "posX": 4.0,
+        "posY": 1.0,
+        "posZ": 0.0,
+        "rotX": 0.0,
+        "rotY": 0.0,
+        "rotZ": 0.0,
+        "scaleX": 1.0,
+        "scaleY": 1.0,
+        "scaleZ": 1.0
+      },
+      "Locked": false,
+      "LuaScript": "",
+      "LuaScriptState": "",
+      "XmlUI": "",
+      "CustomPDF": {
+        "PDFUrl": "https://example.com/rules.pdf",
+        "PDFPassword": "",
+        "PDFPage": 0,
+        "PDFPageOffset": 0
+      }
+    },
+    {
+      "GUID": "cdk001",
+      "Name": "DeckCustom",
+      "Nickname": "Custom deck",
+      "Description": "",
+      "Transform": {
+        "posX": 5.0,
+        "posY": 1.0,
+        "posZ": 0.0,
+        "rotX": 0.0,
+        "rotY": 0.0,
+        "rotZ": 0.0,
+        "scaleX": 1.0,
+        "scaleY": 1.0,
+        "scaleZ": 1.0
+      },
+      "Locked": false,
+      "LuaScript": "",
+      "LuaScriptState": "",
+      "XmlUI": "",
+      "DeckIDs": [
+        300,
+        301
+      ],
+      "CustomDeck": {
+        "1": {
+          "FaceURL": "https://steamusercontent-a.akamaihd.net/ugc/0000000000000000000/0000000000000000000000000000000000000000/",
+          "BackURL": "http://cloud-3.steamusercontent.com/ugc/000000000000000000/00000000000000000000000000000000000000AA/",
+          "NumWidth": 10,
+          "NumHeight": 7,
+          "BackIsHidden": true,
+          "UniqueBack": false,
+          "Type": 0
+        }
+      },
+      "ContainedObjects": [
+        {
+          "GUID": "c01000",
+          "Name": "CardCustom",
+          "Nickname": "Card 300",
+          "CardID": 300,
+          "CustomDeck": {
+            "1": {
+              "FaceURL": "https://steamusercontent-a.akamaihd.net/ugc/0000000000000000000/0000000000000000000000000000000000000000/",
+              "BackURL": "http://cloud-3.steamusercontent.com/ugc/000000000000000000/00000000000000000000000000000000000000AA/",
+              "NumWidth": 10,
+              "NumHeight": 7,
+              "BackIsHidden": true,
+              "UniqueBack": false,
+              "Type": 0
+            }
+          }
+        },
+        {
+          "GUID": "c01001",
+          "Name": "CardCustom",
+          "Nickname": "Card 301",
+          "CardID": 301,
+          "CustomDeck": {
+            "1": {
+              "FaceURL": "https://steamusercontent-a.akamaihd.net/ugc/0000000000000000000/0000000000000000000000000000000000000000/",
+              "BackURL": "http://cloud-3.steamusercontent.com/ugc/000000000000000000/00000000000000000000000000000000000000AA/",
+              "NumWidth": 10,
+              "NumHeight": 7,
+              "BackIsHidden": true,
+              "UniqueBack": false,
+              "Type": 0
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

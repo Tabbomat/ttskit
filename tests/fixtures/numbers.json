@@ -1,0 +1,96 @@
+{
+  "SaveName": "Numbers Test Save",
+  "GameMode": "Synthetic",
+  "Date": "1/1/2000 12:00:00 AM",
+  "VersionNumber": "v0.0.0",
+  "GameType": "Game",
+  "GameComplexity": "",
+  "Tags": [],
+  "Gravity": 0.5,
+  "PlayArea": 1.0,
+  "Table": "Table_RPG",
+  "Sky": "Sky_Museum",
+  "Note": "",
+  "TabStates": {},
+  "LuaScript": "",
+  "LuaScriptState": "",
+  "XmlUI": "",
+  "ObjectStates": [
+    {
+      "GUID": "num001",
+      "Name": "Custom_Token",
+      "Nickname": "Floats",
+      "Description": "",
+      "Transform": {
+        "posX": 1.0,
+        "posY": 1E-05,
+        "posZ": -0.0,
+        "rotX": -5.039668E-05,
+        "rotY": 179.999985,
+        "rotZ": 0.0,
+        "scaleX": 0.333333343,
+        "scaleY": 1E+20,
+        "scaleZ": 1.0
+      },
+      "Locked": false,
+      "LuaScript": "",
+      "LuaScriptState": "",
+      "XmlUI": "",
+      "Floats": [
+        0.0,
+        -0.0,
+        1.0,
+        1E-05,
+        1E+20,
+        -1.5,
+        0.12345678901234567890123
+      ],
+      "Nested": {
+        "Deep": {
+          "Values": [
+            0,
+            -7,
+            0.5,
+            [
+              2.5E-10,
+              -3.0E+15
+            ]
+          ]
+        }
+      }
+    },
+    {
+      "GUID": "num002",
+      "Name": "Custom_Token",
+      "Nickname": "Integers",
+      "Description": "",
+      "Transform": {
+        "posX": -7,
+        "posY": 0,
+        "posZ": -1.5,
+        "rotX": -5.039668E-05,
+        "rotY": 179.999985,
+        "rotZ": 0.0,
+        "scaleX": 0.333333343,
+        "scaleY": 1E+20,
+        "scaleZ": 1.0
+      },
+      "Locked": false,
+      "LuaScript": "",
+      "LuaScriptState": "",
+      "XmlUI": "",
+      "Big": [
+        9223372036854775807,
+        9223372036854775808,
+        18446744073709551615,
+        18446744073709551616,
+        12345678901234567890123,
+        -9223372036854775808,
+        -9223372036854775809
+      ],
+      "LongDecimal": 0.12345678901234567890123,
+      "Negative": -7,
+      "Zero": 0
+    }
+  ]
+}

@@ -1,0 +1,254 @@
+{
+  "SaveName": "Containers Test Save",
+  "GameMode": "Synthetic",
+  "Date": "1/1/2000 12:00:00 AM",
+  "VersionNumber": "v0.0.0",
+  "GameType": "Game",
+  "GameComplexity": "",
+  "Tags": [],
+  "Gravity": 0.5,
+  "PlayArea": 0.5,
+  "Table": "Table_RPG",
+  "Sky": "Sky_Museum",
+  "Note": "",
+  "TabStates": {},
+  "LuaScript": "",
+  "LuaScriptState": "",
+  "XmlUI": "",
+  "ObjectStates": [
+    {
+      "GUID": "bag001",
+      "Name": "Bag",
+      "Nickname": "Outer bag",
+      "Description": "",
+      "Transform": {
+        "posX": -3.0,
+        "posY": 1.5,
+        "posZ": 2.0,
+        "rotX": 0.0,
+        "rotY": 0.0,
+        "rotZ": 0.0,
+        "scaleX": 1.0,
+        "scaleY": 1.0,
+        "scaleZ": 1.0
+      },
+      "Locked": false,
+      "LuaScript": "",
+      "LuaScriptState": "",
+      "XmlUI": "",
+      "ContainedObjects": [
+        {
+          "GUID": "bag002",
+          "Name": "Bag",
+          "Nickname": "Middle bag",
+          "Description": "",
+          "Locked": false,
+          "LuaScript": "",
+          "LuaScriptState": "",
+          "XmlUI": "",
+          "ContainedObjects": [
+            {
+              "GUID": "bag003",
+              "Name": "Bag",
+              "Nickname": "Innermost bag",
+              "Description": "",
+              "Locked": false,
+              "LuaScript": "",
+              "LuaScriptState": "",
+              "XmlUI": "",
+              "ContainedObjects": [
+                {
+                  "GUID": "leaf01",
+                  "Name": "Custom_Token",
+                  "Nickname": "Leaf token",
+                  "Description": "",
+                  "Locked": false,
+                  "LuaScript": "",
+                  "LuaScriptState": "",
+                  "XmlUI": "",
+                  "CustomImage": {
+                    "ImageURL": "https://example.com/token.png"
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "GUID": "deck01",
+      "Name": "DeckCustom",
+      "Nickname": "Top level deck",
+      "Description": "",
+      "Transform": {
+        "posX": 4.0,
+        "posY": 1.0,
+        "posZ": 0.0,
+        "rotX": 0.0,
+        "rotY": 180.0,
+        "rotZ": 0.0,
+        "scaleX": 1.0,
+        "scaleY": 1.0,
+        "scaleZ": 1.0
+      },
+      "Locked": false,
+      "LuaScript": "",
+      "LuaScriptState": "",
+      "XmlUI": "",
+      "DeckIDs": [
+        100,
+        101,
+        102
+      ],
+      "CustomDeck": {
+        "1": {
+          "FaceURL": "https://steamusercontent-a.akamaihd.net/ugc/0000000000000000000/0000000000000000000000000000000000000000/",
+          "BackURL": "http://cloud-3.steamusercontent.com/ugc/000000000000000000/00000000000000000000000000000000000000AA/",
+          "NumWidth": 10,
+          "NumHeight": 7,
+          "BackIsHidden": true,
+          "UniqueBack": false,
+          "Type": 0
+        }
+      },
+      "ContainedObjects": [
+        {
+          "GUID": "c01000",
+          "Name": "CardCustom",
+          "Nickname": "Card 100",
+          "CardID": 100,
+          "CustomDeck": {
+            "1": {
+              "FaceURL": "https://steamusercontent-a.akamaihd.net/ugc/0000000000000000000/0000000000000000000000000000000000000000/",
+              "BackURL": "http://cloud-3.steamusercontent.com/ugc/000000000000000000/00000000000000000000000000000000000000AA/",
+              "NumWidth": 10,
+              "NumHeight": 7,
+              "BackIsHidden": true,
+              "UniqueBack": false,
+              "Type": 0
+            }
+          }
+        },
+        {
+          "GUID": "c01001",
+          "Name": "CardCustom",
+          "Nickname": "Card 101",
+          "CardID": 101,
+          "CustomDeck": {
+            "1": {
+              "FaceURL": "https://steamusercontent-a.akamaihd.net/ugc/0000000000000000000/0000000000000000000000000000000000000000/",
+              "BackURL": "http://cloud-3.steamusercontent.com/ugc/000000000000000000/00000000000000000000000000000000000000AA/",
+              "NumWidth": 10,
+              "NumHeight": 7,
+              "BackIsHidden": true,
+              "UniqueBack": false,
+              "Type": 0
+            }
+          }
+        },
+        {
+          "GUID": "c01002",
+          "Name": "CardCustom",
+          "Nickname": "Card 102",
+          "CardID": 102,
+          "CustomDeck": {
+            "1": {
+              "FaceURL": "https://steamusercontent-a.akamaihd.net/ugc/0000000000000000000/0000000000000000000000000000000000000000/",
+              "BackURL": "http://cloud-3.steamusercontent.com/ugc/000000000000000000/00000000000000000000000000000000000000AA/",
+              "NumWidth": 10,
+              "NumHeight": 7,
+              "BackIsHidden": true,
+              "UniqueBack": false,
+              "Type": 0
+            }
+          }
+        }
+      ]
+    },
+    {
+      "GUID": "bag004",
+      "Name": "Bag",
+      "Nickname": "Deck bag",
+      "Description": "",
+      "Transform": {
+        "posX": 6.0,
+        "posY": 1.5,
+        "posZ": 2.0,
+        "rotX": 0.0,
+        "rotY": 0.0,
+        "rotZ": 0.0,
+        "scaleX": 1.0,
+        "scaleY": 1.0,
+        "scaleZ": 1.0
+      },
+      "Locked": false,
+      "LuaScript": "",
+      "LuaScriptState": "",
+      "XmlUI": "",
+      "ContainedObjects": [
+        {
+          "GUID": "deck02",
+          "Name": "DeckCustom",
+          "Nickname": "Deck in a bag",
+          "Description": "",
+          "Locked": false,
+          "LuaScript": "",
+          "LuaScriptState": "",
+          "XmlUI": "",
+          "DeckIDs": [
+            200,
+            201
+          ],
+          "CustomDeck": {
+            "1": {
+              "FaceURL": "https://steamusercontent-a.akamaihd.net/ugc/0000000000000000000/0000000000000000000000000000000000000000/",
+              "BackURL": "http://cloud-3.steamusercontent.com/ugc/000000000000000000/00000000000000000000000000000000000000AA/",
+              "NumWidth": 10,
+              "NumHeight": 7,
+              "BackIsHidden": true,
+              "UniqueBack": false,
+              "Type": 0
+            }
+          },
+          "ContainedObjects": [
+            {
+              "GUID": "c02000",
+              "Name": "CardCustom",
+              "Nickname": "Card 200",
+              "CardID": 200,
+              "CustomDeck": {
+                "1": {
+                  "FaceURL": "https://steamusercontent-a.akamaihd.net/ugc/0000000000000000000/0000000000000000000000000000000000000000/",
+                  "BackURL": "http://cloud-3.steamusercontent.com/ugc/000000000000000000/00000000000000000000000000000000000000AA/",
+                  "NumWidth": 10,
+                  "NumHeight": 7,
+                  "BackIsHidden": true,
+                  "UniqueBack": false,
+                  "Type": 0
+                }
+              }
+            },
+            {
+              "GUID": "c02001",
+              "Name": "CardCustom",
+              "Nickname": "Card 201",
+              "CardID": 201,
+              "CustomDeck": {
+                "1": {
+                  "FaceURL": "https://steamusercontent-a.akamaihd.net/ugc/0000000000000000000/0000000000000000000000000000000000000000/",
+                  "BackURL": "http://cloud-3.steamusercontent.com/ugc/000000000000000000/00000000000000000000000000000000000000AA/",
+                  "NumWidth": 10,
+                  "NumHeight": 7,
+                  "BackIsHidden": true,
+                  "UniqueBack": false,
+                  "Type": 0
+                }
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

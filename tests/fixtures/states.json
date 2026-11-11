@@ -1,0 +1,163 @@
+{
+  "SaveName": "States Test Save",
+  "GameMode": "Synthetic",
+  "Date": "1/1/2000 12:00:00 AM",
+  "VersionNumber": "v0.0.0",
+  "GameType": "Game",
+  "GameComplexity": "",
+  "Tags": [],
+  "Gravity": 0.5,
+  "PlayArea": 0.5,
+  "Table": "Table_RPG",
+  "Sky": "Sky_Museum",
+  "Note": "",
+  "TabStates": {},
+  "LuaScript": "",
+  "LuaScriptState": "",
+  "XmlUI": "",
+  "ObjectStates": [
+    {
+      "GUID": "sta001",
+      "Name": "Custom_Model",
+      "Nickname": "State one",
+      "Description": "",
+      "Transform": {
+        "posX": 1.0,
+        "posY": 1.0,
+        "posZ": 1.0,
+        "rotX": 0.0,
+        "rotY": 0.0,
+        "rotZ": 0.0,
+        "scaleX": 1.0,
+        "scaleY": 1.0,
+        "scaleZ": 1.0
+      },
+      "Locked": false,
+      "LuaScript": "-- state one\r\nfunction onLoad() print(1) end",
+      "LuaScriptState": "{\"s\":1}",
+      "XmlUI": "",
+      "States": {
+        "2": {
+          "GUID": "sta002",
+          "Name": "Custom_Model",
+          "Nickname": "State two",
+          "Description": "",
+          "Transform": {
+            "posX": 0.0,
+            "posY": 0.0,
+            "posZ": 0.0,
+            "rotX": 0.0,
+            "rotY": 0.0,
+            "rotZ": 0.0,
+            "scaleX": 1.0,
+            "scaleY": 1.0,
+            "scaleZ": 1.0
+          },
+          "Locked": false,
+          "LuaScript": "-- state two",
+          "LuaScriptState": "{\"s\":2}",
+          "XmlUI": ""
+        },
+        "3": {
+          "GUID": "sta003",
+          "Name": "Custom_Model",
+          "Nickname": "State three",
+          "Description": "",
+          "Transform": {
+            "posX": 0.0,
+            "posY": 0.0,
+            "posZ": 0.0,
+            "rotX": 0.0,
+            "rotY": 0.0,
+            "rotZ": 0.0,
+            "scaleX": 1.0,
+            "scaleY": 1.0,
+            "scaleZ": 1.0
+          },
+          "Locked": false,
+          "LuaScript": "-- state three\r\nreturn 3",
+          "LuaScriptState": "",
+          "XmlUI": ""
+        }
+      }
+    },
+    {
+      "GUID": "sta010",
+      "Name": "Custom_Model",
+      "Nickname": "Stateful chest",
+      "Description": "",
+      "Transform": {
+        "posX": -2.0,
+        "posY": 1.0,
+        "posZ": 1.0,
+        "rotX": 0.0,
+        "rotY": 0.0,
+        "rotZ": 0.0,
+        "scaleX": 1.0,
+        "scaleY": 1.0,
+        "scaleZ": 1.0
+      },
+      "Locked": false,
+      "LuaScript": "",
+      "LuaScriptState": "",
+      "XmlUI": "",
+      "States": {
+        "2": {
+          "GUID": "sta011",
+          "Name": "Bag",
+          "Nickname": "Opened chest",
+          "Description": "",
+          "Transform": {
+            "posX": 0.0,
+            "posY": 0.0,
+            "posZ": 0.0,
+            "rotX": 0.0,
+            "rotY": 0.0,
+            "rotZ": 0.0,
+            "scaleX": 1.0,
+            "scaleY": 1.0,
+            "scaleZ": 1.0
+          },
+          "Locked": false,
+          "LuaScript": "-- chest open",
+          "LuaScriptState": "{\"open\":true}",
+          "XmlUI": "",
+          "ContainedObjects": [
+            {
+              "GUID": "inn001",
+              "Name": "Bag",
+              "Nickname": "State bag contents",
+              "Description": "",
+              "Locked": false,
+              "LuaScript": "",
+              "LuaScriptState": "",
+              "XmlUI": "",
+              "ContainedObjects": [
+                {
+                  "GUID": "inn002",
+                  "Name": "Custom_Token",
+                  "Nickname": "Coin",
+                  "Description": "",
+                  "Locked": false,
+                  "LuaScript": "",
+                  "LuaScriptState": "",
+                  "XmlUI": ""
+                }
+              ]
+            },
+            {
+              "GUID": "inn003",
+              "Name": "Custom_Token",
+              "Nickname": "Gem",
+              "Description": "",
+              "Locked": false,
+              "LuaScript": "",
+              "LuaScriptState": "",
+              "XmlUI": ""
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

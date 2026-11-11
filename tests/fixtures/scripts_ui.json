@@ -1,0 +1,95 @@
+{
+  "SaveName": "Scripts and UI Test Save",
+  "GameMode": "Synthetic",
+  "Date": "1/1/2000 12:00:00 AM",
+  "VersionNumber": "v0.0.0",
+  "GameType": "Game",
+  "GameComplexity": "",
+  "Tags": [],
+  "Gravity": 0.5,
+  "PlayArea": 0.5,
+  "Table": "Table_RPG",
+  "Sky": "Sky_Museum",
+  "Note": "",
+  "TabStates": {},
+  "LuaScript": "-- require-like: #include lib/common\r\n--[[ require(\"lib.common\") ]]\r\nlocal M = {}\r\nfunction onLoad(saved)\r\n\tprint(\"Say \\\"hi\\\" to C:\\\\temp\\\\x\")\r\n\tif saved ~= '' then\r\n\t\tM.data = JSON.decode(saved)\r\n\tend\r\nend\r\nfunction onSave()\r\n\treturn JSON.encode(M.data or {})\r\nend",
+  "LuaScriptState": "{\"round\":3,\"players\":[\"White\",\"Red\"],\"note\":\"a \\\"quoted\\\" \\\\ value\"}",
+  "XmlUI": "<Defaults>\r\n  <Text color=\"#FFFFFF\" fontSize=\"18\" />\r\n  <Button class=\"big\" width=\"200\" height=\"60\" />\r\n</Defaults>\r\n<Panel id=\"main\" class=\"root\" active=\"true\" width=\"400\" height=\"300\" color=\"rgba(0,0,0,0.5)\">\r\n  <VerticalLayout padding=\"10 10 10 10\" spacing=\"5\">\r\n    <Text id=\"title\">Rock &amp; Roll</Text>\r\n    <Button id=\"go\" class=\"big\" onClick=\"onGo\">Go &amp; win</Button>\r\n  </VerticalLayout>\r\n</Panel>",
+  "CustomUIAssets": [
+    {
+      "Type": 0,
+      "Name": "icon_a",
+      "URL": "https://example.com/ui/icon_a.png"
+    },
+    {
+      "Type": 0,
+      "Name": "icon_b",
+      "URL": "https://steamusercontent-a.akamaihd.net/ugc/0000000000000000000/0000000000000000000000000000000000000000/"
+    }
+  ],
+  "ObjectStates": [
+    {
+      "GUID": "scr001",
+      "Name": "Custom_Model",
+      "Nickname": "Scripted with UI",
+      "Description": "",
+      "Transform": {
+        "posX": 1.0,
+        "posY": 1.0,
+        "posZ": 1.0,
+        "rotX": 0.0,
+        "rotY": 0.0,
+        "rotZ": 0.0,
+        "scaleX": 1.0,
+        "scaleY": 1.0,
+        "scaleZ": 1.0
+      },
+      "Locked": false,
+      "LuaScript": "function onLoad()\r\n\tself.UI.setValue(\"t\", \"x\")\r\nend",
+      "LuaScriptState": "{\"clicks\":2}",
+      "XmlUI": "<Panel><Text id=\"t\" fontSize=\"12\">Hi &amp; bye</Text></Panel>"
+    },
+    {
+      "GUID": "scr002",
+      "Name": "Bag",
+      "Nickname": "Script only",
+      "Description": "",
+      "Transform": {
+        "posX": 2.0,
+        "posY": 1.0,
+        "posZ": 1.0,
+        "rotX": 0.0,
+        "rotY": 0.0,
+        "rotZ": 0.0,
+        "scaleX": 1.0,
+        "scaleY": 1.0,
+        "scaleZ": 1.0
+      },
+      "Locked": false,
+      "LuaScript": "-- only a script\r\n",
+      "LuaScriptState": "",
+      "XmlUI": ""
+    },
+    {
+      "GUID": "scr003",
+      "Name": "Bag",
+      "Nickname": "No script",
+      "Description": "",
+      "Transform": {
+        "posX": 3.0,
+        "posY": 1.0,
+        "posZ": 1.0,
+        "rotX": 0.0,
+        "rotY": 0.0,
+        "rotZ": 0.0,
+        "scaleX": 1.0,
+        "scaleY": 1.0,
+        "scaleZ": 1.0
+      },
+      "Locked": false,
+      "LuaScript": "",
+      "LuaScriptState": "",
+      "XmlUI": ""
+    }
+  ]
+}
