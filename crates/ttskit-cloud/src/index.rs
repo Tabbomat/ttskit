@@ -83,6 +83,19 @@ fn bson_err(file: &'static str, e: impl fmt::Display) -> IndexError {
     }
 }
 
+/// The non-empty levels of a folder path. Both `\` (what the game writes)
+/// and `/` separate levels.
+fn folder_segments(path: &str) -> impl Iterator<Item = &str> {
+    path.split(['\\', '/']).filter(|s| !s.is_empty())
+}
+
+/// Normalizes a folder path for display and comparison: levels are
+/// separated by `\` or `/`, empty levels are dropped, and the result is
+/// joined with `/`. The root is the empty string.
+pub fn normalize_folder(path: &str) -> String {
+    folder_segments(path).collect::<Vec<_>>().join("/")
+}
+
 /// One file in `CloudInfo.bson`.
 ///
 /// Fields the game writes that this type does not know are kept and written
@@ -99,7 +112,8 @@ pub struct IndexEntry {
     pub size: Option<u64>,
     /// Date as the game wrote it; kept verbatim.
     pub date: Option<String>,
-    /// Folder path separated by `/`; empty for the root.
+    /// Folder path as the game wrote it; empty for the root. The game
+    /// separates levels with `\`; see [`normalize_folder`].
     pub folder: String,
     raw: Document,
 }
@@ -322,7 +336,7 @@ impl CloudIndex {
     /// Every folder that exists, root excluded: the listed folders, the
     /// folders of all entries, and all their ancestors.
     ///
-    /// Paths are normalized (empty segments dropped), deduplicated exactly
+    /// Paths are normalized with [`normalize_folder`], deduplicated exactly
     /// and sorted by ASCII-lowercase, then by original spelling.
     pub fn all_folders(&self) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
@@ -333,7 +347,7 @@ impl CloudIndex {
             .chain(self.entries.iter().map(|e| e.folder.as_str()));
         for path in paths {
             let mut current = String::new();
-            for seg in path.split('/').filter(|s| !s.is_empty()) {
+            for seg in folder_segments(path) {
                 if !current.is_empty() {
                     current.push('/');
                 }

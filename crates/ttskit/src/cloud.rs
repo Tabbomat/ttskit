@@ -8,7 +8,7 @@ use std::time::SystemTime;
 use serde_json::json;
 use ttskit_cloud::{
     Backup, BackupError, BackupStore, CloudBackend, CloudError, CloudIndex, IndexError,
-    RestoreAction, is_game_internal, plan_restore, restore,
+    RestoreAction, is_game_internal, normalize_folder, plan_restore, restore,
 };
 
 /// Errors of the `cloud` subcommands.
@@ -146,14 +146,6 @@ struct FileRow {
     status: Status,
 }
 
-/// Splits on `/`, drops empty segments and joins the rest again.
-fn normalize(path: &str) -> String {
-    path.split('/')
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join("/")
-}
-
 fn lower_cmp(a: &str, b: &str) -> std::cmp::Ordering {
     a.to_ascii_lowercase()
         .cmp(&b.to_ascii_lowercase())
@@ -187,7 +179,7 @@ pub fn list(
     let all_folders = index.all_folders();
 
     // Lowercase filter path; `None` shows everything.
-    let filter = match folder.map(normalize) {
+    let filter = match folder.map(normalize_folder) {
         Some(f) if !f.is_empty() => {
             let f = f.to_ascii_lowercase();
             if !all_folders.iter().any(|a| a.eq_ignore_ascii_case(&f)) {
@@ -221,7 +213,7 @@ pub fn list(
         let key = entry.key.to_ascii_lowercase();
         let found = steam.get(&key).copied();
         referenced.insert(key);
-        let entry_folder = normalize(&entry.folder);
+        let entry_folder = normalize_folder(&entry.folder);
         if !in_filter(&entry_folder) {
             continue;
         }
@@ -648,6 +640,57 @@ mod tests {
                 "{spelling}"
             );
         }
+    }
+
+    /// The game separates folder levels with `\`.
+    fn backslash_example() -> MemoryCloud {
+        let mut index = CloudIndex::empty();
+        index.folders = vec!["Game".into(), "Game\\dice".into(), "Game\\token".into()];
+        index.entries = vec![
+            entry("AA_die.obj", "die.obj", Some(3), "Game\\dice"),
+            entry("BB_vp.jpg", "vp.jpg", Some(5), "Game\\token"),
+        ];
+        seed(
+            MemoryCloud::new()
+                .with_file("AA_die.obj", vec![0; 3])
+                .with_file("BB_vp.jpg", vec![0; 5]),
+            &index,
+        )
+    }
+
+    #[test]
+    fn backslash_folders_are_nested() {
+        assert_eq!(
+            run(&backslash_example(), None, false),
+            [
+                "Game/",
+                "  dice/",
+                "    die.obj  3",
+                "  token/",
+                "    vp.jpg   5",
+                "2 files in 3 folders, 8 bytes",
+                "",
+            ]
+            .join("\n")
+        );
+        let value = json_of(&backslash_example(), None);
+        assert_eq!(value["folders"], json!(["Game", "Game/dice", "Game/token"]));
+        assert_eq!(value["files"][0]["folder"], "Game/dice");
+    }
+
+    #[test]
+    fn folder_filter_accepts_either_separator() {
+        let expected = "Game/dice/\n  die.obj  3\n1 file in 1 folder, 3 bytes\n";
+        for spelling in ["game/dice", "Game\\dice", "\\game\\DICE\\"] {
+            assert_eq!(
+                run(&backslash_example(), Some(spelling), false),
+                expected,
+                "{spelling}"
+            );
+        }
+        let text = run(&backslash_example(), Some("game"), false);
+        assert!(text.starts_with("Game/\n  dice/\n"));
+        assert!(text.ends_with("2 files in 3 folders, 8 bytes\n"));
     }
 
     #[test]

@@ -65,8 +65,9 @@ Not in index:
 - `Not in index:` files in the cloud that the game's index does not list, so
   the game does not show them. Files the game uses internally (the index
   files, `WorkshopUpload`, `WorkshopImageUpload.png`) are left out.
-- `--folder F` shows only folder `F` and its subfolders. Folders are separated
-  by `/` and matched case-insensitively.
+- `--folder F` shows only folder `F` and its subfolders. Folders are matched
+  case-insensitively, and levels may be separated by `/` or `\`. The game
+  stores `\`; ttskit shows `/`, also in the JSON output.
 - `--json` prints every folder and file with its cloud file name, download URL,
   date and status (`ok`, `missing` or `unindexed`).
 

@@ -1,7 +1,7 @@
 use bson::{Bson, Document, doc};
 use ttskit_cloud::{
     CLOUD_FOLDER_FILE, CLOUD_INFO_FILE, CloudError, CloudIndex, IndexEntry, IndexError,
-    MemoryCloud, Op, UgcHandle, UgcUrl, is_game_internal,
+    MemoryCloud, Op, UgcHandle, UgcUrl, is_game_internal, normalize_folder,
 };
 
 const SHA: &str = "0123456789ABCDEF0123456789ABCDEF01234567";
@@ -63,6 +63,33 @@ fn parses_entries_and_folders() {
     assert_eq!(e.folder, "x/y");
     assert_eq!(idx.entries[1].folder, "");
     assert_eq!(idx.folders, ["x", "x/y"]);
+}
+
+#[test]
+fn all_folders_splits_on_backslash_as_the_game_writes() {
+    let bytes = info(vec![(
+        key("a"),
+        Bson::Document(doc! { "Folder": "Game\\dice" }),
+    )]);
+    let idx = CloudIndex::decode(
+        Some(&bytes),
+        Some(&folders(&["Game", "Game\\token", "x/y\\z"])),
+    )
+    .unwrap();
+    assert_eq!(
+        idx.all_folders(),
+        ["Game", "Game/dice", "Game/token", "x", "x/y", "x/y/z"]
+    );
+    // The stored strings are kept as the game wrote them.
+    assert_eq!(idx.entries[0].folder, "Game\\dice");
+    assert_eq!(idx.folders[1], "Game\\token");
+}
+
+#[test]
+fn normalize_folder_accepts_both_separators() {
+    assert_eq!(normalize_folder("\\a\\\\b/c/"), "a/b/c");
+    assert_eq!(normalize_folder("\\/"), "");
+    assert_eq!(normalize_folder(""), "");
 }
 
 #[test]

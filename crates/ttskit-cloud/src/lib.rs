@@ -22,7 +22,7 @@ pub use backup::{
 };
 pub use index::{
     CLOUD_FOLDER_FILE, CLOUD_INFO_FILE, CloudIndex, GAME_INTERNAL_FILES, IndexEntry, IndexError,
-    UgcUrl, is_game_internal,
+    UgcUrl, is_game_internal, normalize_folder,
 };
 pub use memory::{Call, MemoryCloud};
 #[cfg(feature = "steam")]
