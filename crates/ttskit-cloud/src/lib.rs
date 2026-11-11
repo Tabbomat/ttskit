@@ -1,0 +1,12 @@
+//! Steam Cloud access for ttskit, an unofficial toolkit for Tabletop Simulator
+//! mod development (not affiliated with Berserk Games).
+//!
+//! Everything that reads or changes the user's cloud goes through the
+//! [`CloudBackend`] trait. The real backend talks to Steam Remote Storage and
+//! is only built with the `steam` feature, so builds without it never need the
+//! Steamworks SDK or `steam_api64.dll`. Tests use an in-memory backend instead
+//! and never need Steam.
+
+mod backend;
+
+pub use backend::{CloudBackend, CloudError, CloudFile, Op, Quota, UgcHandle};

@@ -1,0 +1,19 @@
+[package]
+name = "ttskit-cloud"
+description = "Steam Cloud backend abstraction for ttskit (unofficial Tabletop Simulator tooling)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = []
+# Steam Remote Storage backend. Off by default so that builds without it never
+# need the Steamworks SDK or steam_api64.dll. Not implemented yet.
+steam = []
+
+[dependencies]
+thiserror = "2"

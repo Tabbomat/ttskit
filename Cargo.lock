@@ -263,6 +263,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ttskit-cloud"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+]
+
+[[package]]
 name = "ttskit-core"
 version = "0.1.0"
 dependencies = [
