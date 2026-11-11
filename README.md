@@ -27,6 +27,9 @@ cargo test
 
 Windows is the primary platform at first.
 
+See [CONTRIBUTING](CONTRIBUTING.md) for the checks to run, the test fixture
+policy and how to test against real saves locally.
+
 ## License
 
 [MIT](LICENSE)
