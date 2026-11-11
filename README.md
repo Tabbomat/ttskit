@@ -39,11 +39,43 @@ the `steam` feature:
 cargo build --release --features steam
 ttskit cloud list
 ttskit cloud list --json
+ttskit cloud list --folder Decks/Old
 ```
 
-`cloud list` prints the files in your Tabletop Simulator Steam Cloud, with
-their sizes and the total. It only reads. Folders (as the game shows them) are
-not listed yet.
+`cloud list` prints the folders and files of your Tabletop Simulator Steam
+Cloud as a tree, the way the game's Cloud Manager shows them, with sizes and
+totals. It only reads.
+
+```
+Decks/
+  Old/
+  back.png    2048
+  front.png  12345
+Tokens/
+  Red/
+    red.png    100  missing
+readme.txt      10
+Not in index:
+  stray.png    512
+5 files in 4 folders, 15015 bytes, 1 missing, 1 not in index
+```
+
+- `missing`: the game's index lists the file, but the file is not in the
+  cloud.
+- `Not in index:` files in the cloud that the game's index does not list, so
+  the game does not show them. Files the game uses internally (the index
+  files, `WorkshopUpload`, `WorkshopImageUpload.png`) are left out.
+- `--folder F` shows only folder `F` and its subfolders. Folders are separated
+  by `/` and matched case-insensitively.
+- `--json` prints every folder and file with its cloud file name, download URL,
+  date and status (`ok`, `missing` or `unindexed`).
+
+The folder tree comes from two index files the game keeps in the cloud,
+`CloudInfo.bson` (one entry per file: name, URL, size, date, folder) and
+`CloudFolder.bson` (the folder list). Cloud files are named
+`<SHA1>_<name>`, where the SHA1 is of the file content. ttskit keeps fields it
+does not know when it reads the index. The format follows the MIT-licensed
+community tool [TTSCloudSync](https://github.com/Chatanga/TTSCloudSync).
 
 Requirements:
 
