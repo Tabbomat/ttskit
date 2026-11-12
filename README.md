@@ -4,9 +4,9 @@ An unofficial command line toolkit (and MCP server) for developing
 [Tabletop Simulator](https://store.steampowered.com/app/286160/Tabletop_Simulator/)
 mods. Not affiliated with or endorsed by Berserk Games.
 
-> **Status:** early development. Only `cloud list`, `cloud upload`,
-> `cloud url` and `cloud restore` work so far; see the issue tracker for the
-> roadmap.
+> **Status:** early development. Only the `cloud` commands (`list`,
+> `upload`, `url`, `delete`, `status` and `restore`) work so far; see the
+> issue tracker for the roadmap.
 
 ## Planned features
 
@@ -148,6 +148,75 @@ Limits: a single file can be at most 100 MiB (the limit of Steam's
 reports and refuses uploads that do not fit, so nothing is changed. If Steam
 refuses a write and the space is short, the error says so.
 
+### Delete
+
+```
+ttskit cloud delete Decks/Old/deck.png          # show what would be deleted
+ttskit cloud delete Decks/Old/deck.png --yes    # delete it
+ttskit cloud delete --folder Decks/Old --yes    # delete a folder and everything below it
+```
+
+`cloud delete NAME` deletes one file from the cloud and removes it from the
+game's index. `NAME` works as in `cloud url`; a file that is in the cloud but
+not in the index (`cloud list` shows it under `Not in index:`) is given by
+its cloud name. `--folder F` deletes every file in `F` and its subfolders and
+removes `F` and the subfolders from the index; the root folder cannot be
+deleted. Deleting the last file of a folder keeps the folder. The game's own
+files (the index files, `WorkshopUpload`, `WorkshopImageUpload.png`) are
+never deleted.
+
+```
+Delete folder Decks/Old (2 files, 2 folders):
+  delete file    Decks/Old/back.png  (<SHA1>_back.png)
+  remove entry   Decks/Old/Sub/gone.png  (<SHA1>_gone.png, file already missing)
+  remove folder  Decks/Old/Sub
+  remove folder  Decks/Old
+warning: 1 file has a download URL; saves that use it will no longer load it
+Dry run: nothing was changed. Run again with --yes to delete.
+```
+
+- Without `--yes` nothing is changed; there is no question to answer.
+- With `--yes` ttskit first backs up the index (also when only a file that
+  is not in the index is deleted), then deletes the cloud files, then
+  updates the index. If it stops part way, running the same command again
+  finishes it.
+- Deleted files are gone for good, and their download URLs stop working.
+- `--json` prints one JSON object with the planned files and folders, and
+  after `--yes` the deleted cloud files and the backup name.
+
+### Status
+
+```
+ttskit cloud status ./assets --folder Decks
+ttskit cloud status ./assets --json
+```
+
+`cloud status DIR` compares a local directory with a cloud folder (`--folder`,
+default the root) and changes nothing. Subdirectories of `DIR` correspond to
+subfolders; files and directories whose name starts with `.` and symbolic
+links are skipped. A local file and a cloud file correspond when they have
+the same folder and name (ignoring case); their content is compared by SHA1,
+which is part of the cloud name, so nothing is downloaded.
+
+```
+Compare ./assets with cloud folder Decks:
+  changed    back.png
+  new        front.png
+  missing    old.png
+  broken     sub/b.png  (cloud file is gone)
+1 new, 1 changed, 1 missing, 1 broken, 3 identical
+```
+
+- `new`: only local. `changed`: both, with different content. `missing`:
+  only in the cloud folder. `identical`: same content (not listed in the
+  text output, only counted). `broken`: same content, but the index entry's
+  cloud file is gone, so the URL no longer works.
+- The folder may not exist in the cloud yet; then every file is `new`.
+- `--json` lists every file with its state, local size and SHA1, cloud name
+  and URL, plus the counts.
+- Exit code: 0 when everything is identical, 2 when anything differs, 1 on
+  errors.
+
 ### Index backups and restore
 
 Before ttskit changes the cloud index, it saves a copy of both index files
@@ -188,8 +257,9 @@ with the game running at its main menu, and the game kept running.
 
 `cloud upload` also works with the game open: an uploaded file appears in
 the open Cloud Manager once it reloads the folder (switch to another folder
-and back). For `cloud url --share` and `cloud restore --yes` this has not
-been checked yet, so close the game first.
+and back). For `cloud url --share`, `cloud delete --yes` and
+`cloud restore --yes` this has not been checked yet, so close the game
+first.
 
 ### Open questions
 
