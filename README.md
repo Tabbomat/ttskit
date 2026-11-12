@@ -255,11 +255,10 @@ made while it runs, or overwrites them, has not been checked yet.
 Yes, for reading. `cloud list` gave the same result with the game closed and
 with the game running at its main menu, and the game kept running.
 
-`cloud upload` also works with the game open: an uploaded file appears in
-the open Cloud Manager once it reloads the folder (switch to another folder
-and back). For `cloud url --share`, `cloud delete --yes` and
-`cloud restore --yes` this has not been checked yet, so close the game
-first.
+`cloud upload` and `cloud delete` also work with the game open: the change
+shows in the open Cloud Manager once it reloads the folder (switch to
+another folder and back). For `cloud url --share` and `cloud restore --yes`
+this has not been checked yet, so close the game first.
 
 ### Open questions
 
