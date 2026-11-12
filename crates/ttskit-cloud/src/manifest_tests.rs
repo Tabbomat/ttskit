@@ -205,6 +205,18 @@ fn upsert_without_path_matches_cloud_path_and_sha1() {
 }
 
 #[test]
+fn contains_cloud_matches_with_or_without_path() {
+    let mut pathless = me(None, "G/a.png", "v1");
+    pathless.sha1 = pathless.sha1.to_lowercase();
+    let m = manifest(vec![pathless, me(Some("b.png"), "G/b.png", "v2")]);
+    assert!(m.contains_cloud("G/a.png", &sha("v1")));
+    assert!(m.contains_cloud("G/b.png", &sha("v2")));
+    assert!(!m.contains_cloud("G/a.png", &sha("v2")));
+    assert!(!m.contains_cloud("G/c.png", &sha("v1")));
+    assert!(!Manifest::default().contains_cloud("G/a.png", &sha("v1")));
+}
+
+#[test]
 fn from_index_cases() {
     let e = ie(7, "abc", "a.png", r"My Game\Boards\");
     let m = ManifestEntry::from_index(&e, Some("a.png".into())).unwrap();

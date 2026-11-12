@@ -1481,7 +1481,7 @@ pub enum ManifestFormat {
     Tsv,
 }
 
-fn load_manifest(path: &Path) -> Result<Manifest, CommandError> {
+pub fn load_manifest(path: &Path) -> Result<Manifest, CommandError> {
     Manifest::load(path).map_err(|e| CommandError::ManifestRead {
         path: path.to_owned(),
         reason: e.to_string(),
@@ -1505,8 +1505,15 @@ pub fn show_manifest(
     Ok(())
 }
 
-/// Lists the asset URLs of the save at `path`, grouped by host. Local only.
-pub fn scan(path: &Path, json: bool, out: &mut dyn io::Write) -> Result<(), CommandError> {
+/// The asset URLs of a save, read once so that the Steam-free part of
+/// `cloud scan` can run before connecting.
+pub struct SaveScan {
+    save: PathBuf,
+    urls: Vec<ttskit_core::AssetUrl>,
+}
+
+/// Reads the save at `path` and walks its asset URLs. Local only.
+pub fn read_scan(path: &Path) -> Result<SaveScan, CommandError> {
     let data = std::fs::read(path).map_err(|source| CommandError::ReadFile {
         path: path.to_owned(),
         source,
@@ -1516,34 +1523,46 @@ pub fn scan(path: &Path, json: bool, out: &mut dyn io::Write) -> Result<(), Comm
             path: path.to_owned(),
             source,
         })?;
-    let urls = save.asset_urls();
-    let classes = [
-        ttskit_core::HostClass::Imgur,
-        ttskit_core::HostClass::SteamUserContent,
-        ttskit_core::HostClass::Other,
-    ];
-    if json {
-        let mut hosts = serde_json::Map::new();
-        for class in classes {
-            let group: Vec<_> = urls
-                .iter()
-                .filter(|u| u.host_class() == class)
-                .map(|u| json!({"url": u.url, "labels": u.labels, "count": u.count}))
-                .collect();
-            hosts.insert(class.as_str().to_owned(), group.into());
-        }
-        let value = json!({
-            "save": path.display().to_string().replace('\\', "/"),
-            "total": urls.len(),
-            "hosts": hosts,
-        });
-        return write_pretty_json(&value, out);
+    Ok(SaveScan {
+        save: path.to_owned(),
+        urls: save.asset_urls(),
+    })
+}
+
+const SCAN_CLASSES: [ttskit_core::HostClass; 3] = [
+    ttskit_core::HostClass::Imgur,
+    ttskit_core::HostClass::SteamUserContent,
+    ttskit_core::HostClass::Other,
+];
+
+fn scan_json(scan: &SaveScan) -> serde_json::Map<String, serde_json::Value> {
+    let mut hosts = serde_json::Map::new();
+    for class in SCAN_CLASSES {
+        let group: Vec<_> = scan
+            .urls
+            .iter()
+            .filter(|u| u.host_class() == class)
+            .map(|u| json!({"url": u.url, "labels": u.labels, "count": u.count}))
+            .collect();
+        hosts.insert(class.as_str().to_owned(), group.into());
     }
+    let mut object = serde_json::Map::new();
+    object.insert(
+        "save".into(),
+        scan.save.display().to_string().replace('\\', "/").into(),
+    );
+    object.insert("total".into(), scan.urls.len().into());
+    object.insert("hosts".into(), hosts.into());
+    object
+}
+
+fn write_scan_text(scan: &SaveScan, out: &mut dyn io::Write) -> Result<(), CommandError> {
+    let urls = &scan.urls;
     if urls.is_empty() {
         writeln!(out, "No asset URLs found.")?;
         return Ok(());
     }
-    for class in classes {
+    for class in SCAN_CLASSES {
         let group: Vec<_> = urls.iter().filter(|u| u.host_class() == class).collect();
         writeln!(out, "{} ({})", class.as_str(), group.len())?;
         for u in group {
@@ -1556,6 +1575,157 @@ pub fn scan(path: &Path, json: bool, out: &mut dyn io::Write) -> Result<(), Comm
     }
     writeln!(out, "{} unique URLs", urls.len())?;
     Ok(())
+}
+
+/// Lists the asset URLs of the save at `path`, grouped by host. Local only.
+pub fn scan(path: &Path, json: bool, out: &mut dyn io::Write) -> Result<(), CommandError> {
+    let scan = read_scan(path)?;
+    if json {
+        return write_pretty_json(&scan_json(&scan).into(), out);
+    }
+    write_scan_text(&scan, out)
+}
+
+/// Prints the scan report of `scan`, then adopts the Steam Cloud files it
+/// refers to into `manifest` (loaded from `manifest_file`) without uploading
+/// anything: each steamusercontent URL that matches a cloud index entry by
+/// handle and SHA1 becomes a path-less manifest entry. Nothing in the cloud is
+/// changed.
+///
+/// URLs of other hosts are ignored. Steam Cloud URLs that match nothing are
+/// reported as unmatched and not adopted. A plan with nothing to add asks
+/// nothing and leaves the file alone. With `--json` only one JSON object is
+/// printed, at the end.
+pub fn scan_adopt(
+    backend: &dyn CloudBackend,
+    scan: &SaveScan,
+    mut manifest: Manifest,
+    manifest_file: &Path,
+    mode: RunMode,
+    confirm: Confirm<'_>,
+    out: &mut dyn io::Write,
+) -> Result<(), CommandError> {
+    let index = CloudIndex::load(backend)?;
+    let indexed: Vec<(Option<UgcUrl>, &ttskit_cloud::IndexEntry)> = index
+        .entries
+        .iter()
+        .map(|e| (e.url.as_deref().and_then(UgcUrl::parse), e))
+        .collect();
+
+    let mut rows: Vec<(&'static str, ManifestEntry)> = Vec::new();
+    let mut unmatched: Vec<&str> = Vec::new();
+    for u in &scan.urls {
+        if u.host_class() != ttskit_core::HostClass::SteamUserContent {
+            continue;
+        }
+        let found = UgcUrl::parse(&u.url).and_then(|parsed| {
+            indexed
+                .iter()
+                .find(|(i, _)| {
+                    i.as_ref().is_some_and(|i| {
+                        i.handle == parsed.handle && i.sha1.eq_ignore_ascii_case(&parsed.sha1)
+                    })
+                })
+                .and_then(|(_, entry)| ManifestEntry::from_index(entry, None))
+        });
+        let Some(entry) = found else {
+            unmatched.push(&u.url);
+            continue;
+        };
+        // Both URL forms of one file lead to the same entry.
+        if rows
+            .iter()
+            .any(|(_, e)| e.cloud_path == entry.cloud_path && e.sha1 == entry.sha1)
+        {
+            continue;
+        }
+        let action = if manifest.contains_cloud(&entry.cloud_path, &entry.sha1) {
+            "unchanged"
+        } else {
+            "add"
+        };
+        rows.push((action, entry));
+    }
+    let added = rows.iter().filter(|(a, _)| *a == "add").count();
+    let unchanged = rows.len() - added;
+    let noop = added == 0;
+
+    if !mode.json {
+        write_scan_text(scan, out)?;
+        let mut buf = Vec::new();
+        writeln!(buf, "Adopt into manifest {}:", manifest_file.display())?;
+        for (action, e) in &rows {
+            writeln!(buf, "  {action:<9}  {}", e.cloud_path)?;
+        }
+        for url in &unmatched {
+            writeln!(buf, "  {:<9}  {url}", "unmatched")?;
+        }
+        writeln!(
+            buf,
+            "{added} add, {unchanged} unchanged, {} unmatched",
+            unmatched.len()
+        )?;
+        if noop {
+            writeln!(buf, "Nothing to do: nothing to add to the manifest.")?;
+        }
+        out.write_all(&buf)?;
+        out.flush()?;
+    }
+
+    let mut done = false;
+    let mut write_error = None;
+    if noop {
+        done = true;
+    } else if let Decision::Go = decide(mode, "Adopt?", confirm, out)? {
+        for (action, e) in &rows {
+            if *action == "add" {
+                manifest.upsert(e.clone());
+            }
+        }
+        match manifest.save(manifest_file) {
+            Ok(()) => {
+                done = true;
+                if !mode.json {
+                    writeln!(out, "Updated manifest {}.", manifest_file.display())?;
+                }
+            }
+            Err(e) => {
+                write_error = Some(CommandError::ManifestWrite {
+                    path: manifest_file.to_owned(),
+                    reason: e.to_string(),
+                });
+            }
+        }
+    }
+
+    if mode.json {
+        let entries: Vec<serde_json::Value> = rows
+            .iter()
+            .map(|(action, e)| {
+                json!({
+                    "action": action,
+                    "cloud_path": e.cloud_path,
+                    "sha1": e.sha1,
+                    "size": e.size,
+                    "url": e.url,
+                })
+            })
+            .collect();
+        let mut object = scan_json(scan);
+        object.insert(
+            "adopt".into(),
+            json!({
+                "manifest": manifest_file.display().to_string(),
+                "dry_run": mode.dry_run,
+                "done": done,
+                "entries": entries,
+                "unmatched": unmatched,
+            }),
+        );
+        write_pretty_json(&object.into(), out)?;
+    }
+    out.flush()?;
+    write_error.map_or(Ok(()), Err)
 }
 
 /// Reads a `filename<TAB>URL` file. It must be UTF-8.
@@ -5187,6 +5357,373 @@ mod tests {
             assert!(err.to_string().contains("bad.json"));
             let err = run(&dir.path().join("none.json"), false).unwrap_err();
             assert!(matches!(err, CommandError::ReadFile { .. }));
+        }
+    }
+    mod scan_adopt_tests {
+        use ttskit_cloud::{IndexEntry, sha1_hex};
+
+        use super::*;
+
+        const YES: RunMode = RunMode {
+            dry_run: false,
+            yes: true,
+            json: false,
+        };
+        const DRY: RunMode = RunMode {
+            dry_run: true,
+            yes: false,
+            json: false,
+        };
+        const ASK: RunMode = RunMode {
+            dry_run: false,
+            yes: false,
+            json: false,
+        };
+        const JSON_YES: RunMode = RunMode {
+            dry_run: false,
+            yes: true,
+            json: true,
+        };
+
+        fn sha(data: &str) -> String {
+            sha1_hex(data.as_bytes())
+        }
+
+        fn index_entry(handle: u64, data: &str, name: &str, folder: &str) -> IndexEntry {
+            IndexEntry::new(
+                format!("{}_{name}", sha(data)),
+                name,
+                Some(format!(
+                    "https://steamusercontent-a.akamaihd.net/ugc/{handle}/{}/",
+                    sha(data)
+                )),
+                Some(data.len() as u64),
+                None,
+                folder,
+            )
+        }
+
+        struct Fixture {
+            dir: tempfile::TempDir,
+            cloud: MemoryCloud,
+            manifest: PathBuf,
+        }
+
+        impl Fixture {
+            fn new(entries: Vec<IndexEntry>) -> Fixture {
+                let dir = tempfile::tempdir().unwrap();
+                let mut index = CloudIndex::empty();
+                index.entries = entries;
+                let cloud = MemoryCloud::new()
+                    .with_file(ttskit_cloud::CLOUD_INFO_FILE, index.encode_info().unwrap())
+                    .with_file(
+                        ttskit_cloud::CLOUD_FOLDER_FILE,
+                        index.encode_folders().unwrap(),
+                    );
+                let manifest = dir.path().join(Manifest::FILE_NAME);
+                Fixture {
+                    dir,
+                    cloud,
+                    manifest,
+                }
+            }
+
+            fn save(&self, urls: &[String]) -> SaveScan {
+                let objects: Vec<_> = urls
+                    .iter()
+                    .map(|u| json!({"Nickname": "x", "CustomImage": {"ImageURL": u}}))
+                    .collect();
+                let path = self.dir.path().join("save.json");
+                std::fs::write(&path, json!({"ObjectStates": objects}).to_string()).unwrap();
+                read_scan(&path).unwrap()
+            }
+        }
+
+        struct Out {
+            result: Result<(), CommandError>,
+            text: String,
+            prompts: usize,
+        }
+
+        fn adopt(fx: &Fixture, scan: &SaveScan, mode: RunMode, answer: bool) -> Out {
+            let mut prompts = 0;
+            let mut confirm = |_: &str| {
+                prompts += 1;
+                Ok(answer)
+            };
+            let mut out = Vec::new();
+            let manifest = load_manifest(&fx.manifest).unwrap();
+            let result = scan_adopt(
+                &fx.cloud,
+                scan,
+                manifest,
+                &fx.manifest,
+                mode,
+                &mut confirm,
+                &mut out,
+            );
+            Out {
+                result,
+                text: String::from_utf8(out).unwrap(),
+                prompts,
+            }
+        }
+
+        fn akamai(handle: u64, data: &str) -> String {
+            format!(
+                "https://steamusercontent-a.akamaihd.net/ugc/{handle}/{}/",
+                sha(data)
+            )
+        }
+
+        fn cloud3(handle: u64, data: &str, slash: &str) -> String {
+            format!(
+                "http://cloud-3.steamusercontent.com/ugc/{handle}/{}{slash}",
+                sha(data)
+            )
+        }
+
+        fn fixture() -> Fixture {
+            Fixture::new(vec![
+                index_entry(11, "one", "one.png", "Game"),
+                index_entry(22, "two", "two.png", ""),
+            ])
+        }
+
+        #[test]
+        fn adopts_matches_in_both_url_forms() {
+            let fx = fixture();
+            let scan = fx.save(&[akamai(11, "one"), cloud3(22, "two", "")]);
+            let r = adopt(&fx, &scan, YES, false);
+            r.result.unwrap();
+            assert_eq!(r.prompts, 0);
+            assert!(r.text.contains("  add        Game/one.png\n"), "{}", r.text);
+            assert!(r.text.contains("  add        two.png\n"), "{}", r.text);
+            assert!(r.text.contains("2 add, 0 unchanged, 0 unmatched\n"));
+            assert!(r.text.contains("Updated manifest "));
+            // The scan report comes first.
+            assert!(r.text.starts_with("steamusercontent") || r.text.starts_with("imgur"));
+            let manifest = Manifest::load(&fx.manifest).unwrap();
+            assert_eq!(
+                manifest.entries,
+                vec![
+                    ManifestEntry {
+                        path: None,
+                        cloud_path: "Game/one.png".into(),
+                        sha1: sha("one"),
+                        size: 3,
+                        url: akamai(11, "one"),
+                    },
+                    ManifestEntry {
+                        path: None,
+                        cloud_path: "two.png".into(),
+                        sha1: sha("two"),
+                        size: 3,
+                        url: akamai(22, "two"),
+                    },
+                ]
+            );
+            assert_eq!(
+                manifest.to_json(),
+                std::fs::read_to_string(&fx.manifest).unwrap()
+            );
+            assert!(fx.cloud.mutating_calls().is_empty());
+        }
+
+        #[test]
+        fn trailing_slash_variants_match() {
+            let fx = fixture();
+            let scan = fx.save(&[
+                akamai(11, "one").trim_end_matches('/').to_owned(),
+                cloud3(22, "two", "/"),
+            ]);
+            adopt(&fx, &scan, YES, false).result.unwrap();
+            assert_eq!(Manifest::load(&fx.manifest).unwrap().entries.len(), 2);
+        }
+
+        #[test]
+        fn both_forms_of_one_file_give_one_entry() {
+            let fx = fixture();
+            let scan = fx.save(&[akamai(11, "one"), cloud3(11, "one", "/")]);
+            let r = adopt(&fx, &scan, YES, false);
+            r.result.unwrap();
+            assert!(r.text.contains("1 add, 0 unchanged, 0 unmatched\n"));
+            assert_eq!(Manifest::load(&fx.manifest).unwrap().entries.len(), 1);
+        }
+
+        #[test]
+        fn rerun_is_unchanged_and_writes_nothing() {
+            let fx = fixture();
+            let scan = fx.save(&[akamai(11, "one")]);
+            adopt(&fx, &scan, YES, false).result.unwrap();
+            let before = std::fs::read(&fx.manifest).unwrap();
+            let modified = std::fs::metadata(&fx.manifest).unwrap().modified().unwrap();
+            let r = adopt(&fx, &scan, ASK, false);
+            r.result.unwrap();
+            assert_eq!(r.prompts, 0);
+            assert!(r.text.contains("  unchanged  Game/one.png\n"), "{}", r.text);
+            assert!(r.text.contains("0 add, 1 unchanged, 0 unmatched\n"));
+            assert!(r.text.contains("Nothing to do"));
+            assert!(!r.text.contains("Updated manifest"));
+            assert_eq!(std::fs::read(&fx.manifest).unwrap(), before);
+            assert_eq!(
+                std::fs::metadata(&fx.manifest).unwrap().modified().unwrap(),
+                modified
+            );
+        }
+
+        #[test]
+        fn dry_run_writes_nothing() {
+            let fx = fixture();
+            let scan = fx.save(&[akamai(11, "one")]);
+            let r = adopt(&fx, &scan, DRY, true);
+            r.result.unwrap();
+            assert_eq!(r.prompts, 0);
+            assert!(r.text.contains("1 add, 0 unchanged, 0 unmatched\n"));
+            assert!(r.text.contains("Dry run: nothing was changed."));
+            assert!(!fx.manifest.exists());
+        }
+
+        #[test]
+        fn declined_prompt_writes_nothing() {
+            let fx = fixture();
+            let scan = fx.save(&[akamai(11, "one")]);
+            let r = adopt(&fx, &scan, ASK, false);
+            r.result.unwrap();
+            assert_eq!(r.prompts, 1);
+            assert!(r.text.contains("Cancelled"));
+            assert!(!fx.manifest.exists());
+            let r = adopt(&fx, &scan, ASK, true);
+            r.result.unwrap();
+            assert!(fx.manifest.exists());
+        }
+
+        #[test]
+        fn unmatched_and_foreign_urls() {
+            let fx = fixture();
+            let stranger = akamai(99, "stranger");
+            // Right handle, wrong content.
+            let wrong_sha = akamai(11, "other");
+            let scan = fx.save(&[
+                stranger.clone(),
+                wrong_sha.clone(),
+                "https://i.imgur.com/AAAAAAA.png".into(),
+                "https://example.com/a.png".into(),
+                akamai(11, "one"),
+            ]);
+            let r = adopt(&fx, &scan, YES, false);
+            r.result.unwrap();
+            assert!(
+                r.text.contains(&format!("  unmatched  {stranger}\n")),
+                "{}",
+                r.text
+            );
+            assert!(r.text.contains(&format!("  unmatched  {wrong_sha}\n")));
+            assert!(!r.text.contains("unmatched  https://i.imgur"));
+            assert!(!r.text.contains("unmatched  https://example"));
+            assert!(r.text.contains("1 add, 0 unchanged, 2 unmatched\n"));
+            assert_eq!(Manifest::load(&fx.manifest).unwrap().entries.len(), 1);
+        }
+
+        #[test]
+        fn only_unmatched_asks_nothing_and_writes_nothing() {
+            let fx = fixture();
+            let scan = fx.save(&[akamai(99, "stranger")]);
+            let r = adopt(&fx, &scan, ASK, false);
+            r.result.unwrap();
+            assert_eq!(r.prompts, 0);
+            assert!(r.text.contains("0 add, 0 unchanged, 1 unmatched\n"));
+            assert!(!fx.manifest.exists());
+        }
+
+        #[test]
+        fn existing_local_path_entry_is_not_duplicated() {
+            let fx = fixture();
+            let local = ManifestEntry {
+                path: Some("one.png".into()),
+                cloud_path: "Game/one.png".into(),
+                sha1: sha("one"),
+                size: 3,
+                url: akamai(11, "one"),
+            };
+            Manifest {
+                entries: vec![local.clone()],
+            }
+            .save(&fx.manifest)
+            .unwrap();
+            let scan = fx.save(&[akamai(11, "one"), akamai(22, "two")]);
+            let r = adopt(&fx, &scan, YES, false);
+            r.result.unwrap();
+            assert!(r.text.contains("  unchanged  Game/one.png\n"), "{}", r.text);
+            assert!(r.text.contains("1 add, 1 unchanged, 0 unmatched\n"));
+            let entries = Manifest::load(&fx.manifest).unwrap().entries;
+            assert_eq!(entries.len(), 2);
+            assert!(entries.contains(&local));
+            assert!(
+                entries
+                    .iter()
+                    .any(|e| e.path.is_none() && e.cloud_path == "two.png")
+            );
+        }
+
+        #[test]
+        fn unusable_index_entry_is_unmatched() {
+            let mut no_size = index_entry(11, "one", "one.png", "Game");
+            no_size.size = None;
+            let fx = Fixture::new(vec![no_size]);
+            let scan = fx.save(&[akamai(11, "one")]);
+            let r = adopt(&fx, &scan, YES, false);
+            r.result.unwrap();
+            assert!(r.text.contains("0 add, 0 unchanged, 1 unmatched\n"));
+            assert!(!fx.manifest.exists());
+        }
+
+        #[test]
+        fn json_is_one_object_with_adopt_section() {
+            let fx = fixture();
+            let scan = fx.save(&[akamai(11, "one"), akamai(99, "stranger")]);
+            let r = adopt(&fx, &scan, JSON_YES, false);
+            r.result.unwrap();
+            let value: serde_json::Value = serde_json::from_str(&r.text).unwrap();
+            assert_eq!(value["total"], 2);
+            assert!(value["hosts"]["steamusercontent"].is_array());
+            let a = &value["adopt"];
+            assert_eq!(a["dry_run"], false);
+            assert_eq!(a["done"], true);
+            assert_eq!(a["entries"].as_array().unwrap().len(), 1);
+            assert_eq!(a["entries"][0]["action"], "add");
+            assert_eq!(a["entries"][0]["cloud_path"], "Game/one.png");
+            assert_eq!(a["entries"][0]["sha1"], sha("one"));
+            assert_eq!(a["entries"][0]["size"], 3);
+            assert_eq!(a["entries"][0]["url"], akamai(11, "one"));
+            assert_eq!(a["unmatched"], json!([akamai(99, "stranger")]));
+            assert!(a["manifest"].is_string());
+        }
+
+        #[test]
+        fn plain_scan_json_has_no_adopt_key() {
+            let fx = fixture();
+            let scan = fx.save(&[akamai(11, "one")]);
+            assert!(scan_json(&scan).get("adopt").is_none());
+        }
+
+        #[test]
+        fn manifest_write_failure_is_reported() {
+            let fx = fixture();
+            let scan = fx.save(&[akamai(11, "one")]);
+            let missing = fx.dir.path().join("no/such/dir").join(Manifest::FILE_NAME);
+            let mut out = Vec::new();
+            let err = scan_adopt(
+                &fx.cloud,
+                &scan,
+                Manifest::default(),
+                &missing,
+                YES,
+                &mut |_| Ok(true),
+                &mut out,
+            )
+            .unwrap_err();
+            assert!(matches!(err, CommandError::ManifestWrite { .. }));
         }
     }
 }

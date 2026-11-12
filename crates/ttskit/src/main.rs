@@ -148,6 +148,23 @@ enum CloudCommand {
     Scan {
         /// The save file (JSON)
         save: PathBuf,
+        /// Also add the files of your own Steam Cloud that the save uses to the manifest
+        #[arg(long)]
+        adopt: bool,
+        /// The project config; its directory holds the manifest
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = ttskit_cloud::ProjectConfig::FILE_NAME,
+            requires = "adopt"
+        )]
+        config: PathBuf,
+        /// Only print the plan
+        #[arg(long, requires = "adopt", conflicts_with = "yes")]
+        dry_run: bool,
+        /// Do not ask for confirmation
+        #[arg(long, requires = "adopt")]
+        yes: bool,
         /// Print machine-readable JSON instead of text
         #[arg(long)]
         json: bool,
@@ -548,10 +565,38 @@ fn run_simple(command: Command) -> Result<(), String> {
             out.flush().map_err(|e| e.to_string())
         }
         Command::Cloud {
-            command: CloudCommand::Scan { save, json },
+            command:
+                CloudCommand::Scan {
+                    save,
+                    adopt,
+                    config,
+                    dry_run,
+                    yes,
+                    json,
+                },
         } => {
+            if !adopt {
+                let mut out = std::io::stdout().lock();
+                cloud::scan(&save, json, &mut out).map_err(|e| e.to_string())?;
+                return out.flush().map_err(|e| e.to_string());
+            }
+            // Do all the local work before connecting to Steam.
+            let scan = cloud::read_scan(&save).map_err(|e| e.to_string())?;
+            ttskit_cloud::ProjectConfig::load(&config).map_err(|e| e.to_string())?;
+            let manifest_file = config_dir_of(&config).join(ttskit_cloud::Manifest::FILE_NAME);
+            let manifest = cloud::load_manifest(&manifest_file).map_err(|e| e.to_string())?;
+            let backend = connect()?;
             let mut out = std::io::stdout().lock();
-            cloud::scan(&save, json, &mut out).map_err(|e| e.to_string())?;
+            cloud::scan_adopt(
+                backend.as_ref(),
+                &scan,
+                manifest,
+                &manifest_file,
+                cloud::RunMode { dry_run, yes, json },
+                &mut ask_on_terminal,
+                &mut out,
+            )
+            .map_err(|e| e.to_string())?;
             out.flush().map_err(|e| e.to_string())
         }
         Command::Cloud {
@@ -630,15 +675,58 @@ mod tests {
     fn scan_parses() {
         let cli = Cli::try_parse_from(["ttskit", "cloud", "scan", "s.json", "--json"]).unwrap();
         let Command::Cloud {
-            command: CloudCommand::Scan { save, json },
+            command:
+                CloudCommand::Scan {
+                    save,
+                    adopt,
+                    config,
+                    dry_run,
+                    yes,
+                    json,
+                },
         } = cli.command
         else {
             panic!("expected scan");
         };
         assert_eq!(save, PathBuf::from("s.json"));
         assert!(json);
+        assert!(!adopt && !dry_run && !yes);
+        assert_eq!(config, PathBuf::from("ttskit.toml"));
         assert!(Cli::try_parse_from(["ttskit", "cloud", "scan"]).is_err());
-        assert!(Cli::try_parse_from(["ttskit", "cloud", "scan", "s.json", "--adopt"]).is_err());
+    }
+
+    #[test]
+    fn scan_adopt_options() {
+        let scan = |extra: &[&str]| {
+            Cli::try_parse_from(
+                ["ttskit", "cloud", "scan", "s.json"]
+                    .into_iter()
+                    .chain(extra.iter().copied()),
+            )
+        };
+        let Command::Cloud {
+            command:
+                CloudCommand::Scan {
+                    adopt,
+                    config,
+                    dry_run,
+                    yes,
+                    ..
+                },
+        } = scan(&["--adopt", "--config", "p/x.toml", "--yes"])
+            .unwrap()
+            .command
+        else {
+            panic!("expected scan");
+        };
+        assert!(adopt && yes && !dry_run);
+        assert_eq!(config, PathBuf::from("p/x.toml"));
+        assert!(scan(&["--adopt"]).is_ok());
+        assert!(scan(&["--adopt", "--dry-run", "--json"]).is_ok());
+        assert!(scan(&["--adopt", "--dry-run", "--yes"]).is_err());
+        assert!(scan(&["--dry-run"]).is_err());
+        assert!(scan(&["--yes"]).is_err());
+        assert!(scan(&["--config", "x.toml"]).is_err());
     }
 
     fn parse_push(args: &[&str]) -> Result<SyncCommand, clap::Error> {

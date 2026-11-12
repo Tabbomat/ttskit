@@ -244,6 +244,14 @@ impl Manifest {
         }
     }
 
+    /// Whether some entry, with or without a local path, has this cloud path
+    /// and SHA1 (ignoring case).
+    pub fn contains_cloud(&self, cloud_path: &str, sha1: &str) -> bool {
+        self.entries
+            .iter()
+            .any(|e| e.cloud_path == cloud_path && e.sha1.eq_ignore_ascii_case(sha1))
+    }
+
     /// Brings the manifest in line with the local files after an upload.
     ///
     /// For each of `local` (paths relative, `/` separated) the index entry in
