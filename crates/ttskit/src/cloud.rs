@@ -2,13 +2,14 @@
 
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Write as _};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use serde_json::json;
 use ttskit_cloud::{
-    Backup, BackupError, BackupStore, CloudBackend, CloudError, CloudIndex, IndexError,
-    RestoreAction, is_game_internal, normalize_folder, plan_restore, restore,
+    Backup, BackupError, BackupStore, CloudBackend, CloudError, CloudIndex, IndexEntry, IndexError,
+    RestoreAction, UgcUrl, UploadError, UploadPlan, find_entries, is_game_internal,
+    normalize_folder, plan_restore, plan_upload, restore, upload,
 };
 
 /// Errors of the `cloud` subcommands.
@@ -32,6 +33,57 @@ pub enum CommandError {
     /// Writing the output failed.
     #[error("cannot write output: {0}")]
     Io(#[from] io::Error),
+    /// Planning or running an upload failed.
+    #[error(transparent)]
+    Upload(#[from] UploadError),
+    /// The file to upload cannot be read.
+    #[error("cannot read {}: {source}", path.display())]
+    ReadFile {
+        /// The file.
+        path: PathBuf,
+        /// Why reading failed.
+        source: io::Error,
+    },
+    /// The file name is not usable as a cloud name.
+    #[error("cannot use the file name of {} as a cloud name; give one with --name", path.display())]
+    NameNotUtf8 {
+        /// The file.
+        path: PathBuf,
+    },
+    /// No file matches the query.
+    #[error("no cloud file \"{0}\"")]
+    NotFound(String),
+    /// The file exists but the index does not know it.
+    #[error("{0} is not in the cloud index; use cloud upload")]
+    NotIndexed(String),
+    /// Several index entries match the query.
+    #[error("{query} matches several files; give the folder path or the cloud name:\n{matches}")]
+    Ambiguous {
+        /// What the user asked for.
+        query: String,
+        /// One line per match.
+        matches: String,
+    },
+    /// The entry has no URL and sharing was not requested.
+    #[error("{0} has no URL yet; run again with --share to share it")]
+    NoUrl(String),
+    /// A confirmation is needed but cannot be asked for.
+    #[error("confirmation needed: run again with --yes (or --dry-run)")]
+    ConfirmationNeeded,
+}
+
+/// Asks the user a yes/no question; gets the prompt text.
+pub type Confirm<'a> = &'a mut dyn FnMut(&str) -> Result<bool, CommandError>;
+
+/// How a changing command runs.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RunMode {
+    /// Only print the plan.
+    pub dry_run: bool,
+    /// Do not ask for confirmation.
+    pub yes: bool,
+    /// Print one JSON object instead of text.
+    pub json: bool,
 }
 
 /// The directory holding the cloud index backups: `explicit` if given,
@@ -114,6 +166,341 @@ pub fn restore_backup(
         writeln!(out, "Backed up the current cloud index to {}.", pre.name)?;
     }
     writeln!(out, "Restored backup {}.", backup.name)?;
+    Ok(())
+}
+
+/// Reads the file to upload and works out its cloud display name: `name` if
+/// given, otherwise the file's own name.
+pub fn read_upload_file(
+    path: &Path,
+    name: Option<&str>,
+) -> Result<(String, Vec<u8>), CommandError> {
+    let data = std::fs::read(path).map_err(|source| CommandError::ReadFile {
+        path: path.to_owned(),
+        source,
+    })?;
+    let name = match name {
+        Some(name) => name.to_owned(),
+        None => path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| CommandError::NameNotUtf8 {
+                path: path.to_owned(),
+            })?
+            .to_owned(),
+    };
+    Ok((name, data))
+}
+
+/// Formats a time the way the game writes dates in the index:
+/// `MM/dd/yyyy HH:mm:ss`, 24 hours.
+pub fn format_date(time: &jiff::Zoned) -> String {
+    time.strftime("%m/%d/%Y %H:%M:%S").to_string()
+}
+
+/// The `/`-separated path of an entry, e.g. `Decks/back.png`.
+fn display_path(folder: &str, name: &str) -> String {
+    let folder = normalize_folder(folder);
+    if folder.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{folder}/{name}")
+    }
+}
+
+fn slashes(folder: &str) -> String {
+    folder.replace('\\', "/")
+}
+
+enum Decision {
+    DryRun,
+    Cancelled,
+    Go,
+}
+
+/// Applies `--dry-run`, `--yes` or asks `prompt`. Prints the outcome line
+/// unless the output is JSON.
+fn decide(
+    mode: RunMode,
+    prompt: &str,
+    confirm: Confirm<'_>,
+    out: &mut dyn io::Write,
+) -> Result<Decision, CommandError> {
+    if mode.dry_run {
+        if !mode.json {
+            writeln!(out, "Dry run: nothing was changed.")?;
+        }
+        return Ok(Decision::DryRun);
+    }
+    if mode.yes || confirm(prompt)? {
+        return Ok(Decision::Go);
+    }
+    if !mode.json {
+        writeln!(out, "Cancelled: nothing was changed.")?;
+    }
+    Ok(Decision::Cancelled)
+}
+
+fn write_pretty_json(
+    value: &serde_json::Value,
+    out: &mut dyn io::Write,
+) -> Result<(), CommandError> {
+    let mut text = serde_json::to_string_pretty(value).map_err(io::Error::from)?;
+    text.push('\n');
+    out.write_all(text.as_bytes())?;
+    Ok(())
+}
+
+/// What to upload and where.
+pub struct UploadRequest<'a> {
+    /// The display name in the cloud.
+    pub name: &'a str,
+    /// The content.
+    pub data: &'a [u8],
+    /// The target folder, `/` or `\` separated; empty for the root.
+    pub folder: &'a str,
+    /// Dry run, confirmation and output format.
+    pub mode: RunMode,
+}
+
+fn write_upload_plan(plan: &UploadPlan, out: &mut Vec<u8>) -> io::Result<()> {
+    if plan.display_folder.is_empty() {
+        writeln!(
+            out,
+            "Upload {} ({} bytes) to the root folder:",
+            plan.name, plan.size
+        )?;
+    } else {
+        writeln!(
+            out,
+            "Upload {} ({} bytes) to {}:",
+            plan.name, plan.size, plan.display_folder
+        )?;
+    }
+    for folder in &plan.new_folders {
+        writeln!(out, "  {:<13}  {}", "create folder", slashes(folder))?;
+    }
+    if plan.write {
+        writeln!(out, "  {:<13}  {}", "write", plan.key)?;
+    }
+    if plan.share {
+        writeln!(out, "  {:<13}  {}", "share", plan.key)?;
+    }
+    if plan.add_entry {
+        writeln!(
+            out,
+            "  {:<13}  {}",
+            "add entry",
+            display_path(&plan.folder, &plan.name)
+        )?;
+    }
+    for warning in &plan.warnings {
+        writeln!(out, "warning: {warning}")?;
+    }
+    Ok(())
+}
+
+/// Uploads `req.data` to the cloud, shares it and records it in the index.
+///
+/// The plan is printed (and flushed) before anything is asked or changed. With
+/// `--json` only one JSON object is printed, at the end. The URL is the last
+/// line of the text output.
+pub fn upload_file(
+    backend: &mut dyn CloudBackend,
+    store: &BackupStore,
+    req: &UploadRequest<'_>,
+    now: SystemTime,
+    date: &str,
+    confirm: Confirm<'_>,
+    out: &mut dyn io::Write,
+) -> Result<(), CommandError> {
+    let mode = req.mode;
+    let plan = plan_upload(backend, req.name, req.data, req.folder)?;
+    let noop = plan.is_noop();
+
+    if !mode.json {
+        let mut buf = Vec::new();
+        if noop {
+            let url = plan.existing_url.as_deref().unwrap_or_default();
+            writeln!(buf, "Already uploaded: {url}")?;
+        } else {
+            write_upload_plan(&plan, &mut buf)?;
+        }
+        out.write_all(&buf)?;
+        out.flush()?;
+    }
+
+    let mut done = false;
+    let mut url = None;
+    let mut backup = None;
+    if noop {
+        done = true;
+        url.clone_from(&plan.existing_url);
+    } else {
+        match decide(mode, "Upload?", confirm, out)? {
+            Decision::Go => {
+                let outcome = upload(backend, store, &plan, now, date)?;
+                done = true;
+                backup = outcome.backup.map(|b| b.name);
+                url = Some(outcome.url);
+                if !mode.json {
+                    if let Some(name) = &backup {
+                        writeln!(out, "Backed up the cloud index to {name}.")?;
+                    }
+                    writeln!(out, "{}", url.as_deref().unwrap_or_default())?;
+                }
+            }
+            Decision::DryRun | Decision::Cancelled => {}
+        }
+    }
+
+    if mode.json {
+        let new_folders: Vec<String> = plan.new_folders.iter().map(|f| slashes(f)).collect();
+        let warnings: Vec<String> = plan.warnings.iter().map(ToString::to_string).collect();
+        write_pretty_json(
+            &json!({
+                "name": plan.name,
+                "cloud_name": plan.key,
+                "folder": plan.display_folder,
+                "size": plan.size,
+                "sha1": plan.sha1,
+                "new_folders": new_folders,
+                "write": plan.write,
+                "share": plan.share,
+                "add_entry": plan.add_entry,
+                "warnings": warnings,
+                "dry_run": mode.dry_run,
+                "done": done,
+                "url": url,
+                "backup": backup,
+            }),
+            out,
+        )?;
+    }
+    out.flush()?;
+    Ok(())
+}
+
+/// What to print the URL of.
+pub struct UrlRequest<'a> {
+    /// A path, display name or cloud name, see [`find_entries`].
+    pub query: &'a str,
+    /// Share the file if it has no URL yet.
+    pub share: bool,
+    /// Dry run, confirmation and output format.
+    pub mode: RunMode,
+}
+
+fn missing_entry_error(backend: &dyn CloudBackend, query: &str) -> CommandError {
+    match backend.list() {
+        Ok(files) if files.iter().any(|f| f.name.eq_ignore_ascii_case(query)) => {
+            CommandError::NotIndexed(query.to_owned())
+        }
+        Ok(_) => CommandError::NotFound(query.to_owned()),
+        Err(e) => e.into(),
+    }
+}
+
+/// Prints the download URL of a cloud file; with `share` it first shares a
+/// file that has no URL yet and records the URL in the index.
+pub fn show_url(
+    backend: &mut dyn CloudBackend,
+    store: &BackupStore,
+    req: &UrlRequest<'_>,
+    now: SystemTime,
+    confirm: Confirm<'_>,
+    out: &mut dyn io::Write,
+) -> Result<(), CommandError> {
+    let mode = req.mode;
+    let index = CloudIndex::load(backend)?;
+    let entry: IndexEntry = match find_entries(&index, req.query).as_slice() {
+        [] => return Err(missing_entry_error(backend, req.query)),
+        [one] => (*one).clone(),
+        several => {
+            let matches = several
+                .iter()
+                .map(|e| format!("  {}  {}", display_path(&e.folder, &e.name), e.key))
+                .collect::<Vec<_>>()
+                .join("\n");
+            return Err(CommandError::Ambiguous {
+                query: req.query.to_owned(),
+                matches,
+            });
+        }
+    };
+    let path = display_path(&entry.folder, &entry.name);
+    let folder = normalize_folder(&entry.folder);
+
+    if let Some(url) = &entry.url {
+        if mode.json {
+            write_pretty_json(
+                &json!({
+                    "name": entry.name,
+                    "cloud_name": entry.key,
+                    "folder": folder,
+                    "url": url,
+                    "shared": false,
+                }),
+                out,
+            )?;
+        } else {
+            writeln!(out, "{url}")?;
+        }
+        return Ok(());
+    }
+    if !req.share {
+        return Err(CommandError::NoUrl(path));
+    }
+
+    if !mode.json {
+        writeln!(
+            out,
+            "Share {path} ({}) and record its URL in the index.",
+            entry.key
+        )?;
+        out.flush()?;
+    }
+    let mut url = None;
+    let mut backup = None;
+    if let Decision::Go = decide(mode, "Share?", confirm, out)? {
+        let handle = backend.share(&entry.key)?;
+        let shared = UgcUrl {
+            handle,
+            sha1: entry.sha1().to_owned(),
+        }
+        .to_string();
+        let mut index = CloudIndex::load(backend)?;
+        if let Some(e) = index
+            .entries
+            .iter_mut()
+            .find(|e| e.key.eq_ignore_ascii_case(&entry.key))
+        {
+            e.url = Some(shared.clone());
+        }
+        backup = index.save(backend, store, now)?.backup.map(|b| b.name);
+        if !mode.json {
+            if let Some(name) = &backup {
+                writeln!(out, "Backed up the cloud index to {name}.")?;
+            }
+            writeln!(out, "{shared}")?;
+        }
+        url = Some(shared);
+    }
+    if mode.json {
+        write_pretty_json(
+            &json!({
+                "name": entry.name,
+                "cloud_name": entry.key,
+                "folder": folder,
+                "url": url,
+                "shared": url.is_some(),
+                "dry_run": mode.dry_run,
+                "backup": backup,
+            }),
+            out,
+        )?;
+    }
+    out.flush()?;
     Ok(())
 }
 
@@ -1061,6 +1448,625 @@ mod tests {
                 assert_eq!(parts[0].as_os_str(), "cloud-backups");
                 assert_eq!(parts[1].as_os_str(), "ttskit");
             }
+        }
+    }
+
+    mod upload_tests {
+        use std::time::UNIX_EPOCH;
+
+        use ttskit_cloud::{cloud_key, sha1_hex};
+
+        use super::*;
+
+        const DATE: &str = "10/10/2026 14:05:08";
+        const YES: RunMode = RunMode {
+            dry_run: false,
+            yes: true,
+            json: false,
+        };
+        const DRY: RunMode = RunMode {
+            dry_run: true,
+            yes: false,
+            json: false,
+        };
+        const ASK: RunMode = RunMode {
+            dry_run: false,
+            yes: false,
+            json: false,
+        };
+
+        fn key_of(data: &[u8], name: &str) -> String {
+            cloud_key(&sha1_hex(data), name)
+        }
+
+        fn url_of(cloud: &MemoryCloud, data: &[u8], name: &str) -> String {
+            format!(
+                "https://steamusercontent-a.akamaihd.net/ugc/{}/{}/",
+                cloud.handle(&key_of(data, name)).unwrap(),
+                sha1_hex(data)
+            )
+        }
+
+        struct Run {
+            result: Result<(), CommandError>,
+            text: String,
+            prompts: Vec<String>,
+        }
+
+        fn up(
+            cloud: &mut MemoryCloud,
+            store: &BackupStore,
+            (name, data, folder): (&str, &[u8], &str),
+            mode: RunMode,
+            answer: bool,
+        ) -> Run {
+            let mut prompts = Vec::new();
+            let mut confirm = |p: &str| {
+                prompts.push(p.to_owned());
+                Ok(answer)
+            };
+            let mut out = Vec::new();
+            let req = UploadRequest {
+                name,
+                data,
+                folder,
+                mode,
+            };
+            let result = upload_file(cloud, store, &req, UNIX_EPOCH, DATE, &mut confirm, &mut out);
+            Run {
+                result,
+                text: String::from_utf8(out).unwrap(),
+                prompts,
+            }
+        }
+
+        fn setup() -> (tempfile::TempDir, BackupStore) {
+            let dir = tempfile::tempdir().unwrap();
+            let store = BackupStore::new(dir.path());
+            (dir, store)
+        }
+
+        fn json_mode(dry_run: bool) -> RunMode {
+            RunMode {
+                dry_run,
+                yes: !dry_run,
+                json: true,
+            }
+        }
+
+        #[test]
+        fn format_date_pads_and_uses_24_hours() {
+            let at = |y, mo, d, h, mi, s| {
+                let dt = jiff::civil::date(y, mo, d).at(h, mi, s, 0);
+                format_date(&dt.to_zoned(jiff::tz::TimeZone::UTC).unwrap())
+            };
+            assert_eq!(at(2026, 10, 10, 14, 5, 8), "10/10/2026 14:05:08");
+            assert_eq!(at(2026, 3, 4, 7, 0, 9), "03/04/2026 07:00:09");
+            assert_eq!(at(2026, 12, 31, 23, 59, 59), "12/31/2026 23:59:59");
+        }
+
+        #[test]
+        fn dry_run_prints_the_plan_and_changes_nothing() {
+            let (_dir, store) = setup();
+            let mut cloud = MemoryCloud::new();
+            let key = key_of(b"hello", "deck.png");
+            let run = up(
+                &mut cloud,
+                &store,
+                ("deck.png", b"hello", "Decks/Old"),
+                DRY,
+                false,
+            );
+            run.result.unwrap();
+            assert_eq!(
+                run.text,
+                format!(
+                    "Upload deck.png (5 bytes) to Decks/Old:\n\
+                     \x20 create folder  Decks\n\
+                     \x20 create folder  Decks/Old\n\
+                     \x20 write          {key}\n\
+                     \x20 share          {key}\n\
+                     \x20 add entry      Decks/Old/deck.png\n\
+                     Dry run: nothing was changed.\n"
+                )
+            );
+            assert!(run.prompts.is_empty());
+            assert!(cloud.mutating_calls().is_empty());
+            assert!(store.list().unwrap().is_empty());
+        }
+
+        #[test]
+        fn root_folder_wording() {
+            let (_dir, store) = setup();
+            let mut cloud = MemoryCloud::new();
+            let run = up(&mut cloud, &store, ("a.png", b"x", ""), DRY, false);
+            run.result.unwrap();
+            assert!(
+                run.text
+                    .starts_with("Upload a.png (1 bytes) to the root folder:\n")
+            );
+            assert!(run.text.contains("  add entry      a.png\n"));
+            assert!(!run.text.contains("create folder"));
+        }
+
+        #[test]
+        fn declined_confirmation_changes_nothing() {
+            let (_dir, store) = setup();
+            let mut cloud = MemoryCloud::new();
+            let run = up(&mut cloud, &store, ("a.png", b"x", "F"), ASK, false);
+            run.result.unwrap();
+            assert_eq!(run.prompts, ["Upload?"]);
+            assert!(run.text.starts_with("Upload a.png"));
+            assert!(run.text.ends_with("Cancelled: nothing was changed.\n"));
+            assert!(cloud.mutating_calls().is_empty());
+            assert!(store.list().unwrap().is_empty());
+        }
+
+        #[test]
+        fn confirmation_error_propagates_after_the_plan() {
+            let (_dir, store) = setup();
+            let mut cloud = MemoryCloud::new();
+            let mut confirm = |_: &str| Err(CommandError::ConfirmationNeeded);
+            let mut out = Vec::new();
+            let req = UploadRequest {
+                name: "a.png",
+                data: b"x",
+                folder: "",
+                mode: ASK,
+            };
+            let err = upload_file(
+                &mut cloud,
+                &store,
+                &req,
+                UNIX_EPOCH,
+                DATE,
+                &mut confirm,
+                &mut out,
+            )
+            .unwrap_err();
+            assert!(matches!(err, CommandError::ConfirmationNeeded));
+            assert!(String::from_utf8(out).unwrap().starts_with("Upload a.png"));
+            assert!(cloud.mutating_calls().is_empty());
+        }
+
+        #[test]
+        fn accepted_confirmation_and_yes_both_upload() {
+            for (mode, answer, prompts) in [(ASK, true, 1), (YES, false, 0)] {
+                let (_dir, store) = setup();
+                let mut cloud = MemoryCloud::new();
+                let run = up(&mut cloud, &store, ("a.png", b"hello", "F"), mode, answer);
+                run.result.unwrap();
+                assert_eq!(run.prompts.len(), prompts);
+                assert_eq!(
+                    cloud.contents(&key_of(b"hello", "a.png")).unwrap(),
+                    b"hello"
+                );
+                let index = CloudIndex::load(&cloud).unwrap();
+                assert_eq!(index.entries.len(), 1);
+                assert_eq!(index.entries[0].name, "a.png");
+                assert_eq!(index.entries[0].date.as_deref(), Some(DATE));
+                assert_eq!(index.folders, ["F"]);
+                let backups = store.list().unwrap();
+                assert_eq!(backups.len(), 1);
+                let lines: Vec<&str> = run.text.lines().collect();
+                let url = url_of(&cloud, b"hello", "a.png");
+                assert_eq!(lines[lines.len() - 1], url);
+                assert_eq!(
+                    lines[lines.len() - 2],
+                    format!("Backed up the cloud index to {}.", backups[0].name)
+                );
+                assert_eq!(index.entries[0].url.as_deref(), Some(url.as_str()));
+            }
+        }
+
+        #[test]
+        fn noop_prints_the_existing_url_and_never_asks() {
+            let (_dir, store) = setup();
+            let mut cloud = MemoryCloud::new();
+            up(&mut cloud, &store, ("a.png", b"x", "F"), YES, false)
+                .result
+                .unwrap();
+            cloud.clear_calls();
+            let run = up(&mut cloud, &store, ("a.png", b"x", "f"), ASK, false);
+            run.result.unwrap();
+            assert_eq!(
+                run.text,
+                format!("Already uploaded: {}\n", url_of(&cloud, b"x", "a.png"))
+            );
+            assert!(run.prompts.is_empty());
+            assert!(cloud.mutating_calls().is_empty());
+            assert_eq!(store.list().unwrap().len(), 1);
+        }
+
+        #[test]
+        fn collision_is_an_error_and_prints_nothing() {
+            let (_dir, store) = setup();
+            let mut cloud = MemoryCloud::new();
+            up(&mut cloud, &store, ("a.png", b"x", "Other"), YES, false)
+                .result
+                .unwrap();
+            cloud.clear_calls();
+            for mode in [YES, json_mode(false)] {
+                let run = up(&mut cloud, &store, ("a.png", b"x", "Here"), mode, false);
+                assert!(matches!(
+                    run.result.unwrap_err(),
+                    CommandError::Upload(UploadError::Collision { .. })
+                ));
+                assert!(run.text.is_empty());
+            }
+            assert!(cloud.mutating_calls().is_empty());
+        }
+
+        #[test]
+        fn quota_error_prints_nothing() {
+            let (_dir, store) = setup();
+            let mut cloud = MemoryCloud::new().with_quota(3);
+            let run = up(&mut cloud, &store, ("a.png", b"hello", ""), YES, false);
+            assert!(matches!(
+                run.result.unwrap_err(),
+                CommandError::Upload(UploadError::Cloud(CloudError::QuotaExceeded { .. }))
+            ));
+            assert!(run.text.is_empty());
+            assert!(cloud.mutating_calls().is_empty());
+        }
+
+        #[test]
+        fn same_name_warning_is_printed() {
+            let (_dir, store) = setup();
+            let mut cloud = MemoryCloud::new();
+            up(&mut cloud, &store, ("a.png", b"one", "F"), YES, false)
+                .result
+                .unwrap();
+            let run = up(&mut cloud, &store, ("a.png", b"two", "F"), DRY, false);
+            run.result.unwrap();
+            let key = key_of(b"one", "a.png");
+            assert!(run.text.contains(&format!(
+                "warning: the folder already has a file with the same name but different \
+                 content ({key})\n"
+            )));
+            let run = up(
+                &mut cloud,
+                &store,
+                ("a.png", b"two", "F"),
+                json_mode(true),
+                false,
+            );
+            let value: serde_json::Value = serde_json::from_str(&run.text).unwrap();
+            assert_eq!(value["warnings"].as_array().unwrap().len(), 1);
+        }
+
+        #[test]
+        fn json_for_a_dry_run() {
+            let (_dir, store) = setup();
+            let mut cloud = MemoryCloud::new();
+            let run = up(
+                &mut cloud,
+                &store,
+                ("deck.png", b"hello", "Decks\\Old"),
+                RunMode {
+                    dry_run: true,
+                    yes: false,
+                    json: true,
+                },
+                false,
+            );
+            run.result.unwrap();
+            assert!(run.text.ends_with("}\n"));
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&run.text).unwrap(),
+                json!({
+                    "name": "deck.png",
+                    "cloud_name": key_of(b"hello", "deck.png"),
+                    "folder": "Decks/Old",
+                    "size": 5,
+                    "sha1": sha1_hex(b"hello"),
+                    "new_folders": ["Decks", "Decks/Old"],
+                    "write": true,
+                    "share": true,
+                    "add_entry": true,
+                    "warnings": [],
+                    "dry_run": true,
+                    "done": false,
+                    "url": null,
+                    "backup": null,
+                })
+            );
+            assert!(cloud.mutating_calls().is_empty());
+        }
+
+        #[test]
+        fn json_for_a_real_run_and_a_noop() {
+            let (_dir, store) = setup();
+            let mut cloud = MemoryCloud::new();
+            let run = up(
+                &mut cloud,
+                &store,
+                ("a.png", b"hello", ""),
+                json_mode(false),
+                false,
+            );
+            run.result.unwrap();
+            let value: serde_json::Value = serde_json::from_str(&run.text).unwrap();
+            let backups = store.list().unwrap();
+            assert_eq!(value["done"], true);
+            assert_eq!(value["dry_run"], false);
+            assert_eq!(value["folder"], "");
+            assert_eq!(value["url"], url_of(&cloud, b"hello", "a.png"));
+            assert_eq!(value["backup"], backups[0].name);
+            assert_eq!(value["new_folders"], json!([]));
+
+            let run = up(
+                &mut cloud,
+                &store,
+                ("a.png", b"hello", ""),
+                json_mode(false),
+                false,
+            );
+            let value: serde_json::Value = serde_json::from_str(&run.text).unwrap();
+            assert_eq!(value["done"], true);
+            assert_eq!(value["write"], false);
+            assert_eq!(value["url"], url_of(&cloud, b"hello", "a.png"));
+            assert_eq!(value["backup"], serde_json::Value::Null);
+        }
+
+        #[test]
+        fn json_for_a_declined_upload() {
+            let (_dir, store) = setup();
+            let mut cloud = MemoryCloud::new();
+            let mode = RunMode {
+                dry_run: false,
+                yes: false,
+                json: true,
+            };
+            let run = up(&mut cloud, &store, ("a.png", b"x", ""), mode, false);
+            run.result.unwrap();
+            let value: serde_json::Value = serde_json::from_str(&run.text).unwrap();
+            assert_eq!(value["done"], false);
+            assert_eq!(value["dry_run"], false);
+            assert_eq!(value["url"], serde_json::Value::Null);
+            assert!(cloud.mutating_calls().is_empty());
+        }
+
+        #[test]
+        fn read_upload_file_names_and_errors() {
+            let dir = tempfile::tempdir().unwrap();
+            let file = dir.path().join("deck.png");
+            std::fs::write(&file, b"abc").unwrap();
+            let (name, data) = read_upload_file(&file, None).unwrap();
+            assert_eq!((name.as_str(), data.as_slice()), ("deck.png", &b"abc"[..]));
+            let (name, _) = read_upload_file(&file, Some("other.png")).unwrap();
+            assert_eq!(name, "other.png");
+            let missing = dir.path().join("missing.png");
+            let err = read_upload_file(&missing, None).unwrap_err();
+            assert!(err.to_string().starts_with("cannot read "));
+            assert!(err.to_string().contains("missing.png"));
+        }
+
+        // `cloud url`
+
+        fn url_cloud() -> MemoryCloud {
+            let mut index = CloudIndex::empty();
+            index.folders = vec!["Decks".into(), "Cards".into()];
+            index.entries = vec![
+                IndexEntry::new(
+                    "AA11_a.png",
+                    "a.png",
+                    Some("https://example.invalid/a".into()),
+                    Some(1),
+                    None,
+                    "Decks",
+                ),
+                IndexEntry::new("BB22_a.png", "a.png", None, Some(1), None, "Cards"),
+                IndexEntry::new("CC33_c.png", "c.png", None, Some(1), None, ""),
+            ];
+            seed(
+                MemoryCloud::new()
+                    .with_file("AA11_a.png", "x")
+                    .with_file("BB22_a.png", "y")
+                    .with_file("CC33_c.png", "z")
+                    .with_file("DD44_loose.png", "w"),
+                &index,
+            )
+        }
+
+        fn url_run(
+            cloud: &mut MemoryCloud,
+            store: &BackupStore,
+            query: &str,
+            share: bool,
+            mode: RunMode,
+            answer: bool,
+        ) -> Run {
+            let mut prompts = Vec::new();
+            let mut confirm = |p: &str| {
+                prompts.push(p.to_owned());
+                Ok(answer)
+            };
+            let mut out = Vec::new();
+            let req = UrlRequest { query, share, mode };
+            let result = show_url(cloud, store, &req, UNIX_EPOCH, &mut confirm, &mut out);
+            Run {
+                result,
+                text: String::from_utf8(out).unwrap(),
+                prompts,
+            }
+        }
+
+        #[test]
+        fn url_by_path_name_and_key() {
+            let (_dir, store) = setup();
+            let mut cloud = url_cloud();
+            for query in ["Decks/a.png", "decks\\A.PNG", "aa11_a.png"] {
+                let run = url_run(&mut cloud, &store, query, false, YES, false);
+                run.result.unwrap();
+                assert_eq!(run.text, "https://example.invalid/a\n", "{query}");
+            }
+        }
+
+        #[test]
+        fn url_with_share_on_an_entry_with_a_url_changes_nothing() {
+            let (_dir, store) = setup();
+            let mut cloud = url_cloud();
+            cloud.clear_calls();
+            let run = url_run(&mut cloud, &store, "Decks/a.png", true, ASK, false);
+            run.result.unwrap();
+            assert_eq!(run.text, "https://example.invalid/a\n");
+            assert!(run.prompts.is_empty());
+            assert!(cloud.mutating_calls().is_empty());
+        }
+
+        #[test]
+        fn url_json_for_an_existing_url() {
+            let (_dir, store) = setup();
+            let mut cloud = url_cloud();
+            let run = url_run(
+                &mut cloud,
+                &store,
+                "decks/a.png",
+                false,
+                json_mode(false),
+                false,
+            );
+            run.result.unwrap();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&run.text).unwrap(),
+                json!({
+                    "name": "a.png",
+                    "cloud_name": "AA11_a.png",
+                    "folder": "Decks",
+                    "url": "https://example.invalid/a",
+                    "shared": false,
+                })
+            );
+        }
+
+        #[test]
+        fn ambiguous_name_lists_both() {
+            let (_dir, store) = setup();
+            let mut cloud = url_cloud();
+            let run = url_run(&mut cloud, &store, "a.png", false, YES, false);
+            let err = run.result.unwrap_err();
+            assert!(matches!(err, CommandError::Ambiguous { .. }));
+            let text = err.to_string();
+            assert!(text.contains("\n  Decks/a.png  AA11_a.png"));
+            assert!(text.contains("\n  Cards/a.png  BB22_a.png"));
+            assert!(text.contains("folder path"));
+            assert!(run.text.is_empty());
+        }
+
+        #[test]
+        fn unknown_and_unindexed_files() {
+            let (_dir, store) = setup();
+            let mut cloud = url_cloud();
+            let err = url_run(&mut cloud, &store, "nope.png", false, YES, false)
+                .result
+                .unwrap_err();
+            assert_eq!(err.to_string(), "no cloud file \"nope.png\"");
+            let err = url_run(&mut cloud, &store, "dd44_LOOSE.png", false, YES, false)
+                .result
+                .unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                "dd44_LOOSE.png is not in the cloud index; use cloud upload"
+            );
+        }
+
+        #[test]
+        fn no_url_without_share_is_an_error() {
+            let (_dir, store) = setup();
+            let mut cloud = url_cloud();
+            cloud.clear_calls();
+            let run = url_run(&mut cloud, &store, "Cards/a.png", false, YES, false);
+            assert_eq!(
+                run.result.unwrap_err().to_string(),
+                "Cards/a.png has no URL yet; run again with --share to share it"
+            );
+            assert!(run.text.is_empty());
+            assert!(cloud.mutating_calls().is_empty());
+        }
+
+        #[test]
+        fn share_dry_run_and_decline_change_nothing() {
+            let (_dir, store) = setup();
+            let mut cloud = url_cloud();
+            cloud.clear_calls();
+            let run = url_run(&mut cloud, &store, "c.png", true, DRY, false);
+            run.result.unwrap();
+            assert_eq!(
+                run.text,
+                "Share c.png (CC33_c.png) and record its URL in the index.\n\
+                 Dry run: nothing was changed.\n"
+            );
+            let run = url_run(&mut cloud, &store, "c.png", true, ASK, false);
+            run.result.unwrap();
+            assert_eq!(run.prompts, ["Share?"]);
+            assert!(run.text.ends_with("Cancelled: nothing was changed.\n"));
+            assert!(cloud.mutating_calls().is_empty());
+            assert!(store.list().unwrap().is_empty());
+        }
+
+        #[test]
+        fn share_records_the_url_and_backs_up() {
+            for (mode, answer) in [(YES, false), (ASK, true)] {
+                let (_dir, store) = setup();
+                let mut cloud = url_cloud();
+                let run = url_run(&mut cloud, &store, "Cards/a.png", true, mode, answer);
+                run.result.unwrap();
+                let handle = cloud.handle("BB22_a.png").unwrap();
+                let url = format!("https://steamusercontent-a.akamaihd.net/ugc/{handle}/BB22/");
+                let index = CloudIndex::load(&cloud).unwrap();
+                assert_eq!(index.entries[1].url.as_deref(), Some(url.as_str()));
+                assert_eq!(
+                    index.entries[0].url.as_deref(),
+                    Some("https://example.invalid/a")
+                );
+                let backups = store.list().unwrap();
+                assert_eq!(backups.len(), 1);
+                let lines: Vec<&str> = run.text.lines().collect();
+                assert_eq!(
+                    lines[0],
+                    "Share Cards/a.png (BB22_a.png) and record its URL in the index."
+                );
+                assert_eq!(lines[lines.len() - 1], url);
+                assert_eq!(
+                    lines[lines.len() - 2],
+                    format!("Backed up the cloud index to {}.", backups[0].name)
+                );
+            }
+        }
+
+        #[test]
+        fn share_json_shapes() {
+            let (_dir, store) = setup();
+            let mut cloud = url_cloud();
+            let dry = RunMode {
+                dry_run: true,
+                yes: false,
+                json: true,
+            };
+            let run = url_run(&mut cloud, &store, "c.png", true, dry, false);
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&run.text).unwrap(),
+                json!({
+                    "name": "c.png",
+                    "cloud_name": "CC33_c.png",
+                    "folder": "",
+                    "url": null,
+                    "shared": false,
+                    "dry_run": true,
+                    "backup": null,
+                })
+            );
+            let run = url_run(&mut cloud, &store, "c.png", true, json_mode(false), false);
+            let value: serde_json::Value = serde_json::from_str(&run.text).unwrap();
+            let handle = cloud.handle("CC33_c.png").unwrap();
+            assert_eq!(
+                value["url"],
+                format!("https://steamusercontent-a.akamaihd.net/ugc/{handle}/CC33/")
+            );
+            assert_eq!(value["shared"], true);
+            assert_eq!(value["dry_run"], false);
+            assert_eq!(value["backup"], store.list().unwrap()[0].name);
         }
     }
 }
