@@ -101,6 +101,9 @@ enum CloudCommand {
         /// Print machine-readable JSON instead of text
         #[arg(long)]
         json: bool,
+        /// The project config; its [local] ignore patterns apply, relative to DIR. Default: ttskit.toml in the current directory if it exists
+        #[arg(long, value_name = "PATH")]
+        config: Option<PathBuf>,
     },
     /// Make a cloud folder match a local directory (unofficial)
     Sync {
@@ -206,7 +209,7 @@ enum SyncCommand {
             default_value = ttskit_cloud::ProjectConfig::FILE_NAME
         )]
         config: PathBuf,
-        /// Also replace changed files and delete cloud files that are not local
+        /// Also replace changed files and delete cloud files that are not local (files matching [local] ignore are left alone)
         #[arg(long)]
         prune: bool,
         /// Only print the plan
@@ -231,7 +234,7 @@ enum SyncCommand {
             default_value = ttskit_cloud::ProjectConfig::FILE_NAME
         )]
         config: PathBuf,
-        /// Also move local files that are not in the cloud folder to the recycle bin
+        /// Also move local files that are not in the cloud folder to the recycle bin (files matching [local] ignore are left alone)
         #[arg(long)]
         prune: bool,
         /// Only print the plan
@@ -461,17 +464,21 @@ fn run_simple(command: Command) -> Result<(), String> {
             let config_dir = config_dir_of(&config);
             let manifest_file = config_dir.join(ttskit_cloud::Manifest::FILE_NAME);
             let dir = project.resolve_local_dir(config_dir);
-            let local = ttskit_cloud::scan_local(&dir).map_err(|e| e.to_string())?;
+            let ignore = project.ignore_set();
+            let scan =
+                ttskit_cloud::scan_local_ignoring(&dir, &ignore).map_err(|e| e.to_string())?;
             let store = BackupStore::new(cloud::backup_dir(backup_dir).map_err(|e| e.to_string())?);
             let mut backend = connect()?;
             let mut out = std::io::stdout().lock();
             cloud::sync_push(
                 backend.as_mut(),
                 &store,
-                &local,
+                &scan.files,
                 &|rel| std::fs::read(dir.join(rel)),
                 &project.cloud_folder,
                 prune,
+                &ignore,
+                scan.ignored,
                 Some(&manifest_file),
                 cloud::RunMode { dry_run, yes, json },
                 SystemTime::now(),
@@ -501,10 +508,13 @@ fn run_simple(command: Command) -> Result<(), String> {
             let dir = project.resolve_local_dir(config_dir);
             // A directory that does not exist yet is an empty one; it is
             // created when a pull writes into it.
-            let local = if dir.exists() {
-                ttskit_cloud::scan_local(&dir).map_err(|e| e.to_string())?
+            let ignore = project.ignore_set();
+            let (local, ignored) = if dir.exists() {
+                let scan =
+                    ttskit_cloud::scan_local_ignoring(&dir, &ignore).map_err(|e| e.to_string())?;
+                (scan.files, scan.ignored)
             } else {
-                Vec::new()
+                (Vec::new(), 0)
             };
             let backend = connect()?;
             let mut local_dir = ttskit_cloud::FsDir::new(dir.clone());
@@ -515,6 +525,8 @@ fn run_simple(command: Command) -> Result<(), String> {
                 &local,
                 &project.cloud_folder,
                 prune,
+                &ignore,
+                ignored,
                 cloud::RunMode { dry_run, yes, json },
                 &mut ask_on_terminal,
                 &mut out,
@@ -625,16 +637,38 @@ fn status_exit_code(in_sync: bool) -> ExitCode {
 fn run(cli: Cli) -> Result<ExitCode, String> {
     match cli.command {
         Command::Cloud {
-            command: CloudCommand::Status { dir, folder, json },
+            command:
+                CloudCommand::Status {
+                    dir,
+                    folder,
+                    json,
+                    config,
+                },
         } => {
             // Scan the local side before connecting to Steam.
-            let local = ttskit_cloud::scan_local(&dir).map_err(|e| e.to_string())?;
+            let config = match config {
+                Some(path) => Some(path),
+                None => {
+                    let default = PathBuf::from(ttskit_cloud::ProjectConfig::FILE_NAME);
+                    default.exists().then_some(default)
+                }
+            };
+            let ignore = match config {
+                Some(config) => ttskit_cloud::ProjectConfig::load(&config)
+                    .map_err(|e| e.to_string())?
+                    .ignore_set(),
+                None => ttskit_cloud::IgnoreSet::default(),
+            };
+            let scan =
+                ttskit_cloud::scan_local_ignoring(&dir, &ignore).map_err(|e| e.to_string())?;
             let backend = connect()?;
             let mut out = std::io::stdout().lock();
             let in_sync = cloud::status(
                 backend.as_ref(),
-                &local,
+                &scan.files,
                 folder.as_deref().unwrap_or_default(),
+                &ignore,
+                scan.ignored,
                 &dir.display().to_string(),
                 json,
                 &mut out,
@@ -837,6 +871,29 @@ mod tests {
     #[test]
     fn sync_pull_has_no_backup_dir() {
         assert!(parse_pull(&["--backup-dir", "x"]).is_err());
+    }
+
+    fn parse_status(args: &[&str]) -> Result<Option<PathBuf>, clap::Error> {
+        let cli = Cli::try_parse_from(
+            ["ttskit", "cloud", "status", "assets"]
+                .into_iter()
+                .chain(args.iter().copied()),
+        )?;
+        match cli.command {
+            Command::Cloud {
+                command: CloudCommand::Status { config, .. },
+            } => Ok(config),
+            _ => unreachable!("parsed status"),
+        }
+    }
+
+    #[test]
+    fn status_config_is_optional() {
+        assert_eq!(parse_status(&[]).unwrap(), None);
+        assert_eq!(
+            parse_status(&["--config", "proj/my.toml"]).unwrap(),
+            Some(PathBuf::from("proj/my.toml"))
+        );
     }
 
     #[test]

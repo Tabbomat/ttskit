@@ -586,6 +586,8 @@ pub fn sync_push(
     read_local: &dyn Fn(&str) -> io::Result<Vec<u8>>,
     folder: &str,
     prune: bool,
+    ignore: &IgnoreSet,
+    ignored_local: usize,
     manifest: Option<&Path>,
     mode: RunMode,
     now: SystemTime,
@@ -593,7 +595,7 @@ pub fn sync_push(
     confirm: Confirm<'_>,
     out: &mut dyn io::Write,
 ) -> Result<(), CommandError> {
-    let plan = plan_push(backend, local, folder, prune, &IgnoreSet::default(), 0)?;
+    let plan = plan_push(backend, local, folder, prune, ignore, ignored_local)?;
     let conflicts = plan.sync.count(Action::Conflict);
     let noop = plan.is_noop();
     let needs_prune = plan
@@ -681,7 +683,7 @@ pub fn sync_push(
     if let (true, Some(path)) = (done && !mode.dry_run, manifest) {
         let refreshed = update_manifest(path, "push", |m| {
             let index = CloudIndex::load(backend).map_err(|e| e.to_string())?;
-            m.refresh_for_local(local, folder, &index, &IgnoreSet::default());
+            m.refresh_for_local(local, folder, &index, ignore);
             Ok(())
         });
         match refreshed {
@@ -731,11 +733,13 @@ pub fn sync_pull(
     local: &[LocalFile],
     folder: &str,
     prune: bool,
+    ignore: &IgnoreSet,
+    ignored_local: usize,
     mode: RunMode,
     confirm: Confirm<'_>,
     out: &mut dyn io::Write,
 ) -> Result<(), CommandError> {
-    let plan = plan_pull(backend, local, folder, prune, &IgnoreSet::default(), 0)?;
+    let plan = plan_pull(backend, local, folder, prune, ignore, ignored_local)?;
     let conflicts = plan.sync.count(Action::Conflict);
     let noop = plan.is_noop();
     let kept = plan
@@ -950,17 +954,21 @@ pub fn show_url(
 /// Compares the scanned local files with the cloud folder `folder` and prints
 /// the differences, or JSON when `json` is set. `dir_label` names the local
 /// directory in the output. Returns whether everything is in sync.
+#[allow(clippy::too_many_arguments)]
 pub fn status(
     backend: &dyn CloudBackend,
     local: &[LocalFile],
     folder: &str,
+    ignore: &IgnoreSet,
+    ignored_local: usize,
     dir_label: &str,
     json: bool,
     out: &mut dyn io::Write,
 ) -> Result<bool, CommandError> {
     let index = CloudIndex::load(backend)?;
     let cloud_files = backend.list()?;
-    let report = compare(&index, &cloud_files, folder, local, &IgnoreSet::default());
+    let mut report = compare(&index, &cloud_files, folder, local, ignore);
+    report.ignored_local = ignored_local;
     let in_sync = report.is_in_sync();
     let mut buf: Vec<u8> = Vec::new();
 
@@ -989,6 +997,10 @@ pub fn status(
             "folder_exists": report.folder_exists,
             "in_sync": in_sync,
             "counts": counts,
+            "ignored": {
+                "local": report.ignored_local,
+                "cloud": report.ignored_cloud,
+            },
             "files": files,
         }))
         .map_err(io::Error::from)?;
@@ -1031,6 +1043,13 @@ pub fn status(
                 .map(|s| format!("{} {}", report.count(*s), s.as_str()))
                 .collect();
             writeln!(buf, "{}", parts.join(", "))?;
+        }
+        if report.ignored_local > 0 || report.ignored_cloud > 0 {
+            writeln!(
+                buf,
+                "ignored: {} local, {} cloud",
+                report.ignored_local, report.ignored_cloud
+            )?;
         }
     }
     out.write_all(&buf)?;
@@ -3667,8 +3686,93 @@ mod tests {
             json: bool,
         ) -> (bool, String) {
             let mut out = Vec::new();
-            let in_sync = status(cloud, files, folder, "assets", json, &mut out).unwrap();
+            let in_sync = status(
+                cloud,
+                files,
+                folder,
+                &IgnoreSet::default(),
+                0,
+                "assets",
+                json,
+                &mut out,
+            )
+            .unwrap();
             (in_sync, String::from_utf8(out).unwrap())
+        }
+
+        fn run_ignoring(
+            cloud: &MemoryCloud,
+            files: &[LocalFile],
+            patterns: &[&str],
+            ignored_local: usize,
+            json: bool,
+        ) -> (bool, String) {
+            let patterns: Vec<String> = patterns.iter().map(|p| (*p).to_owned()).collect();
+            let ignore = IgnoreSet::new(&patterns).unwrap();
+            let mut out = Vec::new();
+            let in_sync = status(
+                cloud,
+                files,
+                "Decks",
+                &ignore,
+                ignored_local,
+                "assets",
+                json,
+                &mut out,
+            )
+            .unwrap();
+            (in_sync, String::from_utf8(out).unwrap())
+        }
+
+        #[test]
+        fn ignored_counts_are_printed_only_when_non_zero() {
+            let cloud = status_cloud();
+            let files = [local("same.png", "same"), local("fresh.png", "f")];
+            let (_, text) = run(&cloud, &files, "Decks", false);
+            assert!(!text.contains("ignored"));
+            let (_, text) = run(&cloud, &files, "Decks", true);
+            let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(v["ignored"], json!({"local": 0, "cloud": 0}));
+
+            // One cloud entry (old.png) and two local files are ignored.
+            let (in_sync, text) = run_ignoring(&cloud, &files, &["old.png"], 2, false);
+            assert!(!in_sync);
+            assert!(!text.contains("  missing    old.png"));
+            assert!(text.ends_with("ignored: 2 local, 1 cloud\n"), "{text}");
+            let (_, text) = run_ignoring(&cloud, &files, &["old.png"], 2, true);
+            let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(v["ignored"], json!({"local": 2, "cloud": 1}));
+        }
+
+        #[test]
+        fn ignored_line_also_shows_when_in_sync() {
+            let mut index = CloudIndex::empty();
+            index.entries = vec![
+                IndexEntry::new(
+                    key("same", "same.png"),
+                    "same.png",
+                    None,
+                    None,
+                    None,
+                    "Decks",
+                ),
+                IndexEntry::new(key("x", "x.log"), "x.log", None, None, None, "Decks"),
+            ];
+            let cloud = seed(
+                MemoryCloud::new()
+                    .with_file(&key("same", "same.png"), "x")
+                    .with_file(&key("x", "x.log"), "x"),
+                &index,
+            );
+            let files = [local("same.png", "same")];
+            let (in_sync, text) = run_ignoring(&cloud, &files, &["*.log"], 1, false);
+            assert!(in_sync);
+            assert_eq!(
+                text,
+                "Compare assets with cloud folder Decks:\n\
+                 In sync: 1 file identical.\n\
+                 ignored: 1 local, 1 cloud\n"
+            );
         }
 
         #[test]
@@ -3852,6 +3956,32 @@ mod tests {
             answer: bool,
             manifest: Option<&Path>,
         ) -> Out {
+            push_run_ignoring(
+                cloud,
+                store,
+                files,
+                prune,
+                mode,
+                answer,
+                manifest,
+                &IgnoreSet::default(),
+                0,
+            )
+        }
+
+        /// `files` are the scanned (not ignored) local files.
+        #[allow(clippy::too_many_arguments)]
+        fn push_run_ignoring(
+            cloud: &mut MemoryCloud,
+            store: &BackupStore,
+            files: &[(&str, &str)],
+            prune: bool,
+            mode: RunMode,
+            answer: bool,
+            manifest: Option<&Path>,
+            ignore: &IgnoreSet,
+            ignored_local: usize,
+        ) -> Out {
             let data: HashMap<String, Vec<u8>> = files
                 .iter()
                 .map(|(p, d)| ((*p).to_owned(), d.as_bytes().to_vec()))
@@ -3874,6 +4004,8 @@ mod tests {
                 &read,
                 "Game",
                 prune,
+                ignore,
+                ignored_local,
                 manifest,
                 mode,
                 UNIX_EPOCH,
@@ -3986,6 +4118,8 @@ mod tests {
                 &|_| Ok(Vec::new()),
                 "Game",
                 false,
+                &IgnoreSet::default(),
+                0,
                 None,
                 ASK,
                 UNIX_EPOCH,
@@ -4001,6 +4135,76 @@ mod tests {
                     .starts_with("Push to cloud folder Game:\n")
             );
             assert!(cloud.mutating_calls().is_empty());
+        }
+
+        fn ignoring(patterns: &[&str]) -> IgnoreSet {
+            let patterns: Vec<String> = patterns.iter().map(|p| (*p).to_owned()).collect();
+            IgnoreSet::new(&patterns).unwrap()
+        }
+
+        #[test]
+        fn ignored_files_are_left_alone_with_prune() {
+            let (_dir, store) = setup();
+            let mut cloud = cloud_with(&[("a.png", "A"), ("old.log", "L")]);
+            // `debug.log` is ignored locally and was left out of the scan.
+            let ignore = ignoring(&["*.log"]);
+            let files = [("a.png", "A"), ("new.png", "N")];
+            let run = push_run_ignoring(
+                &mut cloud, &store, &files, true, YES, false, None, &ignore, 1,
+            );
+            run.result.unwrap();
+            assert!(
+                run.text.contains("  upload     new.png  (new)\n"),
+                "{}",
+                run.text
+            );
+            assert!(
+                run.text.contains("ignored: 1 local, 1 cloud\n"),
+                "{}",
+                run.text
+            );
+            assert!(!run.text.contains("debug.log"));
+            assert!(!run.text.contains("old.log"));
+            let index = CloudIndex::load(&cloud).unwrap();
+            assert!(index.entries.iter().any(|e| e.name == "old.log"));
+            assert!(index.entries.iter().any(|e| e.name == "new.png"));
+        }
+
+        #[test]
+        fn manifest_refresh_keeps_entries_of_ignored_paths() {
+            let (_dir, store) = setup();
+            let mdir = tempfile::tempdir().unwrap();
+            let file = manifest_path(&mdir);
+            let mut cloud = MemoryCloud::new();
+            let both = [("a.png", "A"), ("b.png", "B")];
+            push_run_with(&mut cloud, &store, &both, false, YES, false, Some(&file))
+                .result
+                .unwrap();
+            let before = Manifest::load(&file).unwrap();
+
+            // `b.png` is now ignored: left out of the scan, kept in the cloud.
+            let ignore = ignoring(&["b.png"]);
+            let only = [("a.png", "A")];
+            let run = push_run_ignoring(
+                &mut cloud,
+                &store,
+                &only,
+                true,
+                YES,
+                false,
+                Some(&file),
+                &ignore,
+                1,
+            );
+            run.result.unwrap();
+            assert_eq!(Manifest::load(&file).unwrap(), before);
+            assert!(
+                CloudIndex::load(&cloud)
+                    .unwrap()
+                    .entries
+                    .iter()
+                    .any(|e| e.name == "b.png")
+            );
         }
 
         #[test]
@@ -4604,6 +4808,18 @@ mod tests {
             mode: RunMode,
             answer: bool,
         ) -> Out {
+            pull_run_ignoring(cloud, dir, prune, mode, answer, &IgnoreSet::default(), 0)
+        }
+
+        fn pull_run_ignoring(
+            cloud: &MemoryCloud,
+            dir: &mut MemoryDir,
+            prune: bool,
+            mode: RunMode,
+            answer: bool,
+            ignore: &IgnoreSet,
+            ignored_local: usize,
+        ) -> Out {
             let local = dir.local();
             let mut prompts = Vec::new();
             let mut confirm = |p: &str| {
@@ -4617,6 +4833,8 @@ mod tests {
                 &local,
                 "Game",
                 prune,
+                ignore,
+                ignored_local,
                 mode,
                 &mut confirm,
                 &mut out,
@@ -4704,6 +4922,8 @@ mod tests {
                 &[],
                 "Game",
                 false,
+                &IgnoreSet::default(),
+                0,
                 ASK,
                 &mut confirm,
                 &mut out,
@@ -4716,6 +4936,23 @@ mod tests {
                     .starts_with("Pull from cloud folder Game:\n")
             );
             assert!(dir.log.is_empty());
+        }
+
+        #[test]
+        fn ignored_cloud_files_are_not_downloaded() {
+            let cloud = cloud_with(&[("a.png", "A"), ("skip.log", "L")]);
+            let mut dir = MemoryDir::default();
+            let patterns = ["*.log".to_owned()];
+            let ignore = IgnoreSet::new(&patterns).unwrap();
+            let run = pull_run_ignoring(&cloud, &mut dir, true, YES, false, &ignore, 2);
+            run.result.unwrap();
+            assert_eq!(dir.names(), ["a.png"]);
+            assert!(!run.text.contains("skip.log"));
+            assert!(
+                run.text.contains("ignored: 2 local, 1 cloud\n"),
+                "{}",
+                run.text
+            );
         }
 
         #[test]
@@ -4927,6 +5164,8 @@ mod tests {
                 &read,
                 "Game",
                 false,
+                &IgnoreSet::default(),
+                0,
                 Some(&manifest),
                 YES,
                 UNIX_EPOCH,

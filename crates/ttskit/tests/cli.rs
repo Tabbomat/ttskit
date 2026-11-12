@@ -262,3 +262,14 @@ fn cloud_scan_fails_on_missing_or_invalid_files() {
     assert!(text.starts_with("error: "), "{text}");
     assert!(text.contains("not a valid save"), "{text}");
 }
+
+#[test]
+fn cloud_manifest_rejects_an_invalid_ignore_pattern() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("ttskit.toml");
+    std::fs::write(&config, format!("{CONFIG}ignore = [\"{{a\"]\n")).unwrap();
+    let output = ttskit(&["cloud", "manifest", "--config", config.to_str().unwrap()]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(stderr(&output).starts_with("error: "));
+    assert_eq!(stdout(&output), "");
+}
