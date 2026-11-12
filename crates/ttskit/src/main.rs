@@ -66,6 +66,9 @@ enum CloudCommand {
         /// Print machine-readable JSON instead of text
         #[arg(long)]
         json: bool,
+        /// The project config; its directory gets the manifest. Default: ttskit.toml in the current directory if it exists
+        #[arg(long, value_name = "PATH")]
+        config: Option<PathBuf>,
         /// Directory for the index backups [default: <local app data>/ttskit/cloud-backups]
         #[arg(long, env = "TTSKIT_BACKUP_DIR", value_name = "DIR")]
         backup_dir: Option<PathBuf>,
@@ -206,6 +209,14 @@ fn connect() -> Result<Box<dyn CloudBackend>, String> {
     )
 }
 
+/// The directory holding the project config.
+fn config_dir_of(config: &Path) -> &Path {
+    match config.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    }
+}
+
 fn run_simple(command: Command) -> Result<(), String> {
     match command {
         Command::Cloud {
@@ -256,12 +267,33 @@ fn run_simple(command: Command) -> Result<(), String> {
                     dry_run,
                     yes,
                     json,
+                    config,
                     backup_dir,
                 },
         } => {
             // Check everything local before connecting to Steam.
             let (name, data) =
                 cloud::read_upload_file(&file, name.as_deref()).map_err(|e| e.to_string())?;
+            let config = match config {
+                Some(path) => Some(path),
+                None => {
+                    let default = PathBuf::from(ttskit_cloud::ProjectConfig::FILE_NAME);
+                    default.exists().then_some(default)
+                }
+            };
+            let manifest = match config {
+                Some(config) => {
+                    let project =
+                        ttskit_cloud::ProjectConfig::load(&config).map_err(|e| e.to_string())?;
+                    let config_dir = config_dir_of(&config);
+                    let dir = project.resolve_local_dir(config_dir);
+                    Some(cloud::ManifestTarget {
+                        file: config_dir.join(ttskit_cloud::Manifest::FILE_NAME),
+                        local_path: cloud::local_path_in(&dir, &file),
+                    })
+                }
+                None => None,
+            };
             let store = BackupStore::new(cloud::backup_dir(backup_dir).map_err(|e| e.to_string())?);
             let mut backend = connect()?;
             let req = cloud::UploadRequest {
@@ -269,6 +301,7 @@ fn run_simple(command: Command) -> Result<(), String> {
                 data: &data,
                 folder: folder.as_deref().unwrap_or_default(),
                 mode: cloud::RunMode { dry_run, yes, json },
+                manifest,
             };
             let mut out = std::io::stdout().lock();
             cloud::upload_file(
@@ -359,10 +392,8 @@ fn run_simple(command: Command) -> Result<(), String> {
         } => {
             // Do all the local work before connecting to Steam.
             let project = ttskit_cloud::ProjectConfig::load(&config).map_err(|e| e.to_string())?;
-            let config_dir = match config.parent() {
-                Some(parent) if !parent.as_os_str().is_empty() => parent,
-                _ => Path::new("."),
-            };
+            let config_dir = config_dir_of(&config);
+            let manifest_file = config_dir.join(ttskit_cloud::Manifest::FILE_NAME);
             let dir = project.resolve_local_dir(config_dir);
             let local = ttskit_cloud::scan_local(&dir).map_err(|e| e.to_string())?;
             let store = BackupStore::new(cloud::backup_dir(backup_dir).map_err(|e| e.to_string())?);
@@ -375,6 +406,7 @@ fn run_simple(command: Command) -> Result<(), String> {
                 &|rel| std::fs::read(dir.join(rel)),
                 &project.cloud_folder,
                 prune,
+                Some(&manifest_file),
                 cloud::RunMode { dry_run, yes, json },
                 SystemTime::now(),
                 &cloud::format_date(&jiff::Zoned::now()),
@@ -399,10 +431,7 @@ fn run_simple(command: Command) -> Result<(), String> {
         } => {
             // Do all the local work before connecting to Steam.
             let project = ttskit_cloud::ProjectConfig::load(&config).map_err(|e| e.to_string())?;
-            let config_dir = match config.parent() {
-                Some(parent) if !parent.as_os_str().is_empty() => parent,
-                _ => Path::new("."),
-            };
+            let config_dir = config_dir_of(&config);
             let dir = project.resolve_local_dir(config_dir);
             // A directory that does not exist yet is an empty one; it is
             // created when a pull writes into it.

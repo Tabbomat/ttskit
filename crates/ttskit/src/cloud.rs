@@ -8,10 +8,10 @@ use std::time::SystemTime;
 use serde_json::json;
 use ttskit_cloud::{
     Action, Backup, BackupError, BackupStore, CloudBackend, CloudError, CloudIndex, DeleteError,
-    DeletePlan, DeleteTarget, FileState, IndexEntry, IndexError, LocalDir, LocalFile, PullError,
-    PushError, Reason, RestoreAction, StatusError, UgcUrl, UploadError, UploadPlan, compare,
-    delete, find_entries, is_game_internal, normalize_folder, plan_delete, plan_pull, plan_push,
-    plan_restore, plan_upload, pull, push, restore, upload,
+    DeletePlan, DeleteTarget, FileState, IndexEntry, IndexError, LocalDir, LocalFile, Manifest,
+    ManifestEntry, PullError, PushError, Reason, RestoreAction, StatusError, UgcUrl, UploadError,
+    UploadPlan, compare, delete, find_entries, is_game_internal, normalize_folder, plan_delete,
+    plan_pull, plan_push, plan_restore, plan_upload, pull, push, restore, upload,
 };
 
 /// Errors of the `cloud` subcommands.
@@ -90,6 +90,16 @@ pub enum CommandError {
     /// A confirmation is needed but cannot be asked for.
     #[error("confirmation needed: run again with --yes (or --dry-run)")]
     ConfirmationNeeded,
+    /// The cloud work is done but the manifest could not be updated.
+    #[error("the {what} succeeded, but the manifest {} could not be updated: {reason}", path.display())]
+    ManifestUpdate {
+        /// What succeeded, e.g. "push".
+        what: &'static str,
+        /// The manifest file.
+        path: PathBuf,
+        /// Why the update failed.
+        reason: String,
+    },
 }
 
 impl From<DeleteError> for CommandError {
@@ -319,6 +329,50 @@ fn write_pretty_json(
     Ok(())
 }
 
+/// Loads the manifest at `path`, lets `update` change it and saves it. Every
+/// failure becomes [`CommandError::ManifestUpdate`] for the finished `what`.
+fn update_manifest(
+    path: &Path,
+    what: &'static str,
+    update: impl FnOnce(&mut Manifest) -> Result<(), String>,
+) -> Result<(), CommandError> {
+    let fail = |reason: String| CommandError::ManifestUpdate {
+        what,
+        path: path.to_owned(),
+        reason,
+    };
+    let mut manifest = Manifest::load(path).map_err(|e| fail(e.to_string()))?;
+    update(&mut manifest).map_err(&fail)?;
+    manifest.save(path).map_err(|e| fail(e.to_string()))
+}
+
+/// The path of `file` relative to `dir`, `/` separated, or `None` when the
+/// file is not below `dir` (or one of them cannot be resolved or is not
+/// UTF-8). Both paths are canonicalized, so they must exist.
+pub fn local_path_in(dir: &Path, file: &Path) -> Option<String> {
+    let dir = std::fs::canonicalize(dir).ok()?;
+    let file = std::fs::canonicalize(file).ok()?;
+    let rel = file.strip_prefix(&dir).ok()?;
+    let parts: Vec<&str> = rel
+        .components()
+        .map(|c| c.as_os_str().to_str())
+        .collect::<Option<_>>()?;
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("/"))
+    }
+}
+
+/// Where `cloud upload` records the file in the project manifest.
+pub struct ManifestTarget {
+    /// The manifest file.
+    pub file: PathBuf,
+    /// The local path of the uploaded file relative to the project's local
+    /// directory, `/` separated; `None` if it is outside.
+    pub local_path: Option<String>,
+}
+
 /// What to upload and where.
 pub struct UploadRequest<'a> {
     /// The display name in the cloud.
@@ -329,6 +383,8 @@ pub struct UploadRequest<'a> {
     pub folder: &'a str,
     /// Dry run, confirmation and output format.
     pub mode: RunMode,
+    /// The manifest to record a completed upload in, if any.
+    pub manifest: Option<ManifestTarget>,
 }
 
 fn write_upload_plan(plan: &UploadPlan, out: &mut Vec<u8>) -> io::Result<()> {
@@ -372,7 +428,9 @@ fn write_upload_plan(plan: &UploadPlan, out: &mut Vec<u8>) -> io::Result<()> {
 ///
 /// The plan is printed (and flushed) before anything is asked or changed. With
 /// `--json` only one JSON object is printed, at the end. The URL is the last
-/// line of the text output.
+/// line of the text output. A completed upload (also "already uploaded") is
+/// recorded in `req.manifest`; if that fails, the output is printed first and
+/// the error returned afterwards.
 pub fn upload_file(
     backend: &mut dyn CloudBackend,
     store: &BackupStore,
@@ -401,6 +459,7 @@ pub fn upload_file(
     let mut done = false;
     let mut url = None;
     let mut backup = None;
+    let mut print_url = false;
     if noop {
         done = true;
         url.clone_from(&plan.existing_url);
@@ -415,11 +474,39 @@ pub fn upload_file(
                     if let Some(name) = &backup {
                         writeln!(out, "Backed up the cloud index to {name}.")?;
                     }
-                    writeln!(out, "{}", url.as_deref().unwrap_or_default())?;
+                    print_url = true;
                 }
             }
             Decision::DryRun | Decision::Cancelled => {}
         }
+    }
+
+    let mut manifest_file = None;
+    let mut manifest_error = None;
+    // A noop counts as done even for a dry run, which must write nothing.
+    if let (true, Some(target)) = (done && !mode.dry_run, &req.manifest) {
+        let entry = ManifestEntry {
+            path: target.local_path.clone(),
+            cloud_path: display_path(&plan.display_folder, &plan.name),
+            sha1: plan.sha1.to_ascii_uppercase(),
+            size: plan.size,
+            url: url.clone().unwrap_or_default(),
+        };
+        match update_manifest(&target.file, "upload", |m| {
+            m.upsert(entry);
+            Ok(())
+        }) {
+            Ok(()) => {
+                manifest_file = Some(target.file.display().to_string());
+                if !mode.json {
+                    writeln!(out, "Updated manifest {}.", target.file.display())?;
+                }
+            }
+            Err(e) => manifest_error = Some(e),
+        }
+    }
+    if print_url {
+        writeln!(out, "{}", url.as_deref().unwrap_or_default())?;
     }
 
     if mode.json {
@@ -441,12 +528,13 @@ pub fn upload_file(
                 "done": done,
                 "url": url,
                 "backup": backup,
+                "manifest": manifest_file,
             }),
             out,
         )?;
     }
     out.flush()?;
-    Ok(())
+    manifest_error.map_or(Ok(()), Err)
 }
 
 /// Makes the cloud folder `folder` match the scanned local files: uploads new
@@ -457,6 +545,11 @@ pub fn upload_file(
 /// plan with conflicts is printed and then refused, even for a dry run. With
 /// `--json` only one JSON object is printed, at the end (before the error for
 /// a plan with conflicts).
+///
+/// With a `manifest` path, a push that completed (also when there was nothing
+/// to do, but never for a dry run, a cancelled push or a failure) refreshes
+/// that manifest from the local files and the new cloud index. If that fails,
+/// the output is printed first and the error returned afterwards.
 #[allow(clippy::too_many_arguments)]
 pub fn sync_push(
     backend: &mut dyn CloudBackend,
@@ -465,6 +558,7 @@ pub fn sync_push(
     read_local: &dyn Fn(&str) -> io::Result<Vec<u8>>,
     folder: &str,
     prune: bool,
+    manifest: Option<&Path>,
     mode: RunMode,
     now: SystemTime,
     date: &str,
@@ -486,21 +580,25 @@ pub fn sync_push(
         out.flush()?;
     }
 
-    let plan_json =
-        |done: bool, uploaded: &[String], deleted: &[String], backup: &Option<String>| {
-            json!({
-                "plan": plan.sync.to_json(),
-                "dry_run": mode.dry_run,
-                "done": done,
-                "uploaded": uploaded,
-                "deleted": deleted,
-                "backup": backup,
-            })
-        };
+    let plan_json = |done: bool,
+                     uploaded: &[String],
+                     deleted: &[String],
+                     backup: &Option<String>,
+                     manifest: &Option<String>| {
+        json!({
+            "plan": plan.sync.to_json(),
+            "dry_run": mode.dry_run,
+            "done": done,
+            "uploaded": uploaded,
+            "deleted": deleted,
+            "backup": backup,
+            "manifest": manifest,
+        })
+    };
 
     if conflicts > 0 {
         if mode.json {
-            write_pretty_json(&plan_json(false, &[], &[], &None), out)?;
+            write_pretty_json(&plan_json(false, &[], &[], &None, &None), out)?;
         }
         out.flush()?;
         return Err(CommandError::PushConflicts(conflicts));
@@ -549,8 +647,31 @@ pub fn sync_push(
         }
     }
 
+    let mut manifest_file = None;
+    let mut manifest_error = None;
+    // A noop counts as done even for a dry run, which must write nothing.
+    if let (true, Some(path)) = (done && !mode.dry_run, manifest) {
+        let refreshed = update_manifest(path, "push", |m| {
+            let index = CloudIndex::load(backend).map_err(|e| e.to_string())?;
+            m.refresh_for_local(local, folder, &index);
+            Ok(())
+        });
+        match refreshed {
+            Ok(()) => {
+                manifest_file = Some(path.display().to_string());
+                if !mode.json {
+                    writeln!(out, "Updated manifest {}.", path.display())?;
+                }
+            }
+            Err(e) => manifest_error = Some(e),
+        }
+    }
+
     if mode.json {
-        write_pretty_json(&plan_json(done, &uploaded, &deleted, &backup), out)?;
+        write_pretty_json(
+            &plan_json(done, &uploaded, &deleted, &backup, &manifest_file),
+            out,
+        )?;
     } else if needs_prune > 0 {
         writeln!(
             out,
@@ -564,7 +685,7 @@ pub fn sync_push(
         )?;
     }
     out.flush()?;
-    Ok(())
+    manifest_error.map_or(Ok(()), Err)
 }
 
 /// Makes the local directory match the cloud folder `folder`: downloads new
@@ -2001,9 +2122,20 @@ mod tests {
         fn up(
             cloud: &mut MemoryCloud,
             store: &BackupStore,
+            file: (&str, &[u8], &str),
+            mode: RunMode,
+            answer: bool,
+        ) -> Run {
+            up_with(cloud, store, file, mode, answer, None)
+        }
+
+        fn up_with(
+            cloud: &mut MemoryCloud,
+            store: &BackupStore,
             (name, data, folder): (&str, &[u8], &str),
             mode: RunMode,
             answer: bool,
+            manifest: Option<ManifestTarget>,
         ) -> Run {
             let mut prompts = Vec::new();
             let mut confirm = |p: &str| {
@@ -2016,6 +2148,7 @@ mod tests {
                 data,
                 folder,
                 mode,
+                manifest,
             };
             let result = upload_file(cloud, store, &req, UNIX_EPOCH, DATE, &mut confirm, &mut out);
             Run {
@@ -2118,6 +2251,7 @@ mod tests {
                 data: b"x",
                 folder: "",
                 mode: ASK,
+                manifest: None,
             };
             let err = upload_file(
                 &mut cloud,
@@ -2274,6 +2408,7 @@ mod tests {
                     "done": false,
                     "url": null,
                     "backup": null,
+                    "manifest": null,
                 })
             );
             assert!(cloud.mutating_calls().is_empty());
@@ -2330,6 +2465,221 @@ mod tests {
             assert_eq!(value["dry_run"], false);
             assert_eq!(value["url"], serde_json::Value::Null);
             assert!(cloud.mutating_calls().is_empty());
+        }
+
+        fn target(dir: &tempfile::TempDir, local_path: Option<&str>) -> Option<ManifestTarget> {
+            Some(ManifestTarget {
+                file: dir.path().join(Manifest::FILE_NAME),
+                local_path: local_path.map(str::to_owned),
+            })
+        }
+
+        #[test]
+        fn upload_records_the_file_in_the_manifest() {
+            let (_dir, store) = setup();
+            let mdir = tempfile::tempdir().unwrap();
+            let file = mdir.path().join(Manifest::FILE_NAME);
+            let mut cloud = MemoryCloud::new();
+            let run = up_with(
+                &mut cloud,
+                &store,
+                ("deck.png", b"hello", "Decks\\Old"),
+                YES,
+                false,
+                target(&mdir, Some("art/deck.png")),
+            );
+            run.result.unwrap();
+            let url = url_of(&cloud, b"hello", "deck.png");
+            let lines: Vec<&str> = run.text.lines().collect();
+            assert_eq!(lines[lines.len() - 1], url);
+            assert_eq!(
+                lines[lines.len() - 2],
+                format!("Updated manifest {}.", file.display())
+            );
+            assert_eq!(
+                Manifest::load(&file).unwrap().entries,
+                [ManifestEntry {
+                    path: Some("art/deck.png".into()),
+                    cloud_path: "Decks/Old/deck.png".into(),
+                    sha1: sha1_hex(b"hello").to_ascii_uppercase(),
+                    size: 5,
+                    url,
+                }]
+            );
+        }
+
+        #[test]
+        fn upload_outside_the_local_dir_and_in_the_root_folder() {
+            let (_dir, store) = setup();
+            let mdir = tempfile::tempdir().unwrap();
+            let file = mdir.path().join(Manifest::FILE_NAME);
+            let mut cloud = MemoryCloud::new();
+            up_with(
+                &mut cloud,
+                &store,
+                ("a.png", b"x", ""),
+                YES,
+                false,
+                target(&mdir, None),
+            )
+            .result
+            .unwrap();
+            let manifest = Manifest::load(&file).unwrap();
+            assert_eq!(manifest.entries.len(), 1);
+            assert_eq!(manifest.entries[0].path, None);
+            assert_eq!(manifest.entries[0].cloud_path, "a.png");
+
+            // Uploading it again changes nothing and still reports success.
+            let before = std::fs::read(&file).unwrap();
+            let run = up_with(
+                &mut cloud,
+                &store,
+                ("a.png", b"x", ""),
+                ASK,
+                false,
+                target(&mdir, None),
+            );
+            run.result.unwrap();
+            assert!(run.text.starts_with("Already uploaded: "));
+            assert!(
+                run.text
+                    .ends_with(&format!("Updated manifest {}.\n", file.display()))
+            );
+            assert_eq!(std::fs::read(&file).unwrap(), before);
+        }
+
+        #[test]
+        fn upload_replaces_the_entry_of_the_same_local_path() {
+            let (_dir, store) = setup();
+            let mdir = tempfile::tempdir().unwrap();
+            let file = mdir.path().join(Manifest::FILE_NAME);
+            let mut cloud = MemoryCloud::new();
+            for data in [&b"one"[..], b"two"] {
+                up_with(
+                    &mut cloud,
+                    &store,
+                    ("a.png", data, "F"),
+                    YES,
+                    false,
+                    target(&mdir, Some("a.png")),
+                )
+                .result
+                .unwrap();
+            }
+            let manifest = Manifest::load(&file).unwrap();
+            assert_eq!(manifest.entries.len(), 1);
+            assert_eq!(manifest.entries[0].size, 3);
+            assert_eq!(
+                manifest.entries[0].sha1,
+                sha1_hex(b"two").to_ascii_uppercase()
+            );
+        }
+
+        #[test]
+        fn dry_run_and_declined_uploads_write_no_manifest() {
+            let (_dir, store) = setup();
+            let mdir = tempfile::tempdir().unwrap();
+            let file = mdir.path().join(Manifest::FILE_NAME);
+            let mut cloud = MemoryCloud::new();
+            for (mode, answer) in [(DRY, false), (ASK, false), (json_mode(true), false)] {
+                let run = up_with(
+                    &mut cloud,
+                    &store,
+                    ("a.png", b"x", ""),
+                    mode,
+                    answer,
+                    target(&mdir, Some("a.png")),
+                );
+                run.result.unwrap();
+                assert!(!run.text.contains("Updated manifest"));
+            }
+            // A noop dry run writes nothing either.
+            up(&mut cloud, &store, ("a.png", b"x", ""), YES, false)
+                .result
+                .unwrap();
+            let run = up_with(
+                &mut cloud,
+                &store,
+                ("a.png", b"x", ""),
+                json_mode(true),
+                false,
+                target(&mdir, Some("a.png")),
+            );
+            run.result.unwrap();
+            let value: serde_json::Value = serde_json::from_str(&run.text).unwrap();
+            assert!(value["manifest"].is_null());
+            assert!(!file.exists());
+        }
+
+        #[test]
+        fn json_reports_the_manifest_path() {
+            let (_dir, store) = setup();
+            let mdir = tempfile::tempdir().unwrap();
+            let file = mdir.path().join(Manifest::FILE_NAME);
+            let mut cloud = MemoryCloud::new();
+            let run = up_with(
+                &mut cloud,
+                &store,
+                ("a.png", b"x", ""),
+                json_mode(false),
+                false,
+                target(&mdir, Some("a.png")),
+            );
+            run.result.unwrap();
+            let value: serde_json::Value = serde_json::from_str(&run.text).unwrap();
+            assert_eq!(value["manifest"], file.display().to_string());
+            assert!(file.exists());
+        }
+
+        #[test]
+        fn manifest_failure_is_reported_after_the_upload_succeeded() {
+            let (_dir, store) = setup();
+            let mdir = tempfile::tempdir().unwrap();
+            // A directory cannot be read or replaced as a manifest file.
+            let broken = Some(ManifestTarget {
+                file: mdir.path().to_path_buf(),
+                local_path: None,
+            });
+            let mut cloud = MemoryCloud::new();
+            let run = up_with(&mut cloud, &store, ("a.png", b"x", ""), YES, false, broken);
+            let err = run.result.unwrap_err();
+            assert!(matches!(err, CommandError::ManifestUpdate { .. }));
+            assert!(
+                err.to_string()
+                    .starts_with("the upload succeeded, but the manifest ")
+            );
+            assert_eq!(
+                run.text.lines().last(),
+                Some(url_of(&cloud, b"x", "a.png").as_str())
+            );
+            assert!(!run.text.contains("Updated manifest"));
+            assert_eq!(CloudIndex::load(&cloud).unwrap().entries.len(), 1);
+        }
+
+        #[test]
+        fn local_path_in_cases() {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().join("proj");
+            let nested = root.join("a").join("b");
+            std::fs::create_dir_all(&nested).unwrap();
+            let top = root.join("top.png");
+            let deep = nested.join("deep.png");
+            let outside = dir.path().join("outside.png");
+            for f in [&top, &deep, &outside] {
+                std::fs::write(f, b"x").unwrap();
+            }
+            assert_eq!(local_path_in(&root, &top).as_deref(), Some("top.png"));
+            assert_eq!(local_path_in(&root, &deep).as_deref(), Some("a/b/deep.png"));
+            assert_eq!(local_path_in(&root, &outside), None);
+            // Unnormalized spellings resolve to the same file.
+            let roundabout = nested.join("..").join("..").join("top.png");
+            assert_eq!(
+                local_path_in(&root, &roundabout).as_deref(),
+                Some("top.png")
+            );
+            // The directory itself, and files that do not exist.
+            assert_eq!(local_path_in(&root, &root), None);
+            assert_eq!(local_path_in(&root, &root.join("missing.png")), None);
         }
 
         #[test]
@@ -3036,6 +3386,18 @@ mod tests {
             mode: RunMode,
             answer: bool,
         ) -> Out {
+            push_run_with(cloud, store, files, prune, mode, answer, None)
+        }
+
+        fn push_run_with(
+            cloud: &mut MemoryCloud,
+            store: &BackupStore,
+            files: &[(&str, &str)],
+            prune: bool,
+            mode: RunMode,
+            answer: bool,
+            manifest: Option<&Path>,
+        ) -> Out {
             let data: HashMap<String, Vec<u8>> = files
                 .iter()
                 .map(|(p, d)| ((*p).to_owned(), d.as_bytes().to_vec()))
@@ -3058,6 +3420,7 @@ mod tests {
                 &read,
                 "Game",
                 prune,
+                manifest,
                 mode,
                 UNIX_EPOCH,
                 DATE,
@@ -3169,6 +3532,7 @@ mod tests {
                 &|_| Ok(Vec::new()),
                 "Game",
                 false,
+                None,
                 ASK,
                 UNIX_EPOCH,
                 DATE,
@@ -3357,6 +3721,309 @@ mod tests {
             let index = CloudIndex::load(&cloud).unwrap();
             assert_eq!(index.entries.len(), 1);
             assert!(index.entries[0].url.is_some());
+        }
+
+        fn manifest_path(dir: &tempfile::TempDir) -> PathBuf {
+            dir.path().join(Manifest::FILE_NAME)
+        }
+
+        fn paths(manifest: &Manifest) -> Vec<(Option<&str>, &str)> {
+            manifest
+                .entries
+                .iter()
+                .map(|e| (e.path.as_deref(), e.cloud_path.as_str()))
+                .collect()
+        }
+
+        #[test]
+        fn push_writes_a_sorted_manifest() {
+            let (_dir, store) = setup();
+            let mdir = tempfile::tempdir().unwrap();
+            let file = manifest_path(&mdir);
+            let mut cloud = MemoryCloud::new();
+            let files = [("b.png", "B"), ("a.png", "A")];
+            let run = push_run_with(&mut cloud, &store, &files, false, YES, false, Some(&file));
+            run.result.unwrap();
+            assert!(run.text.ends_with(&format!(
+                "deleted 0 files.\nUpdated manifest {}.\n",
+                file.display()
+            )));
+            let manifest = Manifest::load(&file).unwrap();
+            assert_eq!(
+                paths(&manifest),
+                [(Some("a.png"), "Game/a.png"), (Some("b.png"), "Game/b.png")]
+            );
+            let a = &manifest.entries[0];
+            assert_eq!(a.sha1, sha1_hex(b"A").to_ascii_uppercase());
+            assert_eq!(a.size, 1);
+            let index = CloudIndex::load(&cloud).unwrap();
+            let indexed = index.entries.iter().find(|e| e.name == "a.png").unwrap();
+            assert_eq!(Some(&a.url), indexed.url.as_ref());
+            let text = std::fs::read_to_string(&file).unwrap();
+            assert_eq!(text, manifest.to_json());
+            assert!(text.find("Game/a.png").unwrap() < text.find("Game/b.png").unwrap());
+        }
+
+        #[test]
+        fn repeated_push_keeps_the_manifest_byte_identical() {
+            let (_dir, store) = setup();
+            let mdir = tempfile::tempdir().unwrap();
+            let file = manifest_path(&mdir);
+            let mut cloud = MemoryCloud::new();
+            push_run_with(&mut cloud, &store, &NEW, false, YES, false, Some(&file))
+                .result
+                .unwrap();
+            let first = std::fs::read(&file).unwrap();
+            cloud.clear_calls();
+            let run = push_run_with(&mut cloud, &store, &NEW, false, ASK, false, Some(&file));
+            run.result.unwrap();
+            assert!(cloud.mutating_calls().is_empty());
+            assert_eq!(
+                run.text,
+                format!(
+                    "Push to cloud folder Game:\n2 identical\nUpdated manifest {}.\n",
+                    file.display()
+                )
+            );
+            assert_eq!(std::fs::read(&file).unwrap(), first);
+        }
+
+        #[test]
+        fn noop_push_creates_a_missing_manifest() {
+            let (_dir, store) = setup();
+            let mdir = tempfile::tempdir().unwrap();
+            let file = manifest_path(&mdir);
+            let mut cloud = cloud_with(&[("a.png", "A")]);
+            push_run_with(
+                &mut cloud,
+                &store,
+                &NEW[..1],
+                false,
+                YES,
+                false,
+                Some(&file),
+            )
+            .result
+            .unwrap();
+            assert_eq!(
+                paths(&Manifest::load(&file).unwrap()),
+                [(Some("a.png"), "Game/a.png")]
+            );
+        }
+
+        #[test]
+        fn dry_run_conflicts_decline_and_failure_write_no_manifest() {
+            let (_dir, store) = setup();
+            let mdir = tempfile::tempdir().unwrap();
+            let file = manifest_path(&mdir);
+
+            // Dry run, also when the plan is a noop.
+            for mut cloud in [MemoryCloud::new(), cloud_with(&[("a.png", "A")])] {
+                let files = &NEW[..1];
+                let run = push_run_with(&mut cloud, &store, files, false, DRY, false, Some(&file));
+                run.result.unwrap();
+                assert!(!run.text.contains("manifest"));
+                let run = push_run_with(
+                    &mut cloud,
+                    &store,
+                    files,
+                    false,
+                    json_mode(true),
+                    false,
+                    Some(&file),
+                );
+                run.result.unwrap();
+                let value: serde_json::Value = serde_json::from_str(&run.text).unwrap();
+                assert!(value["manifest"].is_null());
+            }
+
+            // Declined.
+            let mut cloud = MemoryCloud::new();
+            push_run_with(&mut cloud, &store, &NEW, false, ASK, false, Some(&file))
+                .result
+                .unwrap();
+
+            // Conflicts.
+            let conflicting = [("a.png", "1"), ("A.png", "2")];
+            for mode in [DRY, YES, json_mode(false)] {
+                let mut cloud = MemoryCloud::new();
+                let run = push_run_with(
+                    &mut cloud,
+                    &store,
+                    &conflicting,
+                    false,
+                    mode,
+                    true,
+                    Some(&file),
+                );
+                assert!(matches!(
+                    run.result.unwrap_err(),
+                    CommandError::PushConflicts(2)
+                ));
+                assert!(!run.text.contains("Updated manifest"));
+            }
+
+            // An incomplete push.
+            let mut cloud = MemoryCloud::new();
+            cloud.fail_once(Op::Share, None, CloudError::Backend("boom".into()));
+            let run = push_run_with(
+                &mut cloud,
+                &store,
+                &NEW[..1],
+                false,
+                YES,
+                false,
+                Some(&file),
+            );
+            assert!(run.result.is_err());
+            assert!(!run.text.contains("manifest"));
+
+            assert!(!file.exists());
+        }
+
+        #[test]
+        fn json_reports_the_manifest_path() {
+            let (_dir, store) = setup();
+            let mdir = tempfile::tempdir().unwrap();
+            let file = manifest_path(&mdir);
+            let mut cloud = MemoryCloud::new();
+            let run = push_run_with(
+                &mut cloud,
+                &store,
+                &NEW,
+                false,
+                json_mode(false),
+                false,
+                Some(&file),
+            );
+            run.result.unwrap();
+            let value: serde_json::Value = serde_json::from_str(&run.text).unwrap();
+            assert_eq!(value["manifest"], file.display().to_string());
+            assert!(file.exists());
+        }
+
+        #[test]
+        fn changed_file_without_prune_is_not_linked_to_the_old_version() {
+            let (_dir, store) = setup();
+            let mdir = tempfile::tempdir().unwrap();
+            let file = manifest_path(&mdir);
+            let mut cloud = cloud_with(&[("a.png", "old")]);
+            let old = [("a.png", "old")];
+            push_run_with(&mut cloud, &store, &old, false, YES, false, Some(&file))
+                .result
+                .unwrap();
+            assert_eq!(
+                paths(&Manifest::load(&file).unwrap()),
+                [(Some("a.png"), "Game/a.png")]
+            );
+
+            let new = [("a.png", "new"), ("b.png", "B")];
+            let run = push_run_with(&mut cloud, &store, &new, false, YES, false, Some(&file));
+            run.result.unwrap();
+            assert!(run.text.contains("not pushed"));
+            assert_eq!(
+                paths(&Manifest::load(&file).unwrap()),
+                [(Some("b.png"), "Game/b.png")]
+            );
+
+            // With prune the new version replaces the old one.
+            push_run_with(&mut cloud, &store, &new, true, YES, false, Some(&file))
+                .result
+                .unwrap();
+            let manifest = Manifest::load(&file).unwrap();
+            assert_eq!(
+                paths(&manifest),
+                [(Some("a.png"), "Game/a.png"), (Some("b.png"), "Game/b.png")]
+            );
+            assert_eq!(
+                manifest.entries[0].sha1,
+                sha1_hex(b"new").to_ascii_uppercase()
+            );
+        }
+
+        #[test]
+        fn pruned_files_leave_the_manifest_and_pathless_entries_stay() {
+            let (_dir, store) = setup();
+            let mdir = tempfile::tempdir().unwrap();
+            let file = manifest_path(&mdir);
+            let keep = ManifestEntry {
+                path: None,
+                cloud_path: "Other/k.png".into(),
+                sha1: sha1_hex(b"k").to_ascii_uppercase(),
+                size: 1,
+                url: "https://u/k".into(),
+            };
+            Manifest {
+                entries: vec![keep.clone()],
+            }
+            .save(&file)
+            .unwrap();
+
+            let mut cloud = MemoryCloud::new();
+            let both = [("a.png", "A"), ("old.png", "O")];
+            push_run_with(&mut cloud, &store, &both, false, YES, false, Some(&file))
+                .result
+                .unwrap();
+            assert_eq!(
+                paths(&Manifest::load(&file).unwrap()),
+                [
+                    (Some("a.png"), "Game/a.png"),
+                    (Some("old.png"), "Game/old.png"),
+                    (None, "Other/k.png"),
+                ]
+            );
+
+            let only = [("a.png", "A")];
+            let run = push_run_with(&mut cloud, &store, &only, true, YES, false, Some(&file));
+            run.result.unwrap();
+            assert!(run.text.contains("deleted    old.png"));
+            let manifest = Manifest::load(&file).unwrap();
+            assert_eq!(
+                paths(&manifest),
+                [(Some("a.png"), "Game/a.png"), (None, "Other/k.png")]
+            );
+            assert_eq!(manifest.entries[1], keep);
+        }
+
+        #[test]
+        fn manifest_failure_is_reported_after_the_push_succeeded() {
+            let (_dir, store) = setup();
+            let mdir = tempfile::tempdir().unwrap();
+            // A directory cannot be read or replaced as a manifest file.
+            let file = mdir.path().to_path_buf();
+            let mut cloud = MemoryCloud::new();
+            let run = push_run_with(
+                &mut cloud,
+                &store,
+                &NEW[..1],
+                false,
+                YES,
+                false,
+                Some(&file),
+            );
+            let err = run.result.unwrap_err();
+            assert!(matches!(err, CommandError::ManifestUpdate { .. }));
+            assert!(
+                err.to_string()
+                    .starts_with("the push succeeded, but the manifest ")
+            );
+            assert!(run.text.ends_with("Uploaded 1 file, deleted 0 files.\n"));
+            assert!(!run.text.contains("Updated manifest"));
+            assert_eq!(CloudIndex::load(&cloud).unwrap().entries.len(), 1);
+
+            let run = push_run_with(
+                &mut cloud,
+                &store,
+                &NEW[..1],
+                false,
+                json_mode(false),
+                false,
+                Some(&file),
+            );
+            assert!(run.result.is_err());
+            let value: serde_json::Value = serde_json::from_str(&run.text).unwrap();
+            assert!(value["manifest"].is_null());
+            assert_eq!(value["done"], true);
         }
     }
 

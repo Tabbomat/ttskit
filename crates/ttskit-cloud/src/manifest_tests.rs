@@ -424,3 +424,23 @@ fn refresh_prefers_the_entry_with_the_files_sha1() {
     assert_eq!(m.entries.len(), 1);
     assert_eq!(m.entries[0].url, url(2, "new"));
 }
+
+#[test]
+fn refresh_ignores_entries_with_another_sha1_and_drops_the_stale_link() {
+    let idx = index(vec![ie(1, "old", "a.png", ""), ie(2, "b", "b.png", "")]);
+    let mut m = manifest(vec![
+        me(Some("a.png"), "a.png", "older"),
+        me(None, "a.png", "old"),
+    ]);
+    m.refresh_for_local(&[local("a.png", "changed"), local("b.png", "b")], "", &idx);
+    m.entries.sort_by(ManifestEntry::order);
+    assert_eq!(m.entries.len(), 2);
+    // The path-less entry survives; a.png is not linked at all.
+    assert_eq!(m.entries[0].path, None);
+    assert_eq!(m.entries[1].path.as_deref(), Some("b.png"));
+
+    // Without any entry for the name, nothing is added.
+    let mut m = Manifest::default();
+    m.refresh_for_local(&[local("a.png", "changed")], "", &idx);
+    assert!(m.entries.is_empty());
+}

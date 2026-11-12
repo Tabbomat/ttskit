@@ -249,10 +249,12 @@ impl Manifest {
     /// For each of `local` (paths relative, `/` separated) the index entry in
     /// the cloud folder `root_folder` plus the file's directory, with the
     /// file's name, is upserted with the local path set. Folder and name
-    /// compare ignoring ASCII case; if several entries match, the one with
-    /// the file's SHA1 wins, else the first. Local files without a usable
-    /// index entry are skipped. Then entries whose local path is not in
-    /// `local` are dropped; entries without a path are kept.
+    /// compare ignoring ASCII case; only an entry with the file's SHA1
+    /// counts. A local file without such an entry (or whose entry lacks a URL
+    /// or size) is skipped, and any existing entry with its path is dropped,
+    /// so the manifest never links a changed file to an older cloud version.
+    /// Then entries whose local path is not in `local` are dropped; entries
+    /// without a path are kept.
     pub fn refresh_for_local(
         &mut self,
         local: &[LocalFile],
@@ -273,12 +275,12 @@ impl Manifest {
                 .collect();
             let chosen = matches
                 .iter()
-                .find(|e| e.sha1().eq_ignore_ascii_case(&file.sha1))
-                .or(matches.first());
-            if let Some(entry) =
-                chosen.and_then(|e| ManifestEntry::from_index(e, Some(file.path.clone())))
-            {
-                self.upsert(entry);
+                .find(|e| e.sha1().eq_ignore_ascii_case(&file.sha1));
+            match chosen.and_then(|e| ManifestEntry::from_index(e, Some(file.path.clone()))) {
+                Some(entry) => self.upsert(entry),
+                // No cloud file has this content: never keep a link to an
+                // older version.
+                None => self.entries.retain(|e| e.path.as_ref() != Some(&file.path)),
             }
         }
         self.entries.retain(|e| match &e.path {
