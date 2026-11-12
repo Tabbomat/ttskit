@@ -107,6 +107,43 @@ enum CloudCommand {
         #[command(subcommand)]
         command: SyncCommand,
     },
+    /// Print the project manifest (local only, no Steam needed)
+    Manifest {
+        /// Print the `filename<TAB>URL` list instead of JSON
+        #[arg(long, conflicts_with = "json")]
+        tsv: bool,
+        /// Print the manifest file content (the default)
+        #[arg(long)]
+        json: bool,
+        /// The project config; its directory holds the manifest
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = ttskit_cloud::ProjectConfig::FILE_NAME
+        )]
+        config: PathBuf,
+    },
+    /// Add a `filename<TAB>URL` list of already shared files to the manifest
+    ImportTsv {
+        /// The text file with one `filename<TAB>URL` per line
+        file: PathBuf,
+        /// The project config; its directory holds the manifest
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = ttskit_cloud::ProjectConfig::FILE_NAME
+        )]
+        config: PathBuf,
+        /// Only print the plan
+        #[arg(long, conflicts_with = "yes")]
+        dry_run: bool,
+        /// Do not ask for confirmation
+        #[arg(long)]
+        yes: bool,
+        /// Print machine-readable JSON instead of text
+        #[arg(long)]
+        json: bool,
+    },
     /// Print the download URL of a cloud file
     Url {
         /// Folder path and name (`Decks/back.png`), display name, or cloud name
@@ -449,6 +486,52 @@ fn run_simple(command: Command) -> Result<(), String> {
                 &local,
                 &project.cloud_folder,
                 prune,
+                cloud::RunMode { dry_run, yes, json },
+                &mut ask_on_terminal,
+                &mut out,
+            )
+            .map_err(|e| e.to_string())?;
+            out.flush().map_err(|e| e.to_string())
+        }
+        Command::Cloud {
+            command:
+                CloudCommand::Manifest {
+                    tsv,
+                    json: _,
+                    config,
+                },
+        } => {
+            ttskit_cloud::ProjectConfig::load(&config).map_err(|e| e.to_string())?;
+            let file = config_dir_of(&config).join(ttskit_cloud::Manifest::FILE_NAME);
+            let format = if tsv {
+                cloud::ManifestFormat::Tsv
+            } else {
+                cloud::ManifestFormat::Json
+            };
+            let mut out = std::io::stdout().lock();
+            cloud::show_manifest(&file, format, &mut out).map_err(|e| e.to_string())?;
+            out.flush().map_err(|e| e.to_string())
+        }
+        Command::Cloud {
+            command:
+                CloudCommand::ImportTsv {
+                    file,
+                    config,
+                    dry_run,
+                    yes,
+                    json,
+                },
+        } => {
+            // Do all the local work before connecting to Steam.
+            let text = cloud::read_tsv_file(&file).map_err(|e| e.to_string())?;
+            ttskit_cloud::ProjectConfig::load(&config).map_err(|e| e.to_string())?;
+            let manifest_file = config_dir_of(&config).join(ttskit_cloud::Manifest::FILE_NAME);
+            let backend = connect()?;
+            let mut out = std::io::stdout().lock();
+            cloud::import_tsv(
+                backend.as_ref(),
+                &text,
+                &manifest_file,
                 cloud::RunMode { dry_run, yes, json },
                 &mut ask_on_terminal,
                 &mut out,

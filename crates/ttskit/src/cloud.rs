@@ -9,9 +9,9 @@ use serde_json::json;
 use ttskit_cloud::{
     Action, Backup, BackupError, BackupStore, CloudBackend, CloudError, CloudIndex, DeleteError,
     DeletePlan, DeleteTarget, FileState, IndexEntry, IndexError, LocalDir, LocalFile, Manifest,
-    ManifestEntry, PullError, PushError, Reason, RestoreAction, StatusError, UgcUrl, UploadError,
-    UploadPlan, compare, delete, find_entries, is_game_internal, normalize_folder, plan_delete,
-    plan_pull, plan_push, plan_restore, plan_upload, pull, push, restore, upload,
+    ManifestEntry, PullError, PushError, Reason, RestoreAction, StatusError, TsvError, UgcUrl,
+    UploadError, UploadPlan, compare, delete, find_entries, is_game_internal, normalize_folder,
+    plan_delete, plan_pull, plan_push, plan_restore, plan_upload, pull, push, restore, upload,
 };
 
 /// Errors of the `cloud` subcommands.
@@ -100,6 +100,25 @@ pub enum CommandError {
         /// Why the update failed.
         reason: String,
     },
+    /// The manifest cannot be read.
+    #[error("cannot read the manifest {}: {reason}", path.display())]
+    ManifestRead {
+        /// The manifest file.
+        path: PathBuf,
+        /// Why reading failed.
+        reason: String,
+    },
+    /// The manifest cannot be written; nothing else was changed.
+    #[error("cannot write the manifest {}: {reason}", path.display())]
+    ManifestWrite {
+        /// The manifest file.
+        path: PathBuf,
+        /// Why writing failed.
+        reason: String,
+    },
+    /// The TSV text has problems, one per line.
+    #[error(transparent)]
+    Tsv(#[from] TsvError),
 }
 
 impl From<DeleteError> for CommandError {
@@ -1443,6 +1462,168 @@ fn write_tree(
     }
     writeln!(out, "{footer}")?;
     Ok(())
+}
+
+/// The output format of `cloud manifest`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManifestFormat {
+    /// The manifest file content.
+    Json,
+    /// The `filename<TAB>URL` mapping.
+    Tsv,
+}
+
+fn load_manifest(path: &Path) -> Result<Manifest, CommandError> {
+    Manifest::load(path).map_err(|e| CommandError::ManifestRead {
+        path: path.to_owned(),
+        reason: e.to_string(),
+    })
+}
+
+/// Prints the manifest at `path` (an empty one if the file is missing).
+/// Nothing but the manifest goes to `out`.
+pub fn show_manifest(
+    path: &Path,
+    format: ManifestFormat,
+    out: &mut dyn io::Write,
+) -> Result<(), CommandError> {
+    let manifest = load_manifest(path)?;
+    let text = match format {
+        ManifestFormat::Json => manifest.to_json(),
+        ManifestFormat::Tsv => manifest.to_tsv(),
+    };
+    out.write_all(text.as_bytes())?;
+    out.flush()?;
+    Ok(())
+}
+
+/// Reads a `filename<TAB>URL` file. It must be UTF-8.
+pub fn read_tsv_file(path: &Path) -> Result<String, CommandError> {
+    let read = |source| CommandError::ReadFile {
+        path: path.to_owned(),
+        source,
+    };
+    let data = std::fs::read(path).map_err(read)?;
+    String::from_utf8(data).map_err(|e| CommandError::ReadFile {
+        path: path.to_owned(),
+        source: io::Error::new(io::ErrorKind::InvalidData, e),
+    })
+}
+
+/// Adopts the `filename<TAB>URL` mapping `text` into the manifest at
+/// `manifest_file`, resolving the URLs against the cloud index. Nothing in the
+/// cloud is changed.
+///
+/// Problems in the text are returned as [`CommandError::Tsv`] and nothing is
+/// written. Otherwise the plan is printed; unless it is a dry run or declined,
+/// the entries are upserted into the manifest. A plan with nothing to change
+/// asks nothing and leaves the file alone. With `--json` only one JSON object
+/// is printed, at the end.
+pub fn import_tsv(
+    backend: &dyn CloudBackend,
+    text: &str,
+    manifest_file: &Path,
+    mode: RunMode,
+    confirm: Confirm<'_>,
+    out: &mut dyn io::Write,
+) -> Result<(), CommandError> {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let index = CloudIndex::load(backend)?;
+    let imported = Manifest::import_tsv(text, &index)?;
+    let mut manifest = load_manifest(manifest_file)?;
+
+    let rows: Vec<(&'static str, &ManifestEntry)> = imported
+        .iter()
+        .map(|entry| {
+            let existing: Vec<&ManifestEntry> = manifest
+                .entries
+                .iter()
+                .filter(|e| e.path == entry.path)
+                .collect();
+            let action = match existing.as_slice() {
+                [] => "add",
+                [one] if *one == entry => "unchanged",
+                _ => "update",
+            };
+            (action, entry)
+        })
+        .collect();
+    let counts = |action: &str| rows.iter().filter(|(a, _)| *a == action).count();
+    let (added, updated, unchanged) = (counts("add"), counts("update"), counts("unchanged"));
+    let noop = added + updated == 0;
+
+    if !mode.json {
+        let mut buf = Vec::new();
+        writeln!(buf, "Import into manifest {}:", manifest_file.display())?;
+        for (action, e) in &rows {
+            writeln!(
+                buf,
+                "  {action:<9}  {}  ({})",
+                e.path.as_deref().unwrap_or_default(),
+                e.cloud_path
+            )?;
+        }
+        writeln!(buf, "{added} add, {updated} update, {unchanged} unchanged")?;
+        if noop {
+            writeln!(
+                buf,
+                "Nothing to do: the manifest already has these entries."
+            )?;
+        }
+        out.write_all(&buf)?;
+        out.flush()?;
+    }
+
+    let mut done = false;
+    let mut write_error = None;
+    if noop {
+        done = true;
+    } else if let Decision::Go = decide(mode, "Import?", confirm, out)? {
+        for (_, e) in &rows {
+            manifest.upsert((*e).clone());
+        }
+        match manifest.save(manifest_file) {
+            Ok(()) => {
+                done = true;
+                if !mode.json {
+                    writeln!(out, "Updated manifest {}.", manifest_file.display())?;
+                }
+            }
+            Err(e) => {
+                write_error = Some(CommandError::ManifestWrite {
+                    path: manifest_file.to_owned(),
+                    reason: e.to_string(),
+                });
+            }
+        }
+    }
+
+    if mode.json {
+        let entries: Vec<serde_json::Value> = rows
+            .iter()
+            .map(|(action, e)| {
+                json!({
+                    "action": action,
+                    "path": e.path,
+                    "cloud_path": e.cloud_path,
+                    "sha1": e.sha1,
+                    "size": e.size,
+                    "url": e.url,
+                })
+            })
+            .collect();
+        write_pretty_json(
+            &json!({
+                "manifest": manifest_file.display().to_string(),
+                "dry_run": mode.dry_run,
+                "done": done,
+                "entries": entries,
+            }),
+            out,
+        )?;
+    }
+    out.flush()?;
+    write_error.map_or(Ok(()), Err)
 }
 
 #[cfg(test)]
@@ -4400,6 +4581,481 @@ mod tests {
             assert_eq!(value["downloaded"], json!(["a.png"]));
             assert_eq!(value["deleted"], json!(["old.png"]));
             assert!(value["plan"].is_object());
+        }
+    }
+    mod manifest_cmd_tests {
+        use std::path::PathBuf;
+        use std::time::UNIX_EPOCH;
+
+        use ttskit_cloud::sha1_hex;
+
+        use super::*;
+
+        const YES: RunMode = RunMode {
+            dry_run: false,
+            yes: true,
+            json: false,
+        };
+        const DRY: RunMode = RunMode {
+            dry_run: true,
+            yes: false,
+            json: false,
+        };
+        const ASK: RunMode = RunMode {
+            dry_run: false,
+            yes: false,
+            json: false,
+        };
+        const JSON_YES: RunMode = RunMode {
+            dry_run: false,
+            yes: true,
+            json: true,
+        };
+        const JSON_DRY: RunMode = RunMode {
+            dry_run: true,
+            yes: false,
+            json: true,
+        };
+
+        const FILES: [(&str, &str); 3] = [("a.png", "A"), ("b.png", "B"), ("sub/c.png", "C")];
+
+        struct Fixture {
+            _dir: tempfile::TempDir,
+            cloud: MemoryCloud,
+            manifest: PathBuf,
+        }
+
+        /// A cloud and a manifest produced by a real push of `FILES`.
+        fn pushed() -> Fixture {
+            let dir = tempfile::tempdir().unwrap();
+            let store = BackupStore::new(dir.path().join("backups"));
+            let manifest = dir.path().join(Manifest::FILE_NAME);
+            let mut cloud = MemoryCloud::new();
+            let local: Vec<LocalFile> = FILES
+                .iter()
+                .map(|(path, data)| LocalFile {
+                    path: (*path).to_owned(),
+                    size: data.len() as u64,
+                    sha1: sha1_hex(data.as_bytes()),
+                })
+                .collect();
+            let read = |p: &str| {
+                FILES
+                    .iter()
+                    .find(|(path, _)| *path == p)
+                    .map(|(_, d)| d.as_bytes().to_vec())
+                    .ok_or_else(|| io::Error::other("no such file"))
+            };
+            let mut out = Vec::new();
+            sync_push(
+                &mut cloud,
+                &store,
+                &local,
+                &read,
+                "Game",
+                false,
+                Some(&manifest),
+                YES,
+                UNIX_EPOCH,
+                "10/10/2026 14:05:08",
+                &mut |_| Ok(true),
+                &mut out,
+            )
+            .unwrap();
+            Fixture {
+                _dir: dir,
+                cloud,
+                manifest,
+            }
+        }
+
+        struct Out {
+            result: Result<(), CommandError>,
+            text: String,
+            prompts: Vec<String>,
+        }
+
+        fn import(fx: &Fixture, text: &str, mode: RunMode, answer: bool) -> Out {
+            let mut prompts = Vec::new();
+            let mut confirm = |p: &str| {
+                prompts.push(p.to_owned());
+                Ok(answer)
+            };
+            let mut out = Vec::new();
+            let result = import_tsv(&fx.cloud, text, &fx.manifest, mode, &mut confirm, &mut out);
+            Out {
+                result,
+                text: String::from_utf8(out).unwrap(),
+                prompts,
+            }
+        }
+
+        fn show(path: &Path, format: ManifestFormat) -> String {
+            let mut out = Vec::new();
+            show_manifest(path, format, &mut out).unwrap();
+            String::from_utf8(out).unwrap()
+        }
+
+        /// The TSV of the pushed manifest, then removes the manifest.
+        fn export_and_remove(fx: &Fixture) -> String {
+            let tsv = show(&fx.manifest, ManifestFormat::Tsv);
+            std::fs::remove_file(&fx.manifest).unwrap();
+            tsv
+        }
+
+        #[test]
+        fn json_output_is_the_file_content() {
+            let fx = pushed();
+            let text = show(&fx.manifest, ManifestFormat::Json);
+            assert_eq!(text, std::fs::read_to_string(&fx.manifest).unwrap());
+            assert_eq!(text, Manifest::load(&fx.manifest).unwrap().to_json());
+            assert!(text.ends_with("}\n"));
+        }
+
+        #[test]
+        fn tsv_output() {
+            let fx = pushed();
+            let text = show(&fx.manifest, ManifestFormat::Tsv);
+            let manifest = Manifest::load(&fx.manifest).unwrap();
+            assert_eq!(text, manifest.to_tsv());
+            let lines: Vec<&str> = text.lines().collect();
+            assert_eq!(lines.len(), 3);
+            assert!(lines[0].starts_with("a.png\thttps://"));
+            assert!(lines[2].starts_with("sub/c.png\thttps://"));
+        }
+
+        #[test]
+        fn missing_manifest_is_empty() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(Manifest::FILE_NAME);
+            assert_eq!(show(&path, ManifestFormat::Tsv), "");
+            assert_eq!(
+                show(&path, ManifestFormat::Json),
+                Manifest::default().to_json()
+            );
+            assert!(show(&path, ManifestFormat::Json).contains("\"entries\": []"));
+            assert!(!path.exists());
+        }
+
+        #[test]
+        fn invalid_manifest_is_an_error() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(Manifest::FILE_NAME);
+            std::fs::write(&path, "nope").unwrap();
+            let mut out = Vec::new();
+            let err = show_manifest(&path, ManifestFormat::Json, &mut out).unwrap_err();
+            assert!(matches!(err, CommandError::ManifestRead { .. }));
+            assert!(err.to_string().starts_with("cannot read the manifest "));
+            assert!(out.is_empty());
+        }
+
+        #[test]
+        fn export_then_import_round_trips_byte_identically() {
+            let fx = pushed();
+            let original = std::fs::read(&fx.manifest).unwrap();
+            let before = Manifest::load(&fx.manifest).unwrap();
+            let tsv = export_and_remove(&fx);
+            let calls = fx.cloud.mutating_calls().len();
+            let run = import(&fx, &tsv, YES, false);
+            run.result.unwrap();
+            assert_eq!(
+                run.text,
+                format!(
+                    "Import into manifest {0}:\n\
+                     \x20 add        a.png  (Game/a.png)\n\
+                     \x20 add        b.png  (Game/b.png)\n\
+                     \x20 add        sub/c.png  (Game/sub/c.png)\n\
+                     3 add, 0 update, 0 unchanged\n\
+                     Updated manifest {0}.\n",
+                    fx.manifest.display()
+                )
+            );
+            let after = Manifest::load(&fx.manifest).unwrap();
+            let key = |m: &Manifest| {
+                let mut v: Vec<_> = m
+                    .entries
+                    .iter()
+                    .map(|e| {
+                        (
+                            e.path.clone(),
+                            e.cloud_path.clone(),
+                            e.sha1.clone(),
+                            e.size,
+                            e.url.clone(),
+                        )
+                    })
+                    .collect();
+                v.sort();
+                v
+            };
+            assert_eq!(key(&after), key(&before));
+            assert_eq!(std::fs::read(&fx.manifest).unwrap(), original);
+            assert_eq!(fx.cloud.mutating_calls().len(), calls);
+        }
+
+        #[test]
+        fn dry_run_writes_nothing() {
+            let fx = pushed();
+            let tsv = export_and_remove(&fx);
+            let run = import(&fx, &tsv, DRY, false);
+            run.result.unwrap();
+            assert!(run.prompts.is_empty());
+            assert!(run.text.contains("3 add, 0 update, 0 unchanged\n"));
+            assert!(run.text.ends_with("Dry run: nothing was changed.\n"));
+            assert!(!fx.manifest.exists());
+        }
+
+        #[test]
+        fn declined_confirmation_writes_nothing() {
+            let fx = pushed();
+            let tsv = export_and_remove(&fx);
+            let run = import(&fx, &tsv, ASK, false);
+            run.result.unwrap();
+            assert_eq!(run.prompts, ["Import?"]);
+            assert!(run.text.ends_with("Cancelled: nothing was changed.\n"));
+            assert!(!fx.manifest.exists());
+        }
+
+        #[test]
+        fn accepted_confirmation_writes() {
+            let fx = pushed();
+            let tsv = export_and_remove(&fx);
+            let run = import(&fx, &tsv, ASK, true);
+            run.result.unwrap();
+            assert_eq!(run.prompts, ["Import?"]);
+            assert_eq!(Manifest::load(&fx.manifest).unwrap().entries.len(), 3);
+        }
+
+        #[test]
+        fn unchanged_import_does_not_touch_the_file() {
+            let fx = pushed();
+            let tsv = show(&fx.manifest, ManifestFormat::Tsv);
+            // Same content, different bytes: a rewrite would normalize it.
+            let odd = Manifest::load(&fx.manifest)
+                .unwrap()
+                .to_json()
+                .replace('\n', "\r\n");
+            std::fs::write(&fx.manifest, &odd).unwrap();
+            let run = import(&fx, &tsv, ASK, false);
+            run.result.unwrap();
+            assert!(run.prompts.is_empty());
+            assert!(run.text.contains("0 add, 0 update, 3 unchanged\n"));
+            assert!(
+                run.text
+                    .ends_with("Nothing to do: the manifest already has these entries.\n")
+            );
+            assert!(!run.text.contains("Updated manifest"));
+            assert_eq!(std::fs::read_to_string(&fx.manifest).unwrap(), odd);
+        }
+
+        #[test]
+        fn update_and_add_are_told_apart() {
+            let fx = pushed();
+            let tsv = show(&fx.manifest, ManifestFormat::Tsv);
+            // a.png now points at the content of b.png, b.png is unchanged
+            // and sub/c.png is missing.
+            let mut manifest = Manifest::load(&fx.manifest).unwrap();
+            let b = manifest.entries[1].clone();
+            manifest.entries[0] = ManifestEntry {
+                path: Some("a.png".into()),
+                ..b
+            };
+            manifest.entries.pop();
+            manifest.save(&fx.manifest).unwrap();
+            let run = import(&fx, &tsv, DRY, false);
+            run.result.unwrap();
+            assert!(
+                run.text.contains("  update     a.png  (Game/a.png)\n"),
+                "{}",
+                run.text
+            );
+            assert!(run.text.contains("  unchanged  b.png  (Game/b.png)\n"));
+            assert!(
+                run.text
+                    .contains("  add        sub/c.png  (Game/sub/c.png)\n")
+            );
+            assert!(run.text.contains("1 add, 1 update, 1 unchanged\n"));
+
+            import(&fx, &tsv, YES, false).result.unwrap();
+            let again = Manifest::load(&fx.manifest).unwrap();
+            assert_eq!(again.to_tsv(), tsv);
+            assert_eq!(again.entries.len(), 3);
+        }
+
+        #[test]
+        fn pathless_entries_are_kept() {
+            let fx = pushed();
+            let tsv = show(&fx.manifest, ManifestFormat::Tsv);
+            let mut manifest = Manifest::load(&fx.manifest).unwrap();
+            let extra = ManifestEntry {
+                path: None,
+                cloud_path: "Other/x.png".into(),
+                sha1: "0".repeat(40),
+                size: 1,
+                url: "https://example.invalid/x".into(),
+            };
+            manifest.entries.push(extra.clone());
+            manifest.save(&fx.manifest).unwrap();
+            import(&fx, &tsv, YES, false).result.unwrap();
+            assert!(
+                Manifest::load(&fx.manifest)
+                    .unwrap()
+                    .entries
+                    .contains(&extra)
+            );
+        }
+
+        fn tsv_error(fx: &Fixture, text: &str) -> String {
+            let before = std::fs::read(&fx.manifest).ok();
+            let run = import(fx, text, YES, true);
+            let err = run.result.unwrap_err();
+            assert!(matches!(err, CommandError::Tsv(_)), "{err}");
+            assert!(run.prompts.is_empty());
+            assert_eq!(run.text, "");
+            assert_eq!(std::fs::read(&fx.manifest).ok(), before);
+            err.to_string()
+        }
+
+        #[test]
+        fn malformed_lines_are_listed_and_write_nothing() {
+            let fx = pushed();
+            let url = Manifest::load(&fx.manifest).unwrap().entries[0].url.clone();
+            let unknown = format!(
+                "https://steamusercontent-a.akamaihd.net/ugc/1/{}/",
+                "A".repeat(40)
+            );
+            let cases = [
+                (
+                    "a.png".to_owned(),
+                    "line 1: expected `filename<TAB>URL`, found no tab",
+                ),
+                (
+                    format!("a.png\t{url}\tx"),
+                    "line 1: expected exactly one tab, found 2",
+                ),
+                (format!("\t{url}"), "line 1: the filename is empty"),
+                ("a.png\t".to_owned(), "line 1: the URL is empty"),
+                (
+                    "a.png\tgarbage".to_owned(),
+                    "line 1: not a valid cloud URL: garbage",
+                ),
+                (
+                    format!("a.png\t{unknown}"),
+                    "line 1: https://steamusercontent-a.akamaihd.net/ugc/1/",
+                ),
+            ];
+            for (text, expected) in cases {
+                let message = tsv_error(&fx, &text);
+                assert!(message.starts_with(expected), "{text:?}: {message}");
+                assert_eq!(message.lines().count(), 1, "{message}");
+            }
+            let message = tsv_error(&fx, &format!("a.png\t{url}\nA.PNG\t{url}"));
+            assert!(
+                message.starts_with("line 2: duplicate filename"),
+                "{message}"
+            );
+
+            let text = format!("# header\n\nbad\n{url}\na.png\t{url}\n\\x\t{url}\n");
+            let message = tsv_error(&fx, &text);
+            let lines: Vec<&str> = message.lines().collect();
+            assert_eq!(lines.len(), 3, "{message}");
+            assert!(lines[0].starts_with("line 3: "));
+            assert!(lines[1].starts_with("line 4: "));
+            assert!(lines[2].starts_with("line 6: "));
+            assert_eq!(
+                message,
+                [
+                    "line 3: expected `filename<TAB>URL`, found no tab",
+                    "line 4: expected `filename<TAB>URL`, found no tab",
+                    "line 6: invalid filename \"\\\\x\": contains a backslash",
+                ]
+                .join("\n")
+            );
+        }
+
+        #[test]
+        fn json_mode_returns_the_tsv_error_without_output() {
+            let fx = pushed();
+            let run = import(&fx, "bad\n", JSON_YES, true);
+            assert!(matches!(run.result, Err(CommandError::Tsv(_))));
+            assert_eq!(run.text, "");
+        }
+
+        #[test]
+        fn bom_and_crlf_are_accepted() {
+            let fx = pushed();
+            let tsv = export_and_remove(&fx);
+            let text = format!("\u{feff}{}", tsv.replace('\n', "\r\n"));
+            import(&fx, &text, YES, false).result.unwrap();
+            assert_eq!(Manifest::load(&fx.manifest).unwrap().to_tsv(), tsv);
+        }
+
+        #[test]
+        fn json_shapes() {
+            let fx = pushed();
+            let tsv = export_and_remove(&fx);
+            let run = import(&fx, &tsv, JSON_DRY, false);
+            run.result.unwrap();
+            assert!(run.text.starts_with("{\n"));
+            let value: serde_json::Value = serde_json::from_str(&run.text).unwrap();
+            assert_eq!(value["manifest"], fx.manifest.display().to_string());
+            assert_eq!(value["dry_run"], true);
+            assert_eq!(value["done"], false);
+            let entries = value["entries"].as_array().unwrap();
+            assert_eq!(entries.len(), 3);
+            let a = &entries[0];
+            assert_eq!(a["action"], "add");
+            assert_eq!(a["path"], "a.png");
+            assert_eq!(a["cloud_path"], "Game/a.png");
+            assert_eq!(a["sha1"], sha1_hex(b"A").to_ascii_uppercase());
+            assert_eq!(a["size"], 1);
+            assert!(a["url"].as_str().unwrap().starts_with("https://"));
+            assert!(!fx.manifest.exists());
+
+            let run = import(&fx, &tsv, JSON_YES, false);
+            run.result.unwrap();
+            let value: serde_json::Value = serde_json::from_str(&run.text).unwrap();
+            assert_eq!(value["dry_run"], false);
+            assert_eq!(value["done"], true);
+            assert!(fx.manifest.exists());
+
+            let run = import(&fx, &tsv, JSON_YES, false);
+            let value: serde_json::Value = serde_json::from_str(&run.text).unwrap();
+            assert_eq!(value["done"], true);
+            assert_eq!(value["entries"][0]["action"], "unchanged");
+        }
+
+        #[test]
+        fn manifest_write_failure_is_reported() {
+            let fx = pushed();
+            let tsv = export_and_remove(&fx);
+            let missing = fx
+                .manifest
+                .parent()
+                .unwrap()
+                .join("no-such-dir")
+                .join("m.json");
+            let mut out = Vec::new();
+            let err = import_tsv(&fx.cloud, &tsv, &missing, YES, &mut |_| Ok(true), &mut out)
+                .unwrap_err();
+            assert!(matches!(err, CommandError::ManifestWrite { .. }));
+            assert!(err.to_string().starts_with("cannot write the manifest "));
+            let text = String::from_utf8(out).unwrap();
+            assert!(!text.contains("Updated manifest"));
+        }
+
+        #[test]
+        fn read_tsv_file_errors() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("list.tsv");
+            let err = read_tsv_file(&path).unwrap_err();
+            assert!(matches!(err, CommandError::ReadFile { .. }));
+            std::fs::write(&path, [0xff, 0xfe, 0x41]).unwrap();
+            let err = read_tsv_file(&path).unwrap_err();
+            assert!(matches!(err, CommandError::ReadFile { .. }));
+            assert!(err.to_string().starts_with("cannot read "));
+            std::fs::write(&path, "a\tb\n").unwrap();
+            assert_eq!(read_tsv_file(&path).unwrap(), "a\tb\n");
         }
     }
 }

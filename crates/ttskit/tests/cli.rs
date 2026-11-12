@@ -121,3 +121,98 @@ fn cloud_restore_of_an_existing_backup_needs_steam() {
     assert_eq!(output.status.code(), Some(1));
     assert!(stderr(&output).contains("--features steam"));
 }
+
+const CONFIG: &str = "[cloud]\nfolder = \"Game\"\n\n[local]\ndir = \"src\"\n";
+const SHA1: &str = "0123456789ABCDEF0123456789ABCDEF01234567";
+
+/// A project directory with a config and a hand-written manifest.
+fn project() -> (tempfile::TempDir, String) {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("ttskit.toml"), CONFIG).unwrap();
+    let manifest = format!(
+        "{{\n  \"version\": 1,\n  \"entries\": [\n    {{\n      \"path\": \"a.png\",\n      \"cloud_path\": \"Game/a.png\",\n      \"sha1\": \"{SHA1}\",\n      \"size\": 3,\n      \"url\": \"https://example.invalid/ugc/1/{SHA1}/\"\n    }}\n  ]\n}}\n"
+    );
+    std::fs::write(dir.path().join("ttskit.manifest.json"), &manifest).unwrap();
+    let config = dir.path().join("ttskit.toml").to_str().unwrap().to_owned();
+    (dir, config)
+}
+
+#[test]
+fn cloud_manifest_prints_the_file_without_steam() {
+    let (dir, config) = project();
+    let output = ttskit(&["cloud", "manifest", "--config", &config]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let file = std::fs::read_to_string(dir.path().join("ttskit.manifest.json")).unwrap();
+    assert_eq!(stdout(&output), file);
+    assert_eq!(stderr(&output), "");
+
+    let output = ttskit(&["cloud", "manifest", "--json", "--config", &config]);
+    assert_eq!(stdout(&output), file);
+}
+
+#[test]
+fn cloud_manifest_tsv() {
+    let (_dir, config) = project();
+    let output = ttskit(&["cloud", "manifest", "--tsv", "--config", &config]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        format!("a.png\thttps://example.invalid/ugc/1/{SHA1}/\n")
+    );
+}
+
+#[test]
+fn cloud_manifest_without_a_manifest_file_is_empty() {
+    let (dir, config) = project();
+    std::fs::remove_file(dir.path().join("ttskit.manifest.json")).unwrap();
+    let output = ttskit(&["cloud", "manifest", "--tsv", "--config", &config]);
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(stdout(&output), "");
+    let output = ttskit(&["cloud", "manifest", "--config", &config]);
+    assert!(stdout(&output).contains("\"entries\": []"));
+}
+
+#[test]
+fn cloud_manifest_rejects_tsv_with_json() {
+    let (_dir, config) = project();
+    let output = ttskit(&["cloud", "manifest", "--tsv", "--json", "--config", &config]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(stderr(&output).contains("cannot be used with"));
+}
+
+#[test]
+fn cloud_manifest_with_a_missing_config_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("ttskit.toml");
+    let output = ttskit(&["cloud", "manifest", "--config", config.to_str().unwrap()]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(stderr(&output).starts_with("error: "));
+    assert_eq!(stdout(&output), "");
+}
+
+#[test]
+fn cloud_import_tsv_help_mentions_the_flags() {
+    let output = ttskit(&["cloud", "import-tsv", "--help"]);
+    assert_eq!(output.status.code(), Some(0));
+    let text = stdout(&output);
+    for flag in ["--config", "--dry-run", "--yes", "--json"] {
+        assert!(text.contains(flag), "{flag}");
+    }
+}
+
+#[test]
+fn cloud_import_tsv_checks_local_input_before_connecting() {
+    let (dir, config) = project();
+    let missing = dir.path().join("nope.tsv");
+    let output = ttskit(&[
+        "cloud",
+        "import-tsv",
+        missing.to_str().unwrap(),
+        "--config",
+        &config,
+    ]);
+    assert_eq!(output.status.code(), Some(1));
+    let text = stderr(&output);
+    assert!(text.contains("cannot read"), "{text}");
+    assert!(!text.contains("--features steam"));
+}
