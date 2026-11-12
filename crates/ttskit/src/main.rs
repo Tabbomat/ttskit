@@ -168,6 +168,10 @@ enum CloudCommand {
         /// Print machine-readable JSON instead of text
         #[arg(long)]
         json: bool,
+        /// In text output, list the path, nickname and GUID of every occurrence
+        /// (JSON always includes them)
+        #[arg(long)]
+        occurrences: bool,
     },
     /// Print the download URL of a cloud file
     Url {
@@ -573,15 +577,18 @@ fn run_simple(command: Command) -> Result<(), String> {
                     dry_run,
                     yes,
                     json,
+                    occurrences,
                 },
         } => {
             if !adopt {
                 let mut out = std::io::stdout().lock();
-                cloud::scan(&save, json, &mut out).map_err(|e| e.to_string())?;
+                cloud::scan(&save, json, occurrences, &mut out).map_err(|e| e.to_string())?;
                 return out.flush().map_err(|e| e.to_string());
             }
             // Do all the local work before connecting to Steam.
-            let scan = cloud::read_scan(&save).map_err(|e| e.to_string())?;
+            let scan = cloud::read_scan(&save)
+                .map_err(|e| e.to_string())?
+                .with_occurrences(occurrences);
             ttskit_cloud::ProjectConfig::load(&config).map_err(|e| e.to_string())?;
             let manifest_file = config_dir_of(&config).join(ttskit_cloud::Manifest::FILE_NAME);
             let manifest = cloud::load_manifest(&manifest_file).map_err(|e| e.to_string())?;
@@ -683,6 +690,7 @@ mod tests {
                     dry_run,
                     yes,
                     json,
+                    occurrences: _,
                 },
         } = cli.command
         else {

@@ -395,6 +395,7 @@ ttskit cloud import-tsv list.tsv  # adopt an existing list
 ```
 ttskit cloud scan save.json                 # list the asset URLs of a save
 ttskit cloud scan save.json --json          # the same as one JSON object
+ttskit cloud scan save.json --occurrences   # also list where each URL occurs
 ttskit cloud scan save.json --adopt         # also adopt your own cloud files
 ```
 
@@ -404,6 +405,11 @@ ttskit cloud scan save.json --adopt         # also adopt your own cloud files
 - The result is grouped by host (`imgur`, `steamusercontent`, `other`) and
   sorted by URL; each URL shows its labels and, if it occurs more than once,
   how often. Plain `scan` is local only and needs no Steam connection.
+- Every URL also has its `occurrences`: the JSON `path` (for example
+  `ObjectStates[3].CustomDeck.1.FaceURL`) and the `nickname` and `guid` of the
+  nearest enclosing object that has a `GUID` (null if there is none). `--json`
+  always includes them; the text output lists them with `--occurrences`. This
+  maps a dead URL back to the object it belonged to.
 - `--adopt` matches the Steam Cloud URLs of the save against the index of your
   own cloud (by handle and SHA1) and adds them to the manifest without
   uploading anything. Adopted entries have no local `path`. URLs that are not

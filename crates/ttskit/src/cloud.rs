@@ -1510,6 +1510,17 @@ pub fn show_manifest(
 pub struct SaveScan {
     save: PathBuf,
     urls: Vec<ttskit_core::AssetUrl>,
+    /// Whether the text report lists every occurrence of each URL.
+    show_occurrences: bool,
+}
+
+impl SaveScan {
+    /// Makes the text report list the path, nickname and GUID of every
+    /// occurrence. The JSON report always has them.
+    pub fn with_occurrences(mut self, show: bool) -> Self {
+        self.show_occurrences = show;
+        self
+    }
 }
 
 /// Reads the save at `path` and walks its asset URLs. Local only.
@@ -1526,6 +1537,7 @@ pub fn read_scan(path: &Path) -> Result<SaveScan, CommandError> {
     Ok(SaveScan {
         save: path.to_owned(),
         urls: save.asset_urls(),
+        show_occurrences: false,
     })
 }
 
@@ -1542,7 +1554,19 @@ fn scan_json(scan: &SaveScan) -> serde_json::Map<String, serde_json::Value> {
             .urls
             .iter()
             .filter(|u| u.host_class() == class)
-            .map(|u| json!({"url": u.url, "labels": u.labels, "count": u.count}))
+            .map(|u| {
+                let occurrences: Vec<_> = u
+                    .occurrences
+                    .iter()
+                    .map(|o| json!({"path": o.path, "nickname": o.nickname, "guid": o.guid}))
+                    .collect();
+                json!({
+                    "url": u.url,
+                    "labels": u.labels,
+                    "count": u.count,
+                    "occurrences": occurrences,
+                })
+            })
             .collect();
         hosts.insert(class.as_str().to_owned(), group.into());
     }
@@ -1571,6 +1595,18 @@ fn write_scan_text(scan: &SaveScan, out: &mut dyn io::Write) -> Result<(), Comma
                 write!(out, "  x{}", u.count)?;
             }
             writeln!(out)?;
+            if scan.show_occurrences {
+                for o in &u.occurrences {
+                    write!(out, "    {}", o.path)?;
+                    if let Some(nickname) = &o.nickname {
+                        write!(out, "  {nickname:?}")?;
+                    }
+                    if let Some(guid) = &o.guid {
+                        write!(out, "  {guid}")?;
+                    }
+                    writeln!(out)?;
+                }
+            }
         }
     }
     writeln!(out, "{} unique URLs", urls.len())?;
@@ -1578,8 +1614,13 @@ fn write_scan_text(scan: &SaveScan, out: &mut dyn io::Write) -> Result<(), Comma
 }
 
 /// Lists the asset URLs of the save at `path`, grouped by host. Local only.
-pub fn scan(path: &Path, json: bool, out: &mut dyn io::Write) -> Result<(), CommandError> {
-    let scan = read_scan(path)?;
+pub fn scan(
+    path: &Path,
+    json: bool,
+    occurrences: bool,
+    out: &mut dyn io::Write,
+) -> Result<(), CommandError> {
+    let scan = read_scan(path)?.with_occurrences(occurrences);
     if json {
         return write_pretty_json(&scan_json(&scan).into(), out);
     }
@@ -5297,9 +5338,54 @@ mod tests {
         }
 
         fn run(path: &Path, json: bool) -> Result<String, CommandError> {
+            run_with(path, json, false)
+        }
+
+        fn run_with(path: &Path, json: bool, occurrences: bool) -> Result<String, CommandError> {
             let mut out = Vec::new();
-            scan(path, json, &mut out)?;
+            scan(path, json, occurrences, &mut out)?;
             Ok(String::from_utf8(out).unwrap())
+        }
+
+        #[test]
+        fn json_lists_occurrences_and_keeps_labels_and_count() {
+            let text = run(&fixture(), true).unwrap();
+            let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+            for group in value["hosts"].as_object().unwrap().values() {
+                for u in group.as_array().unwrap() {
+                    let occ = u["occurrences"].as_array().unwrap();
+                    assert_eq!(occ.len() as u64, u["count"].as_u64().unwrap());
+                    assert!(u["labels"].is_array());
+                    for o in occ {
+                        assert!(o["path"].as_str().is_some_and(|p| !p.is_empty()));
+                        assert!(o.get("nickname").is_some() && o.get("guid").is_some());
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn text_occurrences_only_with_flag() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("s.json");
+            std::fs::write(
+                &path,
+                r#"{"ObjectStates":[{"GUID":"a1b2c3","Nickname":"Card A","ImageURL":"https://example.com/a.png"}]}"#,
+            )
+            .unwrap();
+            let plain = run_with(&path, false, false).unwrap();
+            assert!(!plain.contains("ObjectStates[0]"), "{plain}");
+            let text = run_with(&path, false, true).unwrap();
+            assert!(
+                text.contains("    ObjectStates[0].ImageURL  \"Card A\"  a1b2c3\n"),
+                "{text}"
+            );
+            let value: serde_json::Value =
+                serde_json::from_str(&run_with(&path, true, true).unwrap()).unwrap();
+            assert_eq!(
+                value["hosts"]["other"][0]["occurrences"],
+                json!([{"path": "ObjectStates[0].ImageURL", "nickname": "Card A", "guid": "a1b2c3"}])
+            );
         }
 
         #[test]
