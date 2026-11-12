@@ -44,7 +44,7 @@ use std::str::FromStr;
 
 use serde_json::{Map, Value};
 
-pub use assets::{AssetUrl, HostClass};
+pub use assets::{AssetUrl, HostClass, Occurrence};
 pub use view::{ObjectView, ObjectViewMut, SaveView, SaveViewMut};
 
 /// Errors produced while reading or writing a save.

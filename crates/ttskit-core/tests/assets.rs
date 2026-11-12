@@ -2,7 +2,7 @@
 
 use serde_json::json;
 use ttskit_core::Save;
-use ttskit_core::save::assets::{AssetUrl, HostClass};
+use ttskit_core::save::assets::{AssetUrl, HostClass, Occurrence};
 
 fn save(value: serde_json::Value) -> Save {
     Save::from_value(value).unwrap()
@@ -260,4 +260,155 @@ fn host_class_names() {
     assert_eq!(HostClass::Other.as_str(), "other");
     assert!(HostClass::Imgur < HostClass::SteamUserContent);
     assert!(HostClass::SteamUserContent < HostClass::Other);
+}
+
+fn occ(path: &str, nickname: Option<&str>, guid: Option<&str>) -> Occurrence {
+    Occurrence {
+        path: path.to_owned(),
+        nickname: nickname.map(str::to_owned),
+        guid: guid.map(str::to_owned),
+    }
+}
+
+#[test]
+fn fixture_occurrences() {
+    let s = Save::from_slice(&ttskit_testutil::read_fixture("custom_assets.json")).unwrap();
+    let urls = s.asset_urls();
+    for u in &urls {
+        assert_eq!(u.count, u.occurrences.len());
+    }
+    assert_eq!(
+        find(&urls, "https://example.com/table.jpg").occurrences,
+        [occ("TableURL", None, None)]
+    );
+    assert_eq!(
+        find(&urls, "https://i.imgur.com/AAAAAAA.png").occurrences,
+        [occ("CustomUIAssets[0].URL", None, None)]
+    );
+    assert_eq!(
+        find(&urls, "https://example.com/audio/song.mp3").occurrences,
+        [
+            occ("MusicPlayer.CurrentAudioURL", None, None),
+            occ("MusicPlayer.AudioLibrary[0].Item1", None, None),
+        ]
+    );
+    assert_eq!(
+        find(&urls, "https://example.com/model.obj").occurrences,
+        [occ(
+            "ObjectStates[1].CustomMesh.MeshURL",
+            Some("Model"),
+            Some("mdl001")
+        )]
+    );
+    assert_eq!(
+        find(
+            &urls,
+            "https://steamusercontent-a.akamaihd.net/ugc/0000000000000000000/0000000000000000000000000000000000000000/"
+        )
+        .occurrences,
+        [
+            occ(
+                "ObjectStates[4].CustomDeck.1.FaceURL",
+                Some("Custom deck"),
+                Some("cdk001")
+            ),
+            occ(
+                "ObjectStates[4].ContainedObjects[0].CustomDeck.1.FaceURL",
+                Some("Card 300"),
+                Some("c01000")
+            ),
+            occ(
+                "ObjectStates[4].ContainedObjects[1].CustomDeck.1.FaceURL",
+                Some("Card 301"),
+                Some("c01001")
+            ),
+        ]
+    );
+}
+
+#[test]
+fn occurrence_owner_inner_object_wins_and_outside_is_none() {
+    let s = save(json!({
+        "TableURL": "https://example.com/x",
+        "ObjectStates": [{
+            "GUID": "outer",
+            "Nickname": "Bag",
+            "ImageURL": "https://example.com/x",
+            "ContainedObjects": [{
+                "GUID": "inner",
+                "Nickname": "Chip",
+                "Wrapper": { "ImageURL": "https://example.com/x" }
+            }, {
+                "Nickname": "No guid",
+                "ImageURL": "https://example.com/x"
+            }]
+        }]
+    }));
+    let urls = s.asset_urls();
+    assert_eq!(urls.len(), 1);
+    assert_eq!(urls[0].count, 4);
+    assert_eq!(
+        urls[0].occurrences,
+        [
+            occ("TableURL", None, None),
+            occ("ObjectStates[0].ImageURL", Some("Bag"), Some("outer")),
+            occ(
+                "ObjectStates[0].ContainedObjects[0].Wrapper.ImageURL",
+                Some("Chip"),
+                Some("inner")
+            ),
+            // No GUID on this object: falls back to the enclosing owner.
+            occ(
+                "ObjectStates[0].ContainedObjects[1].ImageURL",
+                Some("Bag"),
+                Some("outer")
+            ),
+        ]
+    );
+}
+
+#[test]
+fn occurrence_empty_or_missing_nickname_is_none() {
+    let s = save(json!({
+        "ObjectStates": [
+            { "GUID": "a", "Nickname": "", "U": "https://example.com/a" },
+            { "GUID": "b", "U": "https://example.com/b" },
+            { "GUID": "c", "Nickname": 5, "U": "https://example.com/c" },
+            { "GUID": 7, "Nickname": "n", "U": "https://example.com/d" }
+        ]
+    }));
+    let urls = s.asset_urls();
+    assert_eq!(
+        find(&urls, "https://example.com/a").occurrences,
+        [occ("ObjectStates[0].U", None, Some("a"))]
+    );
+    assert_eq!(
+        find(&urls, "https://example.com/b").occurrences,
+        [occ("ObjectStates[1].U", None, Some("b"))]
+    );
+    assert_eq!(
+        find(&urls, "https://example.com/c").occurrences,
+        [occ("ObjectStates[2].U", None, Some("c"))]
+    );
+    // Non-string GUID does not make an owner.
+    assert_eq!(
+        find(&urls, "https://example.com/d").occurrences,
+        [occ("ObjectStates[3].U", None, None)]
+    );
+}
+
+#[test]
+fn occurrence_paths_use_array_indexes() {
+    let s = save(json!({
+        "L": ["https://example.com/r", { "Tags": ["x", ["https://example.com/t"]] }]
+    }));
+    let urls = s.asset_urls();
+    assert_eq!(
+        find(&urls, "https://example.com/r").occurrences,
+        [occ("L[0]", None, None)]
+    );
+    assert_eq!(
+        find(&urls, "https://example.com/t").occurrences,
+        [occ("L[1].Tags[1][0]", None, None)]
+    );
 }

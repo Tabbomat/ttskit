@@ -13,5 +13,6 @@
 pub mod save;
 
 pub use save::{
-    AssetUrl, HostClass, ObjectView, ObjectViewMut, Save, SaveError, SaveView, SaveViewMut,
+    AssetUrl, HostClass, ObjectView, ObjectViewMut, Occurrence, Save, SaveError, SaveView,
+    SaveViewMut,
 };
