@@ -153,6 +153,28 @@ enum SyncCommand {
         #[arg(long, env = "TTSKIT_BACKUP_DIR", value_name = "DIR")]
         backup_dir: Option<PathBuf>,
     },
+    /// Download the cloud folder named in the project config into the local directory
+    Pull {
+        /// The project config
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = ttskit_cloud::ProjectConfig::FILE_NAME
+        )]
+        config: PathBuf,
+        /// Also move local files that are not in the cloud folder to the recycle bin
+        #[arg(long)]
+        prune: bool,
+        /// Only print the plan
+        #[arg(long, conflicts_with = "yes")]
+        dry_run: bool,
+        /// Do not ask for confirmation
+        #[arg(long)]
+        yes: bool,
+        /// Print machine-readable JSON instead of text
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// Asks on the terminal; the prompt goes to stderr so that stdout stays clean.
@@ -363,6 +385,49 @@ fn run_simple(command: Command) -> Result<(), String> {
             out.flush().map_err(|e| e.to_string())
         }
         Command::Cloud {
+            command:
+                CloudCommand::Sync {
+                    command:
+                        SyncCommand::Pull {
+                            config,
+                            prune,
+                            dry_run,
+                            yes,
+                            json,
+                        },
+                },
+        } => {
+            // Do all the local work before connecting to Steam.
+            let project = ttskit_cloud::ProjectConfig::load(&config).map_err(|e| e.to_string())?;
+            let config_dir = match config.parent() {
+                Some(parent) if !parent.as_os_str().is_empty() => parent,
+                _ => Path::new("."),
+            };
+            let dir = project.resolve_local_dir(config_dir);
+            // A directory that does not exist yet is an empty one; it is
+            // created when a pull writes into it.
+            let local = if dir.exists() {
+                ttskit_cloud::scan_local(&dir).map_err(|e| e.to_string())?
+            } else {
+                Vec::new()
+            };
+            let backend = connect()?;
+            let mut local_dir = ttskit_cloud::FsDir::new(dir.clone());
+            let mut out = std::io::stdout().lock();
+            cloud::sync_pull(
+                backend.as_ref(),
+                &mut local_dir,
+                &local,
+                &project.cloud_folder,
+                prune,
+                cloud::RunMode { dry_run, yes, json },
+                &mut ask_on_terminal,
+                &mut out,
+            )
+            .map_err(|e| e.to_string())?;
+            out.flush().map_err(|e| e.to_string())
+        }
+        Command::Cloud {
             command: CloudCommand::Status { .. },
         } => unreachable!("handled by run"),
     }
@@ -457,7 +522,10 @@ mod tests {
             yes,
             json,
             ..
-        } = parse_push(&[]).unwrap();
+        } = parse_push(&[]).unwrap()
+        else {
+            panic!("expected push");
+        };
         assert_eq!(config, PathBuf::from("ttskit.toml"));
         assert!(!prune && !dry_run && !yes && !json);
     }
@@ -466,7 +534,10 @@ mod tests {
     fn sync_push_options() {
         let SyncCommand::Push {
             config, prune, yes, ..
-        } = parse_push(&["--config", "proj/my.toml", "--prune", "--yes"]).unwrap();
+        } = parse_push(&["--config", "proj/my.toml", "--prune", "--yes"]).unwrap()
+        else {
+            panic!("expected push");
+        };
         assert_eq!(config, PathBuf::from("proj/my.toml"));
         assert!(prune && yes);
         assert!(parse_push(&["--dry-run", "--json"]).is_ok());
@@ -475,6 +546,59 @@ mod tests {
     #[test]
     fn sync_push_rejects_dry_run_with_yes() {
         assert!(parse_push(&["--dry-run", "--yes"]).is_err());
+    }
+
+    fn parse_pull(args: &[&str]) -> Result<SyncCommand, clap::Error> {
+        let cli = Cli::try_parse_from(
+            ["ttskit", "cloud", "sync", "pull"]
+                .into_iter()
+                .chain(args.iter().copied()),
+        )?;
+        match cli.command {
+            Command::Cloud {
+                command: CloudCommand::Sync { command },
+            } => Ok(command),
+            _ => unreachable!("parsed sync pull"),
+        }
+    }
+
+    #[test]
+    fn sync_pull_defaults() {
+        let SyncCommand::Pull {
+            config,
+            prune,
+            dry_run,
+            yes,
+            json,
+        } = parse_pull(&[]).unwrap()
+        else {
+            panic!("expected pull");
+        };
+        assert_eq!(config, PathBuf::from("ttskit.toml"));
+        assert!(!prune && !dry_run && !yes && !json);
+    }
+
+    #[test]
+    fn sync_pull_options() {
+        let SyncCommand::Pull {
+            config, prune, yes, ..
+        } = parse_pull(&["--config", "proj/my.toml", "--prune", "--yes"]).unwrap()
+        else {
+            panic!("expected pull");
+        };
+        assert_eq!(config, PathBuf::from("proj/my.toml"));
+        assert!(prune && yes);
+        assert!(parse_pull(&["--dry-run", "--json"]).is_ok());
+    }
+
+    #[test]
+    fn sync_pull_rejects_dry_run_with_yes() {
+        assert!(parse_pull(&["--dry-run", "--yes"]).is_err());
+    }
+
+    #[test]
+    fn sync_pull_has_no_backup_dir() {
+        assert!(parse_pull(&["--backup-dir", "x"]).is_err());
     }
 
     #[test]

@@ -8,10 +8,10 @@ use std::time::SystemTime;
 use serde_json::json;
 use ttskit_cloud::{
     Action, Backup, BackupError, BackupStore, CloudBackend, CloudError, CloudIndex, DeleteError,
-    DeletePlan, DeleteTarget, FileState, IndexEntry, IndexError, LocalFile, PushError, Reason,
-    RestoreAction, StatusError, UgcUrl, UploadError, UploadPlan, compare, delete, find_entries,
-    is_game_internal, normalize_folder, plan_delete, plan_push, plan_restore, plan_upload, push,
-    restore, upload,
+    DeletePlan, DeleteTarget, FileState, IndexEntry, IndexError, LocalDir, LocalFile, PullError,
+    PushError, Reason, RestoreAction, StatusError, UgcUrl, UploadError, UploadPlan, compare,
+    delete, find_entries, is_game_internal, normalize_folder, plan_delete, plan_pull, plan_push,
+    plan_restore, plan_upload, pull, push, restore, upload,
 };
 
 /// Errors of the `cloud` subcommands.
@@ -47,6 +47,12 @@ pub enum CommandError {
     /// The push plan has conflicts.
     #[error("cannot push: {0} conflict(s) in the plan; rename the files involved")]
     PushConflicts(usize),
+    /// Planning or running a pull failed.
+    #[error(transparent)]
+    Pull(PullError),
+    /// The pull plan has conflicts.
+    #[error("cannot pull: {0} conflict(s) in the plan; rename the files involved")]
+    PullConflicts(usize),
     /// The local directory cannot be scanned.
     #[error(transparent)]
     Status(#[from] StatusError),
@@ -118,6 +124,18 @@ impl From<PushError> for CommandError {
             PushError::Index(e) => CommandError::Index(e),
             PushError::Backup(e) => CommandError::Backup(e),
             other => CommandError::Push(other),
+        }
+    }
+}
+
+impl From<PullError> for CommandError {
+    /// Uses the CLI's own errors where they exist, so messages stay the same
+    /// across commands.
+    fn from(e: PullError) -> Self {
+        match e {
+            PullError::Cloud(e) => CommandError::Cloud(e),
+            PullError::Index(e) => CommandError::Index(e),
+            other => CommandError::Pull(other),
         }
     }
 }
@@ -543,6 +561,114 @@ pub fn sync_push(
                 format!("{needs_prune} changed files were")
             },
             if needs_prune == 1 { "it" } else { "them" }
+        )?;
+    }
+    out.flush()?;
+    Ok(())
+}
+
+/// Makes the local directory match the cloud folder `folder`: downloads new
+/// and changed files and, with `prune`, moves local files that are not in the
+/// cloud folder to the recycle bin.
+///
+/// The plan is printed (and flushed) before anything is asked or changed. A
+/// plan with conflicts is printed and then refused, even for a dry run. With
+/// `--json` only one JSON object is printed, at the end (before the error for
+/// a plan with conflicts).
+#[allow(clippy::too_many_arguments)]
+pub fn sync_pull(
+    backend: &dyn CloudBackend,
+    dir: &mut dyn LocalDir,
+    local: &[LocalFile],
+    folder: &str,
+    prune: bool,
+    mode: RunMode,
+    confirm: Confirm<'_>,
+    out: &mut dyn io::Write,
+) -> Result<(), CommandError> {
+    let plan = plan_pull(backend, local, folder, prune)?;
+    let conflicts = plan.sync.count(Action::Conflict);
+    let noop = plan.is_noop();
+    let kept = plan
+        .sync
+        .steps
+        .iter()
+        .filter(|s| s.reason == Reason::NotPruned)
+        .count();
+
+    if !mode.json {
+        out.write_all(plan.sync.render_text().as_bytes())?;
+        out.flush()?;
+    }
+
+    let plan_json = |done: bool, downloaded: &[String], deleted: &[String]| {
+        json!({
+            "plan": plan.sync.to_json(),
+            "dry_run": mode.dry_run,
+            "done": done,
+            "downloaded": downloaded,
+            "deleted": deleted,
+        })
+    };
+
+    if conflicts > 0 {
+        if mode.json {
+            write_pretty_json(&plan_json(false, &[], &[]), out)?;
+        }
+        out.flush()?;
+        return Err(CommandError::PullConflicts(conflicts));
+    }
+
+    let mut done = false;
+    let mut downloaded = Vec::new();
+    let mut deleted = Vec::new();
+    if noop {
+        done = true;
+    } else if let Decision::Go = decide(mode, "Pull?", confirm, out)? {
+        let mut write_error: Option<io::Error> = None;
+        let result = pull(backend, dir, &plan, &mut |step| {
+            if mode.json || write_error.is_some() {
+                return;
+            }
+            let label = match step.action {
+                Action::Download => "downloaded",
+                Action::Rename => "renamed",
+                Action::Delete => "trashed",
+                _ => return,
+            };
+            if let Err(e) = writeln!(out, "  {label:<10} {}", step.path) {
+                write_error = Some(e);
+            }
+        });
+        if let Some(e) = write_error {
+            return Err(e.into());
+        }
+        let outcome = result?;
+        done = true;
+        downloaded = outcome.downloaded;
+        deleted = outcome.deleted;
+        if !mode.json {
+            writeln!(
+                out,
+                "Downloaded {}, moved {} to the recycle bin.",
+                count(downloaded.len(), "file"),
+                count(deleted.len(), "file")
+            )?;
+        }
+    }
+
+    if mode.json {
+        write_pretty_json(&plan_json(done, &downloaded, &deleted), out)?;
+    } else if kept > 0 {
+        writeln!(
+            out,
+            "{} kept; run again with --prune to move {} to the recycle bin.",
+            if kept == 1 {
+                "1 local file was".to_owned()
+            } else {
+                format!("{kept} local files were")
+            },
+            if kept == 1 { "it" } else { "them" }
         )?;
     }
     out.flush()?;
@@ -3231,6 +3357,382 @@ mod tests {
             let index = CloudIndex::load(&cloud).unwrap();
             assert_eq!(index.entries.len(), 1);
             assert!(index.entries[0].url.is_some());
+        }
+    }
+
+    mod sync_pull_tests {
+        use std::collections::BTreeMap;
+
+        use ttskit_cloud::{cloud_key, sha1_hex};
+
+        use super::*;
+
+        const YES: RunMode = RunMode {
+            dry_run: false,
+            yes: true,
+            json: false,
+        };
+        const DRY: RunMode = RunMode {
+            dry_run: true,
+            yes: false,
+            json: false,
+        };
+        const ASK: RunMode = RunMode {
+            dry_run: false,
+            yes: false,
+            json: false,
+        };
+        const JSON_YES: RunMode = RunMode {
+            dry_run: false,
+            yes: true,
+            json: true,
+        };
+        const JSON_DRY: RunMode = RunMode {
+            dry_run: true,
+            yes: false,
+            json: true,
+        };
+
+        /// An in-memory directory with a log of what changed it.
+        #[derive(Default)]
+        struct MemoryDir {
+            files: BTreeMap<String, Vec<u8>>,
+            log: Vec<String>,
+        }
+
+        impl MemoryDir {
+            fn with(files: &[(&str, &str)]) -> Self {
+                Self {
+                    files: files
+                        .iter()
+                        .map(|(p, d)| ((*p).to_owned(), d.as_bytes().to_vec()))
+                        .collect(),
+                    log: Vec::new(),
+                }
+            }
+
+            fn local(&self) -> Vec<LocalFile> {
+                self.files
+                    .iter()
+                    .map(|(p, d)| LocalFile {
+                        path: p.clone(),
+                        size: d.len() as u64,
+                        sha1: sha1_hex(d),
+                    })
+                    .collect()
+            }
+
+            fn names(&self) -> Vec<&str> {
+                self.files.keys().map(String::as_str).collect()
+            }
+        }
+
+        impl LocalDir for MemoryDir {
+            fn read(&self, path: &str) -> io::Result<Vec<u8>> {
+                self.files
+                    .get(path)
+                    .cloned()
+                    .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no such file"))
+            }
+
+            fn write(&mut self, path: &str, data: &[u8]) -> io::Result<()> {
+                self.log.push(format!("write {path}"));
+                self.files.insert(path.to_owned(), data.to_vec());
+                Ok(())
+            }
+
+            fn trash(&mut self, path: &str) -> io::Result<()> {
+                self.log.push(format!("trash {path}"));
+                self.files
+                    .remove(path)
+                    .map(|_| ())
+                    .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no such file"))
+            }
+        }
+
+        struct Out {
+            result: Result<(), CommandError>,
+            text: String,
+            prompts: Vec<String>,
+        }
+
+        /// A cloud with `files` (name, content) in the folder `Game`, indexed.
+        fn cloud_with(files: &[(&str, &str)]) -> MemoryCloud {
+            let mut index = CloudIndex::empty();
+            index.folders = vec!["Game".into()];
+            let mut cloud = MemoryCloud::new();
+            for (name, data) in files {
+                let key = cloud_key(&sha1_hex(data.as_bytes()), name);
+                cloud = cloud.with_file(&key, data.as_bytes());
+                index.entries.push(IndexEntry::new(
+                    key.clone(),
+                    *name,
+                    Some(format!("https://u/{key}")),
+                    Some(data.len() as u64),
+                    None,
+                    "Game",
+                ));
+            }
+            seed(cloud, &index)
+        }
+
+        fn pull_run(
+            cloud: &MemoryCloud,
+            dir: &mut MemoryDir,
+            prune: bool,
+            mode: RunMode,
+            answer: bool,
+        ) -> Out {
+            let local = dir.local();
+            let mut prompts = Vec::new();
+            let mut confirm = |p: &str| {
+                prompts.push(p.to_owned());
+                Ok(answer)
+            };
+            let mut out = Vec::new();
+            let result = sync_pull(
+                cloud,
+                dir,
+                &local,
+                "Game",
+                prune,
+                mode,
+                &mut confirm,
+                &mut out,
+            );
+            Out {
+                result,
+                text: String::from_utf8(out).unwrap(),
+                prompts,
+            }
+        }
+
+        #[test]
+        fn dry_run_prints_the_plan_and_changes_nothing() {
+            let cloud = cloud_with(&[("a.png", "A"), ("b.png", "B")]);
+            let mut dir = MemoryDir::default();
+            let run = pull_run(&cloud, &mut dir, false, DRY, false);
+            run.result.unwrap();
+            assert!(run.text.starts_with("Pull from cloud folder Game:\n"));
+            assert!(run.text.contains("  download   a.png  (new)\n"));
+            assert!(run.text.contains("  download   b.png  (new)\n"));
+            assert!(
+                run.text
+                    .ends_with("2 download\nDry run: nothing was changed.\n")
+            );
+            assert!(run.prompts.is_empty());
+            assert!(dir.log.is_empty());
+            assert!(cloud.mutating_calls().is_empty());
+        }
+
+        #[test]
+        fn declined_confirmation_changes_nothing() {
+            let cloud = cloud_with(&[("a.png", "A")]);
+            let mut dir = MemoryDir::default();
+            let run = pull_run(&cloud, &mut dir, false, ASK, false);
+            run.result.unwrap();
+            assert_eq!(run.prompts, ["Pull?"]);
+            assert!(run.text.starts_with("Pull from cloud folder Game:\n"));
+            assert!(run.text.ends_with("Cancelled: nothing was changed.\n"));
+            assert!(dir.log.is_empty());
+        }
+
+        #[test]
+        fn accepted_confirmation_pulls() {
+            let cloud = cloud_with(&[("a.png", "A"), ("b.png", "B")]);
+            let mut dir = MemoryDir::default();
+            let run = pull_run(&cloud, &mut dir, false, ASK, true);
+            run.result.unwrap();
+            assert_eq!(run.prompts, ["Pull?"]);
+            assert!(
+                run.text
+                    .contains("\n  downloaded a.png\n  downloaded b.png\n")
+            );
+            assert!(
+                run.text
+                    .ends_with("Downloaded 2 files, moved 0 files to the recycle bin.\n")
+            );
+            assert_eq!(dir.names(), ["a.png", "b.png"]);
+            assert_eq!(dir.files["a.png"], b"A");
+            assert!(cloud.mutating_calls().is_empty());
+        }
+
+        #[test]
+        fn yes_pulls_without_asking() {
+            let cloud = cloud_with(&[("a.png", "A")]);
+            let mut dir = MemoryDir::default();
+            let run = pull_run(&cloud, &mut dir, false, YES, false);
+            run.result.unwrap();
+            assert!(run.prompts.is_empty());
+            assert!(
+                run.text
+                    .ends_with("Downloaded 1 file, moved 0 files to the recycle bin.\n")
+            );
+            assert_eq!(dir.names(), ["a.png"]);
+        }
+
+        #[test]
+        fn confirmation_error_propagates_after_the_plan() {
+            let cloud = cloud_with(&[("a.png", "A")]);
+            let mut dir = MemoryDir::default();
+            let mut confirm = |_: &str| Err(CommandError::ConfirmationNeeded);
+            let mut out = Vec::new();
+            let err = sync_pull(
+                &cloud,
+                &mut dir,
+                &[],
+                "Game",
+                false,
+                ASK,
+                &mut confirm,
+                &mut out,
+            )
+            .unwrap_err();
+            assert!(matches!(err, CommandError::ConfirmationNeeded));
+            assert!(
+                String::from_utf8(out)
+                    .unwrap()
+                    .starts_with("Pull from cloud folder Game:\n")
+            );
+            assert!(dir.log.is_empty());
+        }
+
+        #[test]
+        fn noop_never_asks() {
+            let cloud = cloud_with(&[("a.png", "A")]);
+            let mut dir = MemoryDir::with(&[("a.png", "A")]);
+            let run = pull_run(&cloud, &mut dir, false, ASK, false);
+            run.result.unwrap();
+            assert!(run.prompts.is_empty());
+            assert_eq!(run.text, "Pull from cloud folder Game:\n1 identical\n");
+            assert!(dir.log.is_empty());
+        }
+
+        #[test]
+        fn changed_file_is_overwritten_and_shown_in_the_plan() {
+            let cloud = cloud_with(&[("a.png", "new")]);
+            let mut dir = MemoryDir::with(&[("a.png", "old")]);
+            let run = pull_run(&cloud, &mut dir, false, DRY, false);
+            run.result.unwrap();
+            assert!(
+                run.text.contains("  download   a.png  (changed"),
+                "{}",
+                run.text
+            );
+            assert!(dir.log.is_empty());
+
+            let run = pull_run(&cloud, &mut dir, false, YES, false);
+            run.result.unwrap();
+            assert!(run.text.contains("  downloaded a.png\n"));
+            assert_eq!(dir.files["a.png"], b"new");
+        }
+
+        #[test]
+        fn without_prune_local_only_files_are_kept_and_noted() {
+            let cloud = cloud_with(&[("a.png", "A")]);
+            let mut dir = MemoryDir::with(&[("x.png", "X"), ("y.png", "Y")]);
+            let run = pull_run(&cloud, &mut dir, false, YES, false);
+            run.result.unwrap();
+            assert!(run.text.ends_with(
+                "Downloaded 1 file, moved 0 files to the recycle bin.\n\
+                 2 local files were kept; run again with --prune to move them to the recycle bin.\n"
+            ));
+            assert_eq!(dir.names(), ["a.png", "x.png", "y.png"]);
+
+            let mut dir = MemoryDir::with(&[("a.png", "A"), ("x.png", "X")]);
+            let run = pull_run(&cloud, &mut dir, false, ASK, false);
+            run.result.unwrap();
+            assert!(run.prompts.is_empty());
+            assert!(run.text.ends_with(
+                "1 skip, 1 identical\n\
+                 1 local file was kept; run again with --prune to move it to the recycle bin.\n"
+            ));
+        }
+
+        #[test]
+        fn prune_lists_then_trashes() {
+            let cloud = cloud_with(&[("a.png", "A")]);
+            let mut dir = MemoryDir::with(&[("old.png", "O")]);
+            let run = pull_run(&cloud, &mut dir, true, YES, false);
+            run.result.unwrap();
+            assert!(
+                run.text
+                    .starts_with("Pull from cloud folder Game (prune):\n")
+            );
+            assert!(run.text.contains("  delete     old.png"));
+            assert!(run.text.contains("\n  downloaded a.png\n"));
+            assert!(run.text.contains("\n  trashed    old.png\n"));
+            assert!(
+                run.text
+                    .ends_with("Downloaded 1 file, moved 1 file to the recycle bin.\n")
+            );
+            assert!(!run.text.contains("kept"));
+            assert_eq!(dir.names(), ["a.png"]);
+            assert_eq!(dir.log, ["write a.png", "trash old.png"]);
+        }
+
+        #[test]
+        fn conflict_is_an_error_after_the_plan_even_for_dry_run() {
+            for mode in [ASK, DRY, YES] {
+                // Two local files that differ only in case clash.
+                let cloud = cloud_with(&[]);
+                let mut dir = MemoryDir::with(&[("a.png", "1"), ("A.png", "2")]);
+                let run = pull_run(&cloud, &mut dir, false, mode, true);
+                let err = run.result.unwrap_err();
+                assert!(matches!(err, CommandError::PullConflicts(2)));
+                assert_eq!(
+                    err.to_string(),
+                    "cannot pull: 2 conflict(s) in the plan; rename the files involved"
+                );
+                assert!(run.text.contains("conflict"));
+                assert!(run.prompts.is_empty());
+                assert!(!run.text.contains("Dry run"));
+                assert!(dir.log.is_empty());
+            }
+        }
+
+        #[test]
+        fn conflict_json_is_printed_before_the_error() {
+            let cloud = cloud_with(&[]);
+            let mut dir = MemoryDir::with(&[("a.png", "1"), ("A.png", "2")]);
+            let run = pull_run(&cloud, &mut dir, false, JSON_DRY, false);
+            assert!(matches!(
+                run.result.unwrap_err(),
+                CommandError::PullConflicts(2)
+            ));
+            let value: serde_json::Value = serde_json::from_str(&run.text).unwrap();
+            assert_eq!(value["done"], false);
+            assert!(value["plan"].is_object());
+        }
+
+        #[test]
+        fn json_dry_run_shape() {
+            let cloud = cloud_with(&[("a.png", "A")]);
+            let mut dir = MemoryDir::default();
+            let run = pull_run(&cloud, &mut dir, false, JSON_DRY, false);
+            run.result.unwrap();
+            assert!(run.text.starts_with("{\n"));
+            let value: serde_json::Value = serde_json::from_str(&run.text).unwrap();
+            assert_eq!(value["dry_run"], true);
+            assert_eq!(value["done"], false);
+            assert_eq!(value["downloaded"], json!([]));
+            assert_eq!(value["deleted"], json!([]));
+            assert_eq!(value["plan"]["steps"].as_array().unwrap().len(), 1);
+            assert!(dir.log.is_empty());
+        }
+
+        #[test]
+        fn json_real_run_shape() {
+            let cloud = cloud_with(&[("a.png", "A")]);
+            let mut dir = MemoryDir::with(&[("old.png", "O")]);
+            let run = pull_run(&cloud, &mut dir, true, JSON_YES, false);
+            run.result.unwrap();
+            let value: serde_json::Value = serde_json::from_str(&run.text).unwrap();
+            assert_eq!(value["dry_run"], false);
+            assert_eq!(value["done"], true);
+            assert_eq!(value["downloaded"], json!(["a.png"]));
+            assert_eq!(value["deleted"], json!(["old.png"]));
+            assert!(value["plan"].is_object());
         }
     }
 }
