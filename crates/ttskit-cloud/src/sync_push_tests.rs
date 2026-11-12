@@ -93,7 +93,7 @@ fn run(
     files: &Files,
     prune: bool,
 ) -> Result<PushOutcome, PushError> {
-    let plan = plan_push(cloud, local, "Game", prune)?;
+    let plan = plan_push(cloud, local, "Game", prune, &IgnoreSet::empty(), 0)?;
     push(
         cloud,
         store,
@@ -117,7 +117,7 @@ fn new_files_are_uploaded_shared_and_indexed_after_one_backup() {
     let mut cloud = MemoryCloud::new();
     let (local, files) = local_files(&[("a.png", "A"), ("sub/b.png", "B")]);
     let mut seen = Vec::new();
-    let plan = plan_push(&cloud, &local, "game", false).unwrap();
+    let plan = plan_push(&cloud, &local, "game", false, &IgnoreSet::empty(), 0).unwrap();
     let out = push(
         &mut cloud,
         &store,
@@ -157,7 +157,7 @@ fn new_files_are_uploaded_shared_and_indexed_after_one_backup() {
 
     // Pushing again changes nothing and takes no backup.
     cloud.clear_calls();
-    let plan = plan_push(&cloud, &local, "game", false).unwrap();
+    let plan = plan_push(&cloud, &local, "game", false, &IgnoreSet::empty(), 0).unwrap();
     assert!(plan.is_noop());
     let out = push(
         &mut cloud,
@@ -227,7 +227,7 @@ fn prune_deletes_removed_files_and_replaces_changed_ones() {
     assert!(folders.contains(&"Game\\sub".to_owned()));
     assert_eq!(store.list().unwrap().len(), 1);
     // Everything matches now.
-    let plan = plan_push(&cloud, &local, "Game", true).unwrap();
+    let plan = plan_push(&cloud, &local, "Game", true, &IgnoreSet::empty(), 0).unwrap();
     assert!(plan.sync.is_in_sync());
 }
 
@@ -250,7 +250,7 @@ fn rename_uploads_then_deletes_the_old_path() {
     let (_dir, store) = new_store();
     let mut cloud = cloud_with(&[("Game", "old.png", "same")]);
     let (local, files) = local_files(&[("new.png", "same")]);
-    let plan = plan_push(&cloud, &local, "Game", true).unwrap();
+    let plan = plan_push(&cloud, &local, "Game", true, &IgnoreSet::empty(), 0).unwrap();
     assert_eq!(plan.sync.count(Action::Rename), 1);
     let mut steps = 0;
     let out = push(
@@ -277,7 +277,7 @@ fn planning_changes_nothing() {
     let (_dir, store) = new_store();
     let cloud = cloud_with(&[("Game", "a.png", "A")]);
     let (local, _) = local_files(&[("a.png", "A"), ("b.png", "B")]);
-    let plan = plan_push(&cloud, &local, "Game", true).unwrap();
+    let plan = plan_push(&cloud, &local, "Game", true, &IgnoreSet::empty(), 0).unwrap();
     assert!(!plan.is_noop());
     assert!(cloud.mutating_calls().is_empty());
     assert!(store.list().unwrap().is_empty());
@@ -288,7 +288,7 @@ fn conflicts_are_refused_before_any_change() {
     let (_dir, store) = new_store();
     let mut cloud = MemoryCloud::new();
     let (local, files) = local_files(&[("x.png", "1"), ("X.png", "2")]);
-    let plan = plan_push(&cloud, &local, "Game", false).unwrap();
+    let plan = plan_push(&cloud, &local, "Game", false, &IgnoreSet::empty(), 0).unwrap();
     assert!(plan.sync.has_conflicts());
     let err = push(
         &mut cloud,
@@ -310,7 +310,7 @@ fn quota_is_checked_before_any_change() {
     let (_dir, store) = new_store();
     let cloud = MemoryCloud::new().with_quota(3);
     let (local, _) = local_files(&[("a.png", "12345")]);
-    let err = plan_push(&cloud, &local, "Game", false).unwrap_err();
+    let err = plan_push(&cloud, &local, "Game", false, &IgnoreSet::empty(), 0).unwrap_err();
     assert!(matches!(
         err,
         PushError::Cloud(CloudError::QuotaExceeded { .. })
@@ -339,7 +339,7 @@ fn a_plan_that_no_longer_matches_the_cloud_is_refused() {
     let (_dir, store) = new_store();
     let mut cloud = MemoryCloud::new();
     let (local, files) = local_files(&[("a.png", "A")]);
-    let plan = plan_push(&cloud, &local, "Game", false).unwrap();
+    let plan = plan_push(&cloud, &local, "Game", false, &IgnoreSet::empty(), 0).unwrap();
     // Someone else pushes the same file in the meantime.
     run(&mut cloud, &store, &local, &files, false).unwrap();
     let err = push(
@@ -428,7 +428,7 @@ fn every_failure_half_way_can_be_repeated() {
                 "{op:?} {name}: {n} written twice"
             );
         }
-        let plan = plan_push(&cloud, &local, "Game", true).unwrap();
+        let plan = plan_push(&cloud, &local, "Game", true, &IgnoreSet::empty(), 0).unwrap();
         assert!(plan.sync.is_in_sync(), "{op:?} {name}");
     }
 }
@@ -463,4 +463,32 @@ fn a_failing_index_write_names_the_index() {
                 .is_some_and(|n| n.to_ascii_lowercase().ends_with("a.png"))
     }));
     assert_eq!(state(&cloud).0.len(), 2);
+}
+
+#[test]
+fn prune_leaves_ignored_cloud_files_alone() {
+    let (_dir, store) = new_store();
+    let mut cloud = cloud_with(&[("Game", "keep.png", "K"), ("Game", "cache.log", "C")]);
+    let (local, files) = local_files(&[("keep.png", "K"), ("new.png", "N")]);
+    let ignore = IgnoreSet::new(&["*.log".to_owned()]).unwrap();
+    let plan = plan_push(&cloud, &local, "Game", true, &ignore, 2).unwrap();
+    assert_eq!(plan.sync.count(Action::Delete), 0);
+    assert!(plan.sync.steps.iter().all(|s| s.path != "cache.log"));
+    assert_eq!(plan.sync.ignored_cloud, 1);
+    assert_eq!(plan.sync.ignored_local, 2);
+    let out = push(
+        &mut cloud,
+        &store,
+        &plan,
+        &reader(&files),
+        UNIX_EPOCH,
+        "d",
+        &mut |_| {},
+    )
+    .unwrap();
+    assert_eq!(out.uploaded, ["new.png"]);
+    assert!(out.deleted.is_empty());
+    let (entries, _, names) = state(&cloud);
+    assert!(entries.iter().any(|e| e.1 == "cache.log"));
+    assert!(names.iter().any(|n| n.ends_with("_cache.log")));
 }

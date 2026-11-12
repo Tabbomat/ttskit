@@ -25,8 +25,8 @@ use std::io;
 use std::path::PathBuf;
 
 use crate::{
-    Action, CloudBackend, CloudError, CloudIndex, Direction, IndexError, LocalFile, PlanOptions,
-    Reason, SyncPlan, SyncStep, plan_sync, sha1_hex,
+    Action, CloudBackend, CloudError, CloudIndex, Direction, IgnoreSet, IndexError, LocalFile,
+    PlanOptions, Reason, SyncPlan, SyncStep, plan_sync, sha1_hex,
 };
 
 /// Errors from planning or running a pull.
@@ -95,12 +95,23 @@ pub enum PullError {
 }
 
 /// What [`pull`] will do; made by [`plan_pull`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct PullPlan {
     /// The sync plan, to print.
     pub sync: SyncPlan,
     local: Vec<LocalFile>,
+    ignore: IgnoreSet,
 }
+
+/// Plans are equal when the sync plan and the scanned files are; the ignore set
+/// has no equality of its own and only shaped those two.
+impl PartialEq for PullPlan {
+    fn eq(&self, other: &Self) -> bool {
+        self.sync == other.sync && self.local == other.local
+    }
+}
+
+impl Eq for PullPlan {}
 
 impl PullPlan {
     /// Whether [`pull`] changes nothing: no download, rename or delete.
@@ -187,17 +198,22 @@ fn make_plan(
     local: &[LocalFile],
     folder: &str,
     prune: bool,
+    ignore: &IgnoreSet,
+    ignored_local: usize,
 ) -> Result<SyncPlan, PullError> {
     let index = CloudIndex::load(backend)?;
     let files = backend.list()?;
-    Ok(plan_sync(
+    let mut sync = plan_sync(
         Direction::Pull,
         local,
         &index,
         &files,
         folder,
         PlanOptions { prune },
-    ))
+        ignore,
+    );
+    sync.ignored_local = ignored_local;
+    Ok(sync)
 }
 
 /// Works out what pulling the cloud folder `folder` into the directory
@@ -205,15 +221,23 @@ fn make_plan(
 ///
 /// `local` comes from [`scan_local`](crate::scan_local). The plan may contain
 /// conflicts; [`pull`] refuses to run it then.
+///
+/// `ignore` is the set `local` was scanned with: cloud entries it matches are
+/// not downloaded, and ignored local files are not in `local`, so prune
+/// cannot touch them. `ignored_local` (the scan's ignored count) is only
+/// reported in the plan.
 pub fn plan_pull(
     backend: &dyn CloudBackend,
     local: &[LocalFile],
     folder: &str,
     prune: bool,
+    ignore: &IgnoreSet,
+    ignored_local: usize,
 ) -> Result<PullPlan, PullError> {
     Ok(PullPlan {
-        sync: make_plan(backend, local, folder, prune)?,
+        sync: make_plan(backend, local, folder, prune, ignore, ignored_local)?,
         local: local.to_vec(),
+        ignore: ignore.clone(),
     })
 }
 
@@ -381,6 +405,8 @@ pub fn pull(
         &plan.local,
         &plan.sync.cloud_folder,
         plan.sync.options.prune,
+        &plan.ignore,
+        plan.sync.ignored_local,
     )?;
     if again != plan.sync {
         return Err(PullError::PlanStale);

@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::status::lower_cmp;
-use crate::{CloudIndex, IndexEntry, LocalFile, UgcUrl, normalize_folder};
+use crate::{CloudIndex, IgnoreSet, IndexEntry, LocalFile, UgcUrl, normalize_folder};
 
 /// The manifest format version this crate reads and writes.
 const VERSION: u64 = 1;
@@ -262,12 +262,14 @@ impl Manifest {
     /// or size) is skipped, and any existing entry with its path is dropped,
     /// so the manifest never links a changed file to an older cloud version.
     /// Then entries whose local path is not in `local` are dropped; entries
-    /// without a path are kept.
+    /// without a path, and entries whose path `ignore` matches (those files
+    /// were not scanned), are kept.
     pub fn refresh_for_local(
         &mut self,
         local: &[LocalFile],
         root_folder: &str,
         index: &CloudIndex,
+        ignore: &IgnoreSet,
     ) {
         let root = normalize_folder(root_folder);
         for file in local {
@@ -292,7 +294,7 @@ impl Manifest {
             }
         }
         self.entries.retain(|e| match &e.path {
-            Some(p) => local.iter().any(|f| &f.path == p),
+            Some(p) => ignore.is_ignored(p) || local.iter().any(|f| &f.path == p),
             None => true,
         });
     }

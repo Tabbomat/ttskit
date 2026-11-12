@@ -20,7 +20,7 @@ use std::collections::{HashMap, HashSet};
 
 use serde_json::{Value, json};
 
-use crate::{CloudFile, CloudIndex, IndexEntry, LocalFile, cloud_key, normalize_folder};
+use crate::{CloudFile, CloudIndex, IgnoreSet, IndexEntry, LocalFile, cloud_key, normalize_folder};
 
 /// Which side is the source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -204,6 +204,12 @@ pub struct SyncPlan {
     pub cloud_folder: String,
     /// One step per file or rename, sorted by path ignoring ASCII case.
     pub steps: Vec<SyncStep>,
+    /// How many local files were ignored by the scan. [`plan_sync`] sets 0;
+    /// the caller supplies the number from the scan.
+    pub ignored_local: usize,
+    /// How many index entries below the folder were left alone because
+    /// their path is ignored.
+    pub ignored_cloud: usize,
 }
 
 impl SyncPlan {
@@ -289,6 +295,12 @@ impl SyncPlan {
             out.push_str(&parts.join(", "));
             out.push('\n');
         }
+        if self.ignored_local > 0 || self.ignored_cloud > 0 {
+            out.push_str(&format!(
+                "ignored: {} local, {} cloud\n",
+                self.ignored_local, self.ignored_cloud
+            ));
+        }
         out
     }
 
@@ -321,6 +333,7 @@ impl SyncPlan {
             "prune": self.options.prune,
             "has_conflicts": self.has_conflicts(),
             "counts": counts,
+            "ignored": {"local": self.ignored_local, "cloud": self.ignored_cloud},
             "steps": steps,
         })
     }
@@ -384,6 +397,12 @@ struct CloudSide<'a> {
 /// the folder and cloud files without an index entry are ignored (apart from
 /// the cloud file name check for [`Collision::SharedCloudFile`]). A folder
 /// that does not exist yet is fine: it is empty.
+///
+/// Index entries whose path relative to `folder` is matched by `ignore` are
+/// left alone: they take no part in the plan (no delete, download, skip or
+/// rename) and are only counted in [`SyncPlan::ignored_cloud`]. They still
+/// count for the cloud file name check. `local` is expected to be scanned
+/// with the same `ignore` already.
 pub fn plan_sync(
     direction: Direction,
     local: &[LocalFile],
@@ -391,6 +410,7 @@ pub fn plan_sync(
     cloud_files: &[CloudFile],
     folder: &str,
     options: PlanOptions,
+    ignore: &IgnoreSet,
 ) -> SyncPlan {
     let wanted = normalize_folder(folder);
     let root_lower = wanted.to_ascii_lowercase();
@@ -407,8 +427,13 @@ pub fn plan_sync(
 
     // Index entries in scope, by place, in index order.
     let mut cloud: HashMap<Place, Vec<CloudSide>> = HashMap::new();
+    let mut ignored_cloud = 0;
     for entry in &index.entries {
         if let Some(rel) = relative_folder(&entry.folder, &root_lower) {
+            if ignore.is_ignored(&join(&rel, &entry.name)) {
+                ignored_cloud += 1;
+                continue;
+            }
             let place = (rel.to_ascii_lowercase(), entry.name.to_ascii_lowercase());
             cloud.entry(place).or_default().push(CloudSide {
                 path: join(&rel, &entry.name),
@@ -614,6 +639,8 @@ pub fn plan_sync(
         options,
         cloud_folder,
         steps,
+        ignored_local: 0,
+        ignored_cloud,
     }
 }
 
@@ -830,6 +857,26 @@ mod tests {
             &w.files,
             folder,
             PlanOptions { prune },
+            &IgnoreSet::empty(),
+        )
+    }
+
+    fn run_ignoring(
+        dir: Direction,
+        w: &World,
+        locals: &[LocalFile],
+        prune: bool,
+        patterns: &[&str],
+    ) -> SyncPlan {
+        let v: Vec<String> = patterns.iter().map(|s| (*s).to_owned()).collect();
+        plan_sync(
+            dir,
+            locals,
+            &w.index,
+            &w.files,
+            "G",
+            PlanOptions { prune },
+            &IgnoreSet::new(&v).unwrap(),
         )
     }
 
@@ -1186,5 +1233,76 @@ mod tests {
         assert_eq!(s["from"], Value::Null);
         assert_eq!(s["sha1"], sha("new"));
         assert_eq!(s["cloud_key"], format!("{}_a.png", sha("new")));
+    }
+
+    #[test]
+    fn ignored_cloud_entries_are_left_alone() {
+        let w = world(vec![
+            entry("a", "keep.png", "G"),
+            entry("l", "x.log", "G"),
+            entry("m", "y.log", "G\\Sub"),
+            entry("o", "out.log", "Other"),
+        ]);
+        let locals = [local("keep.png", "a")];
+        for dir in [Direction::Push, Direction::Pull] {
+            let p = run_ignoring(dir, &w, &locals, true, &["*.log"]);
+            assert_eq!(summary(&p), [("keep.png", "skip", "identical")]);
+            // Only the two entries below the folder count.
+            assert_eq!(p.ignored_cloud, 2);
+            assert_eq!(p.ignored_local, 0);
+            assert!(p.is_in_sync());
+        }
+        // Without pruning there is no not_pruned row either.
+        let p = run_ignoring(Direction::Push, &w, &locals, false, &["*.log"]);
+        assert_eq!(summary(&p), [("keep.png", "skip", "identical")]);
+        // Pull does not download an ignored cloud file.
+        let p = run_ignoring(Direction::Pull, &w, &[], false, &["*.log"]);
+        assert_eq!(summary(&p), [("keep.png", "download", "new")]);
+        // Without patterns they are all planned.
+        let p = run(Direction::Pull, &w, &[], "G", false);
+        assert_eq!(p.count(Action::Download), 3);
+        assert_eq!(p.ignored_cloud, 0);
+    }
+
+    #[test]
+    fn no_rename_pairing_with_an_ignored_entry() {
+        let w = world(vec![entry("same", "old.log", "G")]);
+        let locals = [local("new.png", "same")];
+        let p = run_ignoring(Direction::Push, &w, &locals, true, &["*.log"]);
+        assert_eq!(summary(&p), [("new.png", "upload", "new")]);
+        let p = run(Direction::Push, &w, &locals, "G", true);
+        assert_eq!(summary(&p), [("new.png", "rename", "renamed")]);
+    }
+
+    #[test]
+    fn shared_cloud_file_still_conflicts_with_an_ignored_entry() {
+        // Same name and content in another folder: one cloud file.
+        let w = world(vec![entry("same", "a.png", "Other")]);
+        let locals = [local("a.png", "same")];
+        let p = run_ignoring(Direction::Push, &w, &locals, false, &["Other/"]);
+        assert!(p.has_conflicts());
+        assert_eq!(
+            p.steps[0].reason,
+            Reason::Collision(Collision::SharedCloudFile)
+        );
+        let p = run_ignoring(Direction::Push, &w, &locals, false, &["a.png"]);
+        assert!(p.has_conflicts());
+    }
+
+    #[test]
+    fn ignored_line_in_text_and_json() {
+        let w = world(vec![entry("l", "x.log", "G")]);
+        let mut p = run_ignoring(Direction::Push, &w, &[], false, &["*.log"]);
+        assert_eq!(
+            p.render_text(),
+            "Push to cloud folder G:\nNothing to do.\nignored: 0 local, 1 cloud\n"
+        );
+        assert_eq!(p.to_json()["ignored"], json!({"local": 0, "cloud": 1}));
+        p.ignored_local = 3;
+        p.ignored_cloud = 0;
+        assert!(p.render_text().ends_with("ignored: 3 local, 0 cloud\n"));
+        p.ignored_local = 0;
+        assert!(!p.render_text().contains("ignored"));
+        assert_eq!(p.to_json()["ignored"], json!({"local": 0, "cloud": 0}));
     }
 }

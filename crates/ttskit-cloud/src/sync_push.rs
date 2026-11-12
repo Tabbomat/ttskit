@@ -35,8 +35,8 @@ use std::time::SystemTime;
 use crate::upload::resolve_folder;
 use crate::{
     Action, Backup, BackupError, BackupStore, CloudBackend, CloudError, CloudFile, CloudIndex,
-    Direction, IndexEntry, IndexError, LocalFile, PlanOptions, Reason, SyncPlan, SyncStep, UgcUrl,
-    normalize_folder, plan_sync, sha1_hex,
+    Direction, IgnoreSet, IndexEntry, IndexError, LocalFile, PlanOptions, Reason, SyncPlan,
+    SyncStep, UgcUrl, normalize_folder, plan_sync, sha1_hex,
 };
 
 /// Errors from planning or running a push.
@@ -96,12 +96,23 @@ pub enum PushError {
 }
 
 /// What [`push`] will do; made by [`plan_push`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct PushPlan {
     /// The sync plan, to print.
     pub sync: SyncPlan,
     local: Vec<LocalFile>,
+    ignore: IgnoreSet,
 }
+
+/// Plans are equal when the sync plan and the scanned files are; the ignore set
+/// has no equality of its own and only shaped those two.
+impl PartialEq for PushPlan {
+    fn eq(&self, other: &Self) -> bool {
+        self.sync == other.sync && self.local == other.local
+    }
+}
+
+impl Eq for PushPlan {}
 
 impl PushPlan {
     /// Whether [`push`] changes nothing: no upload, rename or delete.
@@ -176,19 +187,26 @@ fn check_quota(
 /// `local` comes from [`scan_local`](crate::scan_local). The plan may contain
 /// conflicts; [`push`] refuses to run it then. Fails if the files to upload do
 /// not fit into the quota.
+///
+/// `ignore` is the set `local` was scanned with: cloud entries it matches are
+/// left alone. `ignored_local` (the scan's ignored count) is only reported in
+/// the plan.
 pub fn plan_push(
     backend: &dyn CloudBackend,
     local: &[LocalFile],
     folder: &str,
     prune: bool,
+    ignore: &IgnoreSet,
+    ignored_local: usize,
 ) -> Result<PushPlan, PushError> {
-    let (sync, present) = make_plan(backend, local, folder, prune)?;
+    let (sync, present) = make_plan(backend, local, folder, prune, ignore, ignored_local)?;
     if !sync.has_conflicts() {
         check_quota(backend, &sync, &present)?;
     }
     Ok(PushPlan {
         sync,
         local: local.to_vec(),
+        ignore: ignore.clone(),
     })
 }
 
@@ -197,17 +215,21 @@ fn make_plan(
     local: &[LocalFile],
     folder: &str,
     prune: bool,
+    ignore: &IgnoreSet,
+    ignored_local: usize,
 ) -> Result<(SyncPlan, HashSet<String>), PushError> {
     let index = CloudIndex::load(backend)?;
     let files = backend.list()?;
-    let sync = plan_sync(
+    let mut sync = plan_sync(
         Direction::Push,
         local,
         &index,
         &files,
         folder,
         PlanOptions { prune },
+        ignore,
     );
+    sync.ignored_local = ignored_local;
     Ok((sync, present_set(&files)))
 }
 
@@ -440,6 +462,8 @@ pub fn push(
         &plan.local,
         &plan.sync.cloud_folder,
         plan.sync.options.prune,
+        &plan.ignore,
+        plan.sync.ignored_local,
     )?;
     if again != plan.sync {
         return Err(PushError::PlanStale);

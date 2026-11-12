@@ -40,7 +40,10 @@ pub use index::{
 };
 pub use manifest::{Manifest, ManifestEntry, ManifestError, TsvError, TsvProblem};
 pub use memory::{Call, MemoryCloud};
-pub use status::{FileState, LocalFile, StatusError, StatusReport, StatusRow, compare, scan_local};
+pub use status::{
+    FileState, LocalFile, LocalScan, StatusError, StatusReport, StatusRow, compare, scan_local,
+    scan_local_ignoring,
+};
 #[cfg(feature = "steam")]
 pub use steam::{SteamCloud, TTS_APP_ID};
 pub use sync_plan::{

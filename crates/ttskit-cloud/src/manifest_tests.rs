@@ -417,6 +417,7 @@ fn refresh_adds_updates_and_drops() {
         ],
         "/G/",
         &idx,
+        &IgnoreSet::empty(),
     );
     m.entries.sort_by(ManifestEntry::order);
     assert_eq!(m.entries.len(), 3);
@@ -432,7 +433,7 @@ fn refresh_adds_updates_and_drops() {
 fn refresh_prefers_the_entry_with_the_files_sha1() {
     let idx = index(vec![ie(1, "old", "a.png", ""), ie(2, "new", "a.png", "")]);
     let mut m = Manifest::default();
-    m.refresh_for_local(&[local("a.png", "new")], "", &idx);
+    m.refresh_for_local(&[local("a.png", "new")], "", &idx, &IgnoreSet::empty());
     assert_eq!(m.entries.len(), 1);
     assert_eq!(m.entries[0].url, url(2, "new"));
 }
@@ -444,7 +445,12 @@ fn refresh_ignores_entries_with_another_sha1_and_drops_the_stale_link() {
         me(Some("a.png"), "a.png", "older"),
         me(None, "a.png", "old"),
     ]);
-    m.refresh_for_local(&[local("a.png", "changed"), local("b.png", "b")], "", &idx);
+    m.refresh_for_local(
+        &[local("a.png", "changed"), local("b.png", "b")],
+        "",
+        &idx,
+        &IgnoreSet::empty(),
+    );
     m.entries.sort_by(ManifestEntry::order);
     assert_eq!(m.entries.len(), 2);
     // The path-less entry survives; a.png is not linked at all.
@@ -453,6 +459,20 @@ fn refresh_ignores_entries_with_another_sha1_and_drops_the_stale_link() {
 
     // Without any entry for the name, nothing is added.
     let mut m = Manifest::default();
-    m.refresh_for_local(&[local("a.png", "changed")], "", &idx);
+    m.refresh_for_local(&[local("a.png", "changed")], "", &idx, &IgnoreSet::empty());
     assert!(m.entries.is_empty());
+}
+
+#[test]
+fn refresh_keeps_entries_for_ignored_paths() {
+    let idx = index(vec![ie(1, "a", "a.png", "")]);
+    let ignore = IgnoreSet::new(&["*.log".to_owned()]).unwrap();
+    let mut m = manifest(vec![
+        me(Some("x.log"), "x.log", "x"),
+        me(Some("gone.png"), "gone.png", "gone"),
+    ]);
+    m.refresh_for_local(&[local("a.png", "a")], "", &idx, &ignore);
+    m.entries.sort_by(ManifestEntry::order);
+    let paths: Vec<_> = m.entries.iter().map(|e| e.path.as_deref()).collect();
+    assert_eq!(paths, [Some("a.png"), Some("x.log")]);
 }

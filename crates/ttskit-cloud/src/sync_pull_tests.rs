@@ -105,7 +105,7 @@ fn cloud_with(files: &[(&str, &str, &str)]) -> MemoryCloud {
 }
 
 fn run(cloud: &MemoryCloud, dir: &mut MemoryDir, prune: bool) -> Result<PullOutcome, PullError> {
-    let plan = plan_pull(cloud, &dir.local(), "Game", prune)?;
+    let plan = plan_pull(cloud, &dir.local(), "Game", prune, &IgnoreSet::empty(), 0)?;
     pull(cloud, dir, &plan, &mut |_| {})
 }
 
@@ -128,7 +128,7 @@ fn new_changed_and_identical_files() {
         ("Game\\sub", "deep.png", "D"),
     ]);
     let mut dir = MemoryDir::with(&[("chg.png", "local"), ("same.png", "S")]);
-    let plan = plan_pull(&cloud, &dir.local(), "Game", false).unwrap();
+    let plan = plan_pull(&cloud, &dir.local(), "Game", false, &IgnoreSet::empty(), 0).unwrap();
     let mut seen = Vec::new();
     let out = pull(&cloud, &mut dir, &plan, &mut |s| seen.push(s.path.clone())).unwrap();
     assert_eq!(out.downloaded, ["chg.png", "new.png", "sub/deep.png"]);
@@ -160,7 +160,7 @@ fn nothing_is_deleted_without_prune() {
 fn prune_trashes_local_only_files() {
     let cloud = cloud_with(&[("Game", "a.png", "A")]);
     let mut dir = MemoryDir::with(&[("a.png", "A"), ("extra.png", "X"), ("sub/old.png", "O")]);
-    let plan = plan_pull(&cloud, &dir.local(), "Game", true).unwrap();
+    let plan = plan_pull(&cloud, &dir.local(), "Game", true, &IgnoreSet::empty(), 0).unwrap();
     let mut seen = Vec::new();
     let out = pull(&cloud, &mut dir, &plan, &mut |s| seen.push(s.path.clone())).unwrap();
     assert!(out.downloaded.is_empty());
@@ -174,7 +174,7 @@ fn prune_trashes_local_only_files() {
 fn rename_writes_the_new_file_then_trashes_the_old_one() {
     let cloud = cloud_with(&[("Game", "new.png", "data")]);
     let mut dir = MemoryDir::with(&[("old.png", "data")]);
-    let plan = plan_pull(&cloud, &dir.local(), "Game", true).unwrap();
+    let plan = plan_pull(&cloud, &dir.local(), "Game", true, &IgnoreSet::empty(), 0).unwrap();
     assert_eq!(plan.sync.count(Action::Rename), 1);
     let mut seen = Vec::new();
     let out = pull(&cloud, &mut dir, &plan, &mut |s| seen.push(s.path.clone())).unwrap();
@@ -219,7 +219,7 @@ fn conflicts_are_refused() {
 fn stale_plan_is_refused() {
     let mut cloud = cloud_with(&[("Game", "a.png", "A"), ("Game", "b.png", "B")]);
     let mut dir = MemoryDir::default();
-    let plan = plan_pull(&cloud, &dir.local(), "Game", false).unwrap();
+    let plan = plan_pull(&cloud, &dir.local(), "Game", false, &IgnoreSet::empty(), 0).unwrap();
     cloud.delete(&cloud_key(&sha1_hex(b"B"), "b.png")).unwrap();
     let err = pull(&cloud, &mut dir, &plan, &mut |_| {}).unwrap_err();
     assert!(matches!(err, PullError::PlanStale), "{err}");
@@ -230,7 +230,7 @@ fn stale_plan_is_refused() {
 fn local_file_changed_after_scan_modifies_nothing() {
     let cloud = cloud_with(&[("Game", "new.png", "N"), ("Game", "chg.png", "cloud")]);
     let mut dir = MemoryDir::with(&[("chg.png", "local"), ("extra.png", "X")]);
-    let plan = plan_pull(&cloud, &dir.local(), "Game", true).unwrap();
+    let plan = plan_pull(&cloud, &dir.local(), "Game", true, &IgnoreSet::empty(), 0).unwrap();
 
     // The file to overwrite changed.
     dir.files.insert("chg.png".to_owned(), b"edited".to_vec());
@@ -264,7 +264,7 @@ fn cloud_content_with_the_wrong_sha1_is_not_written() {
     let cloud = cloud_with(&[("Game", "a.png", "A"), ("Game", "b.png", "B")])
         .with_file(&key, b"tampered".to_vec());
     let mut dir = MemoryDir::default();
-    let plan = plan_pull(&cloud, &dir.local(), "Game", false).unwrap();
+    let plan = plan_pull(&cloud, &dir.local(), "Game", false, &IgnoreSet::empty(), 0).unwrap();
     let err = pull(&cloud, &mut dir, &plan, &mut |_| {}).unwrap_err();
     let PullError::Incomplete {
         downloaded,
@@ -405,4 +405,22 @@ fn fs_dir_writes_replaces_and_reads() {
         dir.read("missing.txt").unwrap_err().kind(),
         io::ErrorKind::NotFound
     );
+}
+
+#[test]
+fn ignored_cloud_files_are_not_downloaded_and_ignored_local_files_survive_prune() {
+    let cloud = cloud_with(&[("Game", "a.png", "A"), ("Game", "cache.log", "C")]);
+    // The scan skipped local.log, so it is not in the local list.
+    let mut dir = MemoryDir::with(&[("a.png", "A"), ("extra.png", "X")]);
+    let local = dir.local();
+    dir.files.insert("local.log".to_owned(), b"L".to_vec());
+    let ignore = IgnoreSet::new(&["*.log".to_owned()]).unwrap();
+    let plan = plan_pull(&cloud, &local, "Game", true, &ignore, 1).unwrap();
+    assert_eq!(plan.sync.ignored_cloud, 1);
+    assert_eq!(plan.sync.ignored_local, 1);
+    let out = pull(&cloud, &mut dir, &plan, &mut |_| {}).unwrap();
+    assert!(out.downloaded.is_empty());
+    assert_eq!(out.deleted, ["extra.png"]);
+    assert_eq!(dir.names(), ["a.png", "local.log"]);
+    assert_cloud_untouched(&cloud);
 }

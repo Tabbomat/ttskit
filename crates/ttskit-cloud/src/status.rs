@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::{CloudFile, CloudIndex, IndexEntry, normalize_folder, sha1_hex};
+use crate::{CloudFile, CloudIndex, IgnoreSet, IndexEntry, normalize_folder, sha1_hex};
 
 /// Errors from scanning a local directory.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -61,24 +61,49 @@ pub(crate) fn lower_cmp(a: &str, b: &str) -> std::cmp::Ordering {
         .then_with(|| a.cmp(b))
 }
 
+/// The result of [`scan_local_ignoring`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalScan {
+    /// The files that are not ignored, sorted by path ignoring ASCII case.
+    pub files: Vec<LocalFile>,
+    /// How many files were skipped because an ignore pattern matched. Dot
+    /// entries and symbolic links are not counted.
+    pub ignored: usize,
+}
+
 /// Scans `dir` recursively.
 ///
 /// Files and directories whose name starts with `.` and symbolic links are
 /// skipped. The result is sorted by path, ignoring ASCII case first.
 pub fn scan_local(dir: &Path) -> Result<Vec<LocalFile>, StatusError> {
+    scan_local_ignoring(dir, &IgnoreSet::empty()).map(|s| s.files)
+}
+
+/// Like [`scan_local`], but files matched by `ignore` (against their
+/// `/`-separated path relative to `dir`) are neither read nor hashed; they
+/// are only counted.
+pub fn scan_local_ignoring(dir: &Path, ignore: &IgnoreSet) -> Result<LocalScan, StatusError> {
     let meta = fs::metadata(dir).map_err(|e| io_err(dir, &e))?;
     if !meta.is_dir() {
         return Err(StatusError::NotADirectory {
             path: dir.to_path_buf(),
         });
     }
-    let mut files = Vec::new();
-    scan_into(dir, "", &mut files)?;
-    files.sort_by(|a, b| lower_cmp(&a.path, &b.path));
-    Ok(files)
+    let mut scan = LocalScan {
+        files: Vec::new(),
+        ignored: 0,
+    };
+    scan_into(dir, "", ignore, &mut scan)?;
+    scan.files.sort_by(|a, b| lower_cmp(&a.path, &b.path));
+    Ok(scan)
 }
 
-fn scan_into(dir: &Path, prefix: &str, files: &mut Vec<LocalFile>) -> Result<(), StatusError> {
+fn scan_into(
+    dir: &Path,
+    prefix: &str,
+    ignore: &IgnoreSet,
+    scan: &mut LocalScan,
+) -> Result<(), StatusError> {
     for entry in fs::read_dir(dir).map_err(|e| io_err(dir, &e))? {
         let entry = entry.map_err(|e| io_err(dir, &e))?;
         let path = entry.path();
@@ -99,10 +124,14 @@ fn scan_into(dir: &Path, prefix: &str, files: &mut Vec<LocalFile>) -> Result<(),
             format!("{prefix}/{name}")
         };
         if kind.is_dir() {
-            scan_into(&path, &rel, files)?;
+            scan_into(&path, &rel, ignore, scan)?;
         } else if kind.is_file() {
+            if ignore.is_ignored(&rel) {
+                scan.ignored += 1;
+                continue;
+            }
             let data = fs::read(&path).map_err(|e| io_err(&path, &e))?;
-            files.push(LocalFile {
+            scan.files.push(LocalFile {
                 path: rel,
                 size: u64::try_from(data.len()).unwrap_or(u64::MAX),
                 sha1: sha1_hex(&data),
@@ -176,6 +205,12 @@ pub struct StatusReport {
     pub folder_exists: bool,
     /// One row per file, sorted by path ignoring ASCII case.
     pub rows: Vec<StatusRow>,
+    /// How many local files the scan ignored. [`compare`] sets 0; the caller
+    /// fills it in from [`LocalScan::ignored`].
+    pub ignored_local: usize,
+    /// How many cloud entries below the folder were left out because their
+    /// path is ignored.
+    pub ignored_cloud: usize,
 }
 
 impl StatusReport {
@@ -204,12 +239,14 @@ fn join(folder: &str, name: &str) -> String {
 /// corresponds to the index entries named `a.png` in the cloud folder `sub`
 /// below `folder`. Entries outside `folder` and cloud files without an entry
 /// are ignored. A cloud folder that does not exist yet is fine: all local
-/// files are then new.
+/// files are then new. Cloud entries whose path relative to `folder` is
+/// ignored by `ignore` are left out and counted in `ignored_cloud`.
 pub fn compare(
     index: &CloudIndex,
     cloud_files: &[CloudFile],
     folder: &str,
     local: &[LocalFile],
+    ignore: &IgnoreSet,
 ) -> StatusReport {
     let wanted = normalize_folder(folder);
     let root_lower = wanted.to_ascii_lowercase();
@@ -235,6 +272,7 @@ pub fn compare(
     // index order, together with the relative folder as spelled.
     let mut placed: Vec<((String, String), &IndexEntry, String)> = Vec::new();
     let mut by_place: HashMap<(String, String), Vec<usize>> = HashMap::new();
+    let mut ignored_cloud = 0;
     for entry in &index.entries {
         let full = normalize_folder(&entry.folder);
         let full_lower = full.to_ascii_lowercase();
@@ -250,6 +288,10 @@ pub fn compare(
         } else {
             continue;
         };
+        if ignore.is_ignored(&join(rel, &entry.name)) {
+            ignored_cloud += 1;
+            continue;
+        }
         let place = (rel.to_ascii_lowercase(), entry.name.to_ascii_lowercase());
         by_place
             .entry(place.clone())
@@ -312,6 +354,8 @@ pub fn compare(
         folder: resolved,
         folder_exists,
         rows,
+        ignored_local: 0,
+        ignored_cloud,
     }
 }
 
@@ -360,6 +404,15 @@ mod tests {
         index
     }
 
+    fn none() -> IgnoreSet {
+        IgnoreSet::empty()
+    }
+
+    fn pats(p: &[&str]) -> IgnoreSet {
+        let v: Vec<String> = p.iter().map(|s| (*s).to_owned()).collect();
+        IgnoreSet::new(&v).unwrap()
+    }
+
     fn states(report: &StatusReport) -> Vec<(&str, FileState)> {
         report
             .rows
@@ -389,6 +442,7 @@ mod tests {
                 local("broken.png", "three"),
                 local("new.png", "five"),
             ],
+            &IgnoreSet::empty(),
         );
         assert_eq!(
             states(&report),
@@ -428,6 +482,7 @@ mod tests {
             &files,
             "DECKS",
             &[local("sub/a.PNG", "a"), local("B.png", "b")],
+            &IgnoreSet::empty(),
         );
         assert!(report.is_in_sync());
         assert_eq!(report.folder, "Decks");
@@ -440,11 +495,11 @@ mod tests {
         let cur = entry("cur", "a.png", "");
         let idx = index(vec![old.clone(), cur.clone()], &[]);
         let files = cloud(&[&old, &cur]);
-        let report = compare(&idx, &files, "", &[local("a.png", "cur")]);
+        let report = compare(&idx, &files, "", &[local("a.png", "cur")], &none());
         assert_eq!(states(&report), [("a.png", FileState::Identical)]);
         assert_eq!(report.rows[0].cloud_name.as_deref(), Some(cur.key.as_str()));
         // Neither matches: Changed refers to the first entry.
-        let report = compare(&idx, &files, "", &[local("a.png", "other")]);
+        let report = compare(&idx, &files, "", &[local("a.png", "other")], &none());
         assert_eq!(report.rows[0].state, FileState::Changed);
         assert_eq!(report.rows[0].cloud_name.as_deref(), Some(old.key.as_str()));
     }
@@ -455,9 +510,9 @@ mod tests {
         let deck = entry("y", "y.png", "Deck");
         let idx = index(vec![decks.clone(), deck.clone()], &["Decks", "Deck"]);
         let files = cloud(&[&decks, &deck]);
-        let report = compare(&idx, &files, "Deck", &[]);
+        let report = compare(&idx, &files, "Deck", &[], &none());
         assert_eq!(states(&report), [("y.png", FileState::Missing)]);
-        let report = compare(&idx, &files, "Decks", &[]);
+        let report = compare(&idx, &files, "Decks", &[], &none());
         assert_eq!(states(&report), [("x.png", FileState::Missing)]);
     }
 
@@ -468,7 +523,7 @@ mod tests {
         let idx = index(vec![a.clone(), b.clone()], &["Sub", "Sub\\Deep"]);
         let files = cloud(&[&a, &b]);
         for root in ["", "/"] {
-            let report = compare(&idx, &files, root, &[local("a.png", "a")]);
+            let report = compare(&idx, &files, root, &[local("a.png", "a")], &none());
             assert_eq!(
                 states(&report),
                 [
@@ -490,6 +545,7 @@ mod tests {
             &cloud(&[&a]),
             "Not\\There",
             &[local("a.png", "a"), local("s/b.png", "b")],
+            &none(),
         );
         assert_eq!(
             states(&report),
@@ -503,7 +559,7 @@ mod tests {
     fn folder_known_only_through_an_entry_exists() {
         let a = entry("a", "a.png", "Only\\Entry");
         let idx = index(vec![a.clone()], &[]);
-        let report = compare(&idx, &cloud(&[&a]), "only", &[]);
+        let report = compare(&idx, &cloud(&[&a]), "only", &[], &none());
         assert!(report.folder_exists);
         assert_eq!(report.folder, "Only");
         assert_eq!(states(&report), [("Entry/a.png", FileState::Missing)]);
@@ -511,7 +567,7 @@ mod tests {
 
     #[test]
     fn empty_comparison_is_in_sync() {
-        let report = compare(&CloudIndex::empty(), &[], "", &[]);
+        let report = compare(&CloudIndex::empty(), &[], "", &[], &none());
         assert!(report.is_in_sync());
         assert!(report.rows.is_empty());
     }
@@ -576,5 +632,64 @@ mod tests {
         let files = scan_local(&scanned).unwrap();
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].path, "a.txt");
+    }
+
+    #[test]
+    fn compare_leaves_ignored_cloud_entries_out() {
+        let keep = entry("k", "keep.png", "F");
+        let log = entry("l", "a.log", "F\\Sub");
+        let idx = index(vec![keep.clone(), log.clone()], &["F", "F\\Sub"]);
+        let files = cloud(&[&keep, &log]);
+        let report = compare(&idx, &files, "F", &[], &pats(&["*.log"]));
+        assert_eq!(states(&report), [("keep.png", FileState::Missing)]);
+        assert_eq!(report.ignored_cloud, 1);
+        assert_eq!(report.ignored_local, 0);
+        let report = compare(&idx, &files, "F", &[], &none());
+        assert_eq!(report.rows.len(), 2);
+        assert_eq!(report.ignored_cloud, 0);
+        // Patterns match relative to the synced folder.
+        let report = compare(&idx, &files, "F", &[], &pats(&["/Sub/"]));
+        assert_eq!(states(&report), [("keep.png", FileState::Missing)]);
+    }
+
+    #[test]
+    fn scan_ignoring_counts_and_does_not_read_ignored_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        fs::create_dir_all(p.join("tmp")).unwrap();
+        fs::write(p.join("a.png"), "a").unwrap();
+        fs::write(p.join("x.log"), "x").unwrap();
+        fs::write(p.join("tmp/b.png"), "b").unwrap();
+        fs::write(p.join(".hidden.log"), "h").unwrap();
+        // A directory named like a file: reading it would fail.
+        fs::create_dir(p.join("dir.log")).unwrap();
+        let scan = scan_local_ignoring(p, &pats(&["*.log", "tmp/"])).unwrap();
+        let paths: Vec<_> = scan.files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, ["a.png"]);
+        // x.log and tmp/b.png; not the dot file, not the directory.
+        assert_eq!(scan.ignored, 2);
+        let plain = scan_local_ignoring(p, &none()).unwrap();
+        assert_eq!(plain.ignored, 0);
+        assert_eq!(plain.files.len(), 3);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn scan_ignoring_does_not_fail_on_an_unreadable_ignored_file() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        fs::write(p.join("a.png"), "a").unwrap();
+        fs::write(p.join("locked.log"), "x").unwrap();
+        // Exclusive open (share mode 0): reading the file now fails.
+        let _lock = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(p.join("locked.log"))
+            .unwrap();
+        assert!(scan_local_ignoring(p, &none()).is_err());
+        let scan = scan_local_ignoring(p, &pats(&["*.log"])).unwrap();
+        assert_eq!(scan.files.len(), 1);
+        assert_eq!(scan.ignored, 1);
     }
 }

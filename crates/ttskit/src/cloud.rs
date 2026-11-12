@@ -8,10 +8,11 @@ use std::time::SystemTime;
 use serde_json::json;
 use ttskit_cloud::{
     Action, Backup, BackupError, BackupStore, CloudBackend, CloudError, CloudIndex, DeleteError,
-    DeletePlan, DeleteTarget, FileState, IndexEntry, IndexError, LocalDir, LocalFile, Manifest,
-    ManifestEntry, PullError, PushError, Reason, RestoreAction, StatusError, TsvError, UgcUrl,
-    UploadError, UploadPlan, compare, delete, find_entries, is_game_internal, normalize_folder,
-    plan_delete, plan_pull, plan_push, plan_restore, plan_upload, pull, push, restore, upload,
+    DeletePlan, DeleteTarget, FileState, IgnoreSet, IndexEntry, IndexError, LocalDir, LocalFile,
+    Manifest, ManifestEntry, PullError, PushError, Reason, RestoreAction, StatusError, TsvError,
+    UgcUrl, UploadError, UploadPlan, compare, delete, find_entries, is_game_internal,
+    normalize_folder, plan_delete, plan_pull, plan_push, plan_restore, plan_upload, pull, push,
+    restore, upload,
 };
 
 /// Errors of the `cloud` subcommands.
@@ -592,7 +593,7 @@ pub fn sync_push(
     confirm: Confirm<'_>,
     out: &mut dyn io::Write,
 ) -> Result<(), CommandError> {
-    let plan = plan_push(backend, local, folder, prune)?;
+    let plan = plan_push(backend, local, folder, prune, &IgnoreSet::default(), 0)?;
     let conflicts = plan.sync.count(Action::Conflict);
     let noop = plan.is_noop();
     let needs_prune = plan
@@ -680,7 +681,7 @@ pub fn sync_push(
     if let (true, Some(path)) = (done && !mode.dry_run, manifest) {
         let refreshed = update_manifest(path, "push", |m| {
             let index = CloudIndex::load(backend).map_err(|e| e.to_string())?;
-            m.refresh_for_local(local, folder, &index);
+            m.refresh_for_local(local, folder, &index, &IgnoreSet::default());
             Ok(())
         });
         match refreshed {
@@ -734,7 +735,7 @@ pub fn sync_pull(
     confirm: Confirm<'_>,
     out: &mut dyn io::Write,
 ) -> Result<(), CommandError> {
-    let plan = plan_pull(backend, local, folder, prune)?;
+    let plan = plan_pull(backend, local, folder, prune, &IgnoreSet::default(), 0)?;
     let conflicts = plan.sync.count(Action::Conflict);
     let noop = plan.is_noop();
     let kept = plan
@@ -959,7 +960,7 @@ pub fn status(
 ) -> Result<bool, CommandError> {
     let index = CloudIndex::load(backend)?;
     let cloud_files = backend.list()?;
-    let report = compare(&index, &cloud_files, folder, local);
+    let report = compare(&index, &cloud_files, folder, local, &IgnoreSet::default());
     let in_sync = report.is_in_sync();
     let mut buf: Vec<u8> = Vec::new();
 
