@@ -12,6 +12,7 @@ mod backend;
 mod backup;
 mod config;
 mod delete;
+mod ignore_set;
 mod index;
 mod manifest;
 mod memory;
@@ -32,6 +33,7 @@ pub use config::{ConfigError, ProjectConfig};
 pub use delete::{
     DeleteError, DeleteFile, DeleteOutcome, DeletePlan, DeleteTarget, delete, plan_delete,
 };
+pub use ignore_set::IgnoreSet;
 pub use index::{
     CLOUD_FOLDER_FILE, CLOUD_INFO_FILE, CloudIndex, GAME_INTERNAL_FILES, IndexEntry, IndexError,
     UgcUrl, is_game_internal, normalize_folder,

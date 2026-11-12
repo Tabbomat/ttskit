@@ -6,6 +6,7 @@
 //!
 //! [local]
 //! dir = "assets"      # relative to the directory holding ttskit.toml
+//! ignore = ["*.log", "**/*_debug_*"]  # gitignore syntax, relative to dir, case-insensitive
 //! ```
 //!
 //! With this config, `assets/Boards/a.png` belongs to the cloud folder
@@ -15,7 +16,7 @@ use std::path::{Component, Path, PathBuf};
 
 use serde::Deserialize;
 
-use crate::normalize_folder;
+use crate::{IgnoreSet, normalize_folder};
 
 /// Errors from reading or validating a project config.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -60,6 +61,8 @@ struct RawCloud {
 #[serde(deny_unknown_fields)]
 struct RawLocal {
     dir: String,
+    #[serde(default)]
+    ignore: Vec<String>,
 }
 
 /// A validated project config.
@@ -70,6 +73,8 @@ pub struct ProjectConfig {
     /// The local directory as written in the config, relative to the config
     /// file's directory, `/` separated.
     pub local_dir: PathBuf,
+    /// Gitignore-style patterns, relative to the local directory, as written.
+    pub ignore: Vec<String>,
 }
 
 fn invalid(key: &'static str, message: impl Into<String>) -> ConfigError {
@@ -87,10 +92,20 @@ impl ProjectConfig {
     pub fn parse(text: &str) -> Result<Self, ConfigError> {
         let raw: RawConfig =
             toml::from_str(text).map_err(|e| ConfigError::Syntax(e.to_string()))?;
+        let cloud_folder = validate_folder(&raw.cloud.folder)?;
+        let local_dir = validate_dir(&raw.local.dir)?;
+        IgnoreSet::new(&raw.local.ignore)?;
         Ok(ProjectConfig {
-            cloud_folder: validate_folder(&raw.cloud.folder)?,
-            local_dir: validate_dir(&raw.local.dir)?,
+            cloud_folder,
+            local_dir,
+            ignore: raw.local.ignore,
         })
+    }
+
+    /// The compiled ignore patterns. They were validated in [`Self::parse`];
+    /// a config built by hand with a bad pattern yields an empty set.
+    pub fn ignore_set(&self) -> IgnoreSet {
+        IgnoreSet::new(&self.ignore).unwrap_or_default()
     }
 
     /// Reads and validates the config file at `path`.
@@ -213,6 +228,48 @@ mod tests {
         let t = format!("{}prune = true\n", cfg("G", "x"));
         let e = ProjectConfig::parse(&t).unwrap_err();
         assert!(e.to_string().contains("prune"), "{e}");
+    }
+
+    #[test]
+    fn ignore_defaults_to_empty() {
+        let c = ProjectConfig::parse(&cfg("G", "x")).unwrap();
+        assert!(c.ignore.is_empty());
+        assert!(c.ignore_set().is_empty());
+    }
+
+    #[test]
+    fn ignore_list_is_parsed() {
+        let t = format!("{}ignore = [\"*.log\", \"tmp/\"]\n", cfg("G", "x"));
+        let c = ProjectConfig::parse(&t).unwrap();
+        assert_eq!(c.ignore, ["*.log", "tmp/"]);
+        let s = c.ignore_set();
+        assert!(s.is_ignored("a/b.log"));
+        assert!(s.is_ignored("tmp/a.png"));
+        assert!(!s.is_ignored("a.png"));
+    }
+
+    #[test]
+    fn invalid_ignore_pattern_is_refused() {
+        // The matcher accepts an unclosed `[`; an unclosed `{` and a reversed
+        // range are refused.
+        for bad in ["{a", "[z-a]"] {
+            let t = format!("{}ignore = [\"*.log\", {bad:?}]\n", cfg("G", "x"));
+            assert_eq!(invalid_key(&t), "local.ignore", "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn ignore_must_be_an_array() {
+        let t = format!("{}ignore = \"*.log\"\n", cfg("G", "x"));
+        let e = ProjectConfig::parse(&t).unwrap_err();
+        assert!(matches!(e, ConfigError::Syntax(_)), "{e:?}");
+    }
+
+    #[test]
+    fn unknown_local_key_is_still_refused() {
+        let t = format!("{}ignores = []\n", cfg("G", "x"));
+        let e = ProjectConfig::parse(&t).unwrap_err();
+        assert!(e.to_string().contains("ignores"), "{e}");
     }
 
     #[test]
