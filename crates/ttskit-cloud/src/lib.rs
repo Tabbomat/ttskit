@@ -17,6 +17,7 @@ mod memory;
 mod status;
 #[cfg(feature = "steam")]
 mod steam;
+mod sync_plan;
 mod upload;
 
 pub use backend::{CloudBackend, CloudError, CloudFile, Op, Quota, UgcHandle};
@@ -36,6 +37,9 @@ pub use memory::{Call, MemoryCloud};
 pub use status::{FileState, LocalFile, StatusError, StatusReport, StatusRow, compare, scan_local};
 #[cfg(feature = "steam")]
 pub use steam::{SteamCloud, TTS_APP_ID};
+pub use sync_plan::{
+    Action, Collision, Direction, PlanOptions, Reason, SyncPlan, SyncStep, plan_sync,
+};
 pub use upload::{
     UploadError, UploadOutcome, UploadPlan, UploadStage, UploadWarning, cloud_key, find_entries,
     plan_upload, sha1_hex, upload,

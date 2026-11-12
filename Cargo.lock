@@ -882,6 +882,7 @@ version = "0.1.0"
 dependencies = [
  "bson",
  "serde",
+ "serde_json",
  "sha1",
  "steamworks",
  "steamworks-sys",
