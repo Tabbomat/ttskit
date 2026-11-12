@@ -35,6 +35,7 @@
 //!   written by Tabletop Simulator are unchanged.
 //! - A leading UTF-8 byte order mark on input is accepted and dropped.
 
+pub mod assets;
 pub mod view;
 pub mod write;
 
@@ -43,6 +44,7 @@ use std::str::FromStr;
 
 use serde_json::{Map, Value};
 
+pub use assets::{AssetUrl, HostClass};
 pub use view::{ObjectView, ObjectViewMut, SaveView, SaveViewMut};
 
 /// Errors produced while reading or writing a save.

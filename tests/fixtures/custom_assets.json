@@ -17,11 +17,12 @@
   "XmlUI": "",
   "SkyURL": "https://example.com/sky.jpg",
   "TableURL": "https://example.com/table.jpg",
+  "LutURL": "https://example.com/lut.png",
   "CustomUIAssets": [
     {
       "Type": 0,
       "Name": "logo",
-      "URL": "https://example.com/ui/logo.png"
+      "URL": "https://i.imgur.com/AAAAAAA.png"
     },
     {
       "Type": 1,
