@@ -70,6 +70,24 @@ enum CloudCommand {
         #[arg(long, env = "TTSKIT_BACKUP_DIR", value_name = "DIR")]
         backup_dir: Option<PathBuf>,
     },
+    /// Delete a file or folder from the Steam Cloud (dry run unless --yes)
+    #[command(group(clap::ArgGroup::new("what").required(true).args(["name", "folder"])))]
+    Delete {
+        /// Folder path and name (`Decks/back.png`), display name, or cloud name
+        name: Option<String>,
+        /// Delete this folder with all its files and subfolders (separator `/`)
+        #[arg(long, value_name = "FOLDER")]
+        folder: Option<String>,
+        /// Delete for real; without it only the plan is printed
+        #[arg(long)]
+        yes: bool,
+        /// Print machine-readable JSON instead of text
+        #[arg(long)]
+        json: bool,
+        /// Directory for the index backups [default: <local app data>/ttskit/cloud-backups]
+        #[arg(long, env = "TTSKIT_BACKUP_DIR", value_name = "DIR")]
+        backup_dir: Option<PathBuf>,
+    },
     /// Print the download URL of a cloud file
     Url {
         /// Folder path and name (`Decks/back.png`), display name, or cloud name
@@ -200,6 +218,36 @@ fn run(cli: Cli) -> Result<(), String> {
         }
         Command::Cloud {
             command:
+                CloudCommand::Delete {
+                    name,
+                    folder,
+                    yes,
+                    json,
+                    backup_dir,
+                },
+        } => {
+            let store = BackupStore::new(cloud::backup_dir(backup_dir).map_err(|e| e.to_string())?);
+            let target = match (&name, &folder) {
+                (Some(name), None) => ttskit_cloud::DeleteTarget::File(name),
+                (None, Some(folder)) => ttskit_cloud::DeleteTarget::Folder(folder),
+                _ => unreachable!("clap requires exactly one of name and --folder"),
+            };
+            let mut backend = connect()?;
+            let mut out = std::io::stdout().lock();
+            cloud::delete_files(
+                backend.as_mut(),
+                &store,
+                target,
+                yes,
+                json,
+                SystemTime::now(),
+                &mut out,
+            )
+            .map_err(|e| e.to_string())?;
+            out.flush().map_err(|e| e.to_string())
+        }
+        Command::Cloud {
+            command:
                 CloudCommand::Url {
                     name,
                     share,
@@ -238,5 +286,27 @@ fn main() -> ExitCode {
             eprintln!("error: {message}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
+        Cli::try_parse_from(
+            ["ttskit", "cloud", "delete"]
+                .into_iter()
+                .chain(args.iter().copied()),
+        )
+    }
+
+    #[test]
+    fn delete_needs_exactly_one_of_name_and_folder() {
+        assert!(parse(&["a.png"]).is_ok());
+        assert!(parse(&["--folder", "Decks", "--yes"]).is_ok());
+        assert!(parse(&[]).is_err());
+        assert!(parse(&["--yes"]).is_err());
+        assert!(parse(&["a.png", "--folder", "Decks"]).is_err());
     }
 }

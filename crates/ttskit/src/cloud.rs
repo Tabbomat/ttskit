@@ -7,9 +7,10 @@ use std::time::SystemTime;
 
 use serde_json::json;
 use ttskit_cloud::{
-    Backup, BackupError, BackupStore, CloudBackend, CloudError, CloudIndex, IndexEntry, IndexError,
-    RestoreAction, UgcUrl, UploadError, UploadPlan, find_entries, is_game_internal,
-    normalize_folder, plan_restore, plan_upload, restore, upload,
+    Backup, BackupError, BackupStore, CloudBackend, CloudError, CloudIndex, DeleteError,
+    DeletePlan, DeleteTarget, IndexEntry, IndexError, RestoreAction, UgcUrl, UploadError,
+    UploadPlan, delete, find_entries, is_game_internal, normalize_folder, plan_delete,
+    plan_restore, plan_upload, restore, upload,
 };
 
 /// Errors of the `cloud` subcommands.
@@ -36,6 +37,9 @@ pub enum CommandError {
     /// Planning or running an upload failed.
     #[error(transparent)]
     Upload(#[from] UploadError),
+    /// Planning or running a delete failed.
+    #[error(transparent)]
+    Delete(DeleteError),
     /// The file to upload cannot be read.
     #[error("cannot read {}: {source}", path.display())]
     ReadFile {
@@ -70,6 +74,29 @@ pub enum CommandError {
     /// A confirmation is needed but cannot be asked for.
     #[error("confirmation needed: run again with --yes (or --dry-run)")]
     ConfirmationNeeded,
+}
+
+impl From<DeleteError> for CommandError {
+    /// Uses the CLI's own errors where they exist, so messages stay the same
+    /// across commands.
+    fn from(e: DeleteError) -> Self {
+        match e {
+            DeleteError::NotFound { query } => CommandError::NotFound(query),
+            DeleteError::FolderNotFound { folder } => CommandError::FolderNotFound(folder),
+            DeleteError::Ambiguous { query, matches } => CommandError::Ambiguous {
+                query,
+                matches: matches
+                    .iter()
+                    .map(|(path, key)| format!("  {path}  {key}"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            },
+            DeleteError::Cloud(e) => CommandError::Cloud(e),
+            DeleteError::Index(e) => CommandError::Index(e),
+            DeleteError::Backup(e) => CommandError::Backup(e),
+            other => CommandError::Delete(other),
+        }
+    }
 }
 
 /// Asks the user a yes/no question; gets the prompt text.
@@ -495,6 +522,126 @@ pub fn show_url(
                 "url": url,
                 "shared": url.is_some(),
                 "dry_run": mode.dry_run,
+                "backup": backup,
+            }),
+            out,
+        )?;
+    }
+    out.flush()?;
+    Ok(())
+}
+
+fn write_delete_plan(plan: &DeletePlan, out: &mut Vec<u8>) -> io::Result<()> {
+    match &plan.folder {
+        Some(folder) => writeln!(
+            out,
+            "Delete folder {folder} ({}, {}):",
+            count(plan.files.len(), "file"),
+            count(plan.folders.len(), "folder")
+        )?,
+        None => {
+            for file in &plan.files {
+                writeln!(out, "Delete {}:", display_path(&file.folder, &file.name))?;
+            }
+        }
+    }
+    for file in &plan.files {
+        let path = display_path(&file.folder, &file.name);
+        if !file.indexed {
+            writeln!(out, "  {:<13}  {path}  (not in index)", "delete file")?;
+        } else if file.in_cloud {
+            writeln!(out, "  {:<13}  {path}  ({})", "delete file", file.key)?;
+        } else {
+            writeln!(
+                out,
+                "  {:<13}  {path}  ({}, file already missing)",
+                "remove entry", file.key
+            )?;
+        }
+    }
+    for folder in &plan.folders {
+        writeln!(out, "  {:<13}  {folder}", "remove folder")?;
+    }
+    let with_url = plan.files.iter().filter(|f| f.url.is_some()).count();
+    match with_url {
+        0 => {}
+        1 => writeln!(
+            out,
+            "warning: 1 file has a download URL; saves that use it will no longer load it"
+        )?,
+        n => writeln!(
+            out,
+            "warning: {n} files have a download URL; saves that use it will no longer load them"
+        )?,
+    }
+    Ok(())
+}
+
+/// Deletes a file or a folder with everything below it, and removes it from
+/// the index.
+///
+/// The plan is printed (and flushed) first. Without `yes` that is all: nothing
+/// is changed and no backup is taken. With `--json` only one JSON object is
+/// printed, at the end.
+pub fn delete_files(
+    backend: &mut dyn CloudBackend,
+    store: &BackupStore,
+    target: DeleteTarget<'_>,
+    yes: bool,
+    json: bool,
+    now: SystemTime,
+    out: &mut dyn io::Write,
+) -> Result<(), CommandError> {
+    let plan = plan_delete(backend, target)?;
+    if !json {
+        let mut buf = Vec::new();
+        write_delete_plan(&plan, &mut buf)?;
+        out.write_all(&buf)?;
+        out.flush()?;
+    }
+
+    let mut deleted = Vec::new();
+    let mut backup = None;
+    if yes {
+        let outcome = delete(backend, store, &plan, now)?;
+        if !json {
+            writeln!(out, "Backed up the cloud index to {}.", outcome.backup.name)?;
+            writeln!(out, "Deleted {}.", count(outcome.deleted.len(), "file"))?;
+        }
+        deleted = outcome.deleted;
+        backup = Some(outcome.backup.name);
+    } else if !json {
+        writeln!(
+            out,
+            "Dry run: nothing was changed. Run again with --yes to delete."
+        )?;
+    }
+
+    if json {
+        let files: Vec<serde_json::Value> = plan
+            .files
+            .iter()
+            .map(|f| {
+                json!({
+                    "name": f.name,
+                    "cloud_name": f.key,
+                    "folder": f.folder,
+                    "size": f.size,
+                    "url": f.url,
+                    "indexed": f.indexed,
+                    "in_cloud": f.in_cloud,
+                })
+            })
+            .collect();
+        write_pretty_json(
+            &json!({
+                "target": if plan.folder.is_some() { "folder" } else { "file" },
+                "folder": plan.folder,
+                "files": files,
+                "folders": plan.folders,
+                "dry_run": !yes,
+                "done": yes,
+                "deleted": deleted,
                 "backup": backup,
             }),
             out,
@@ -2067,6 +2214,238 @@ mod tests {
             assert_eq!(value["shared"], true);
             assert_eq!(value["dry_run"], false);
             assert_eq!(value["backup"], store.list().unwrap()[0].name);
+        }
+    }
+
+    mod delete_tests {
+        use std::time::UNIX_EPOCH;
+
+        use super::*;
+
+        fn entry_url(key: &str, name: &str, url: Option<&str>, folder: &str) -> IndexEntry {
+            IndexEntry::new(key, name, url.map(Into::into), Some(4), None, folder)
+        }
+
+        /// `Decks/Old` holds one file, `Decks/Old/Sub` one whose file is gone;
+        /// `Cards` and the root hold files of the same name.
+        fn delete_cloud() -> MemoryCloud {
+            let mut index = CloudIndex::empty();
+            index.folders = vec![
+                "Decks".into(),
+                "Decks\\Old".into(),
+                "Decks\\Old\\Sub".into(),
+            ];
+            index.entries = vec![
+                entry_url("AA_back.png", "back.png", None, "Decks\\Old"),
+                entry_url("CC_gone.png", "gone.png", None, "Decks\\Old\\Sub"),
+                entry_url("EE_a.png", "a.png", None, "Cards"),
+                entry_url("FF_a.png", "a.png", None, ""),
+            ];
+            seed(
+                MemoryCloud::new()
+                    .with_file("AA_back.png", "data")
+                    .with_file("EE_a.png", "data")
+                    .with_file("FF_a.png", "data")
+                    .with_file("stray.png", "data"),
+                &index,
+            )
+        }
+
+        fn setup() -> (tempfile::TempDir, BackupStore) {
+            let dir = tempfile::tempdir().unwrap();
+            let store = BackupStore::new(dir.path());
+            (dir, store)
+        }
+
+        fn run(
+            cloud: &mut MemoryCloud,
+            store: &BackupStore,
+            target: DeleteTarget<'_>,
+            yes: bool,
+            json: bool,
+        ) -> (Result<(), CommandError>, String) {
+            let mut out = Vec::new();
+            let result = delete_files(cloud, store, target, yes, json, UNIX_EPOCH, &mut out);
+            (result, String::from_utf8(out).unwrap())
+        }
+
+        fn file(name: &str) -> DeleteTarget<'_> {
+            DeleteTarget::File(name)
+        }
+
+        fn folder(name: &str) -> DeleteTarget<'_> {
+            DeleteTarget::Folder(name)
+        }
+
+        #[test]
+        fn dry_run_prints_the_plan_and_changes_nothing() {
+            let (_dir, store) = setup();
+            let mut cloud = delete_cloud();
+            cloud.clear_calls();
+            let (result, text) = run(&mut cloud, &store, file("Cards/a.png"), false, false);
+            result.unwrap();
+            assert_eq!(
+                text,
+                "Delete Cards/a.png:\n\
+                 \x20 delete file    Cards/a.png  (EE_a.png)\n\
+                 Dry run: nothing was changed. Run again with --yes to delete.\n"
+            );
+            assert!(cloud.mutating_calls().is_empty());
+            assert!(store.list().unwrap().is_empty());
+            assert!(cloud.contents("EE_a.png").is_some());
+        }
+
+        #[test]
+        fn yes_deletes_the_file_and_entry_and_reports_the_backup() {
+            let (_dir, store) = setup();
+            let mut cloud = delete_cloud();
+            let (result, text) = run(&mut cloud, &store, file("cards/A.PNG"), true, false);
+            result.unwrap();
+            let backups = store.list().unwrap();
+            assert_eq!(backups.len(), 1);
+            assert_eq!(
+                text,
+                format!(
+                    "Delete Cards/a.png:\n\
+                     \x20 delete file    Cards/a.png  (EE_a.png)\n\
+                     Backed up the cloud index to {}.\n\
+                     Deleted 1 file.\n",
+                    backups[0].name
+                )
+            );
+            assert!(cloud.contents("EE_a.png").is_none());
+            assert!(cloud.contents("FF_a.png").is_some());
+            assert_eq!(CloudIndex::load(&cloud).unwrap().entries.len(), 3);
+        }
+
+        #[test]
+        fn folder_mode_text() {
+            let (_dir, store) = setup();
+            let mut cloud = delete_cloud();
+            let (result, text) = run(&mut cloud, &store, folder("decks/old"), false, false);
+            result.unwrap();
+            assert_eq!(
+                text,
+                "Delete folder Decks/Old (2 files, 2 folders):\n\
+                 \x20 delete file    Decks/Old/back.png  (AA_back.png)\n\
+                 \x20 remove entry   Decks/Old/Sub/gone.png  (CC_gone.png, file already missing)\n\
+                 \x20 remove folder  Decks/Old/Sub\n\
+                 \x20 remove folder  Decks/Old\n\
+                 Dry run: nothing was changed. Run again with --yes to delete.\n"
+            );
+            let (result, text) = run(&mut cloud, &store, folder("decks/old"), true, false);
+            result.unwrap();
+            assert!(text.ends_with("Deleted 1 file.\n"));
+            let index = CloudIndex::load(&cloud).unwrap();
+            assert_eq!(index.folders, ["Decks"]);
+            assert_eq!(index.entries.len(), 2);
+        }
+
+        #[test]
+        fn unindexed_file() {
+            let (_dir, store) = setup();
+            let mut cloud = delete_cloud();
+            let (result, text) = run(&mut cloud, &store, file("STRAY.png"), true, false);
+            result.unwrap();
+            assert!(
+                text.starts_with("Delete stray.png:\n  delete file    stray.png  (not in index)\n")
+            );
+            assert!(cloud.contents("stray.png").is_none());
+            assert_eq!(store.list().unwrap().len(), 1);
+        }
+
+        #[test]
+        fn url_warning() {
+            let (_dir, store) = setup();
+            let mut cloud = delete_cloud();
+            let mut index = CloudIndex::load(&cloud).unwrap();
+            index.entries[0].url = Some("https://u/1".into());
+            index.entries[1].url = Some("https://u/2".into());
+            index.entries[2].url = Some("https://u/3".into());
+            cloud = seed(MemoryCloud::new().with_file("EE_a.png", "x"), &index);
+            let (result, text) = run(&mut cloud, &store, folder("Decks"), false, false);
+            result.unwrap();
+            assert!(text.contains(
+                "warning: 2 files have a download URL; saves that use it will no longer load them\n"
+            ));
+            let (result, text) = run(&mut cloud, &store, file("EE_a.png"), false, false);
+            result.unwrap();
+            assert!(text.contains(
+                "warning: 1 file has a download URL; saves that use it will no longer load it\n"
+            ));
+        }
+
+        #[test]
+        fn json_for_dry_run_and_yes() {
+            let (_dir, store) = setup();
+            let mut cloud = delete_cloud();
+            let (result, text) = run(&mut cloud, &store, folder("Decks/Old"), false, true);
+            result.unwrap();
+            let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(value["target"], "folder");
+            assert_eq!(value["folder"], "Decks/Old");
+            assert_eq!(value["dry_run"], true);
+            assert_eq!(value["done"], false);
+            assert_eq!(value["deleted"], json!([]));
+            assert_eq!(value["backup"], serde_json::Value::Null);
+            assert_eq!(value["folders"], json!(["Decks/Old/Sub", "Decks/Old"]));
+            assert_eq!(
+                value["files"][1],
+                json!({
+                    "name": "gone.png",
+                    "cloud_name": "CC_gone.png",
+                    "folder": "Decks/Old/Sub",
+                    "size": 4,
+                    "url": null,
+                    "indexed": true,
+                    "in_cloud": false,
+                })
+            );
+            assert!(store.list().unwrap().is_empty());
+
+            let (result, text) = run(&mut cloud, &store, file("Cards/a.png"), true, true);
+            result.unwrap();
+            let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(value["target"], "file");
+            assert_eq!(value["folder"], serde_json::Value::Null);
+            assert_eq!(value["dry_run"], false);
+            assert_eq!(value["done"], true);
+            assert_eq!(value["deleted"], json!(["EE_a.png"]));
+            assert_eq!(value["backup"], store.list().unwrap()[0].name);
+        }
+
+        #[test]
+        fn errors_use_the_cli_messages() {
+            let (_dir, store) = setup();
+            let mut cloud = delete_cloud();
+            cloud.clear_calls();
+            let (result, text) = run(&mut cloud, &store, file("a.png"), true, false);
+            let err = result.unwrap_err();
+            assert!(matches!(err, CommandError::Ambiguous { .. }));
+            let msg = err.to_string();
+            assert!(msg.contains("\n  Cards/a.png  EE_a.png"));
+            assert!(msg.contains("\n  a.png  FF_a.png"));
+            assert!(msg.contains("folder path"));
+            assert!(text.is_empty());
+
+            let err = run(&mut cloud, &store, file("nope.png"), true, false)
+                .0
+                .unwrap_err();
+            assert_eq!(err.to_string(), "no cloud file \"nope.png\"");
+            let err = run(&mut cloud, &store, folder("Nope"), true, false)
+                .0
+                .unwrap_err();
+            assert_eq!(err.to_string(), "no cloud folder \"Nope\"");
+            let err = run(&mut cloud, &store, folder("/"), true, false)
+                .0
+                .unwrap_err();
+            assert_eq!(err.to_string(), "the root folder cannot be deleted");
+            let err = run(&mut cloud, &store, file("CloudInfo.bson"), true, false)
+                .0
+                .unwrap_err();
+            assert!(err.to_string().contains("never deleted"));
+            assert!(cloud.mutating_calls().is_empty());
+            assert!(store.list().unwrap().is_empty());
         }
     }
 }
