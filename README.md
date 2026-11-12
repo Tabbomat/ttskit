@@ -203,7 +203,9 @@ ttskit cloud status ./assets --json
 `cloud status DIR` compares a local directory with a cloud folder (`--folder`,
 default the root) and changes nothing. Subdirectories of `DIR` correspond to
 subfolders; files and directories whose name starts with `.` and symbolic
-links are skipped. A local file and a cloud file correspond when they have
+links are skipped, as are files matching the `[local] ignore` patterns of
+`./ttskit.toml` or `--config PATH` (see "Project config and sync plan"). A
+local file and a cloud file correspond when they have
 the same folder and name (ignoring case); their content is compared by SHA1,
 which is part of the cloud name, so nothing is downloaded.
 
@@ -242,6 +244,27 @@ dir = "assets"      # relative to the directory holding ttskit.toml
 keys are required, unknown keys are refused, the cloud folder cannot be the
 root or contain `.`/`..` levels, and the local directory must be relative and
 free of `..`.
+
+An optional `ignore` list keeps files out of sync:
+
+```toml
+[local]
+dir = "assets"
+ignore = ["*.log", "*.json", "**/*_debug_*", "tmp/"]
+```
+
+- Patterns use gitignore syntax (`*`, `**`, a leading `/` to anchor, a
+  trailing `/` for directories, `!` to re-include) and are matched against
+  the path relative to `dir`, ignoring case. Comments start with `#`.
+- Ignored local files are not read and are skipped by `cloud sync push`,
+  `cloud sync pull` and `cloud status`; the plan ends with
+  `ignored: N local, M cloud`.
+- Cloud files whose path (relative to the cloud folder) matches are left
+  alone: never deleted or replaced by `--prune`, not listed as only in the
+  cloud, and not downloaded by `pull`.
+- `cloud status` reads the patterns from `./ttskit.toml` if it exists, or
+  from `--config PATH`; they apply relative to the `DIR` you pass.
+- A pattern the matcher refuses makes the config invalid.
 
 The `ttskit-cloud` library can turn a local listing and the cloud index into
 a sync plan (`plan_sync`). It reads and changes nothing, and prints as text or
@@ -361,7 +384,8 @@ keeping URL lists by hand:
 - `cloud sync push` refreshes the manifest for the whole local directory after
   a completed run. A changed local file that was not pushed (no `--prune`) is
   not linked to the old cloud version, and files that no longer exist locally
-  are dropped.
+  are dropped. Entries of ignored files (see "Project config and sync plan")
+  are left as they are.
 - `cloud upload FILE` adds or replaces one entry. It looks for `./ttskit.toml`
   (or `--config PATH`); without a project it does not write a manifest. A file
   outside the local directory gets an entry without `path`.
