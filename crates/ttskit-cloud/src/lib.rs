@@ -13,6 +13,7 @@ mod backup;
 mod delete;
 mod index;
 mod memory;
+mod status;
 #[cfg(feature = "steam")]
 mod steam;
 mod upload;
@@ -30,6 +31,7 @@ pub use index::{
     UgcUrl, is_game_internal, normalize_folder,
 };
 pub use memory::{Call, MemoryCloud};
+pub use status::{FileState, LocalFile, StatusError, StatusReport, StatusRow, compare, scan_local};
 #[cfg(feature = "steam")]
 pub use steam::{SteamCloud, TTS_APP_ID};
 pub use upload::{
