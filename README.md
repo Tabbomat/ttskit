@@ -5,16 +5,17 @@ An unofficial command line toolkit (and MCP server) for developing
 mods. Not affiliated with or endorsed by Berserk Games.
 
 > **Status:** early development. Only the `cloud` commands (`list`,
-> `upload`, `url`, `delete`, `status` and `restore`) work so far; see the
-> issue tracker for the roadmap.
+> `upload`, `url`, `delete`, `status`, `restore`, `sync push`, `sync pull`,
+> `manifest` and `import-tsv`) work so far; see the issue tracker for the
+> roadmap.
 
 ## Planned features
 
 - **Save pack/unpack:** split a save into readable, diff-friendly files and
   assemble it again, byte-exact, with `require` / `<Include/>` bundling.
 - **Steam Cloud management:** one cloud folder per game, sync with a local
-  directory, a committed manifest of asset URLs, and a scan of the asset URLs
-  a save uses.
+  directory, a committed manifest of asset URLs (done), and a scan of the
+  asset URLs a save uses.
 - **External Editor API client:** talk to a running game to read and write
   scripts, run Lua and capture console output.
 - **MCP server:** expose the editor API to AI assistants.
@@ -133,6 +134,9 @@ https://steamusercontent-a.akamaihd.net/ugc/<handle>/<SHA1>/
   file again.
 - Index entries get the date in the game's format (`MM/dd/yyyy HH:mm:ss`,
   local time).
+- Inside a project (`./ttskit.toml` or `--config PATH`) a finished upload is
+  also recorded in the project manifest and `Updated manifest ...` is printed
+  just before the URL; see "Manifest and TSV".
 
 `cloud url NAME` prints the URL of a file in the index. `NAME` is a folder
 path (`Decks/Old/deck.png`, either separator), a display name, or the cloud
@@ -283,6 +287,9 @@ ttskit cloud sync push --prune     # also delete what the local directory lacks
   again, and the run continues where it stopped.
 - `--json` prints the plan and the result as one JSON object. Exit code 1 on
   errors.
+- A push that completes (also when there was nothing to do) refreshes the
+  project manifest, see "Manifest and TSV" below. Dry runs and failed pushes
+  leave it alone.
 - Not yet checked against the real Steam Cloud: a push with the game open
   (like `cloud upload`, the Cloud Manager needs a folder reload) and an
   interrupted run. Close the game for now.
@@ -318,6 +325,65 @@ ttskit cloud sync pull --prune     # also remove local files the cloud lacks
   finish. A local directory that does not exist yet is created.
 - `--json` prints the plan and the result as one JSON object.
 - Not yet checked against the real Steam Cloud.
+
+### Manifest and TSV
+
+A project keeps a manifest, `ttskit.manifest.json`, next to `ttskit.toml`. It
+lists every shared file of the project, so it can be committed instead of
+keeping URL lists by hand:
+
+```json
+{
+  "version": 1,
+  "entries": [
+    {
+      "path": "Boards/a.png",
+      "cloud_path": "MyGame/Boards/a.png",
+      "sha1": "A9993E364706816ABA3E25717850C26C9CD0D89D",
+      "size": 1234,
+      "url": "https://steamusercontent-a.akamaihd.net/ugc/1234567890/A9993E36.../"
+    }
+  ]
+}
+```
+
+- `path` is relative to the local directory of `ttskit.toml` (`/` separated);
+  it is left out for files that are not in the project directory.
+  `cloud_path` is the cloud folder plus the display name.
+- The output is deterministic: entries are sorted by cloud path and then local
+  path (ASCII case-insensitive), the field order is fixed and the file ends
+  with a newline, so it diffs well in git.
+- `cloud sync push` refreshes the manifest for the whole local directory after
+  a completed run. A changed local file that was not pushed (no `--prune`) is
+  not linked to the old cloud version, and files that no longer exist locally
+  are dropped.
+- `cloud upload FILE` adds or replaces one entry. It looks for `./ttskit.toml`
+  (or `--config PATH`); without a project it does not write a manifest. A file
+  outside the local directory gets an entry without `path`.
+- A manifest that cannot be updated after a successful cloud change is
+  reported as an error saying the cloud work itself succeeded.
+
+```
+ttskit cloud manifest             # print the manifest (JSON)
+ttskit cloud manifest --tsv       # print filename<TAB>URL, one line per entry
+ttskit cloud import-tsv list.tsv  # adopt an existing list
+```
+
+- `cloud manifest` is local only and needs no Steam connection. For entries
+  without a local path, the TSV uses the cloud path as the filename.
+- `cloud import-tsv FILE --config PATH` reads lines of `filename<TAB>URL`
+  (blank lines and lines starting with `#` are skipped; a BOM and CRLF are
+  fine). Each URL must belong to a file in your own cloud: it is matched
+  against the cloud index by handle and SHA1, and nothing is uploaded. The
+  size and cloud path come from the index. The plan (`add`, `update`,
+  `unchanged`) is printed first; `--dry-run` writes nothing, `--yes` skips the
+  question, `--json` prints the result as one JSON object.
+- Every malformed line is reported with its line number (no tab, more than one
+  tab, an empty filename or URL, a URL that is not a cloud URL or not in the
+  index, an absolute or `..` filename, a duplicate filename), and nothing is
+  imported if there is any.
+- Exporting with `--tsv` and importing the result into an empty manifest gives
+  the same file again (for entries that have a local path).
 
 ### Index backups and restore
 
