@@ -23,6 +23,7 @@ serde = { version = "1", features = ["derive"] }
 sha1 = "0.10"
 thiserror = "2"
 toml = "1"
+trash = "5"
 steamworks = { version = "0.13.1", optional = true }
 steamworks-sys = { version = "0.13", optional = true }
 

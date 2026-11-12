@@ -18,6 +18,7 @@ mod status;
 #[cfg(feature = "steam")]
 mod steam;
 mod sync_plan;
+mod sync_pull;
 mod sync_push;
 mod upload;
 
@@ -41,6 +42,7 @@ pub use steam::{SteamCloud, TTS_APP_ID};
 pub use sync_plan::{
     Action, Collision, Direction, PlanOptions, Reason, SyncPlan, SyncStep, plan_sync,
 };
+pub use sync_pull::{FsDir, LocalDir, PullError, PullOutcome, PullPlan, plan_pull, pull};
 pub use sync_push::{PushError, PushOutcome, PushPlan, plan_push, push};
 pub use upload::{
     UploadError, UploadOutcome, UploadPlan, UploadStage, UploadWarning, cloud_key, find_entries,
