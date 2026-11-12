@@ -21,6 +21,7 @@ jiff = "0.2"
 serde_json = "1"
 thiserror = "2"
 ttskit-cloud = { path = "../ttskit-cloud" }
+ttskit-core = { path = "../ttskit-core" }
 
 [dev-dependencies]
 tempfile = "3"

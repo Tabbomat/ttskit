@@ -1017,6 +1017,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "ttskit-cloud",
+ "ttskit-core",
 ]
 
 [[package]]

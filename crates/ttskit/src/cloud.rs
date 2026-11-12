@@ -64,6 +64,14 @@ pub enum CommandError {
         /// Why reading failed.
         source: io::Error,
     },
+    /// The save file is not valid.
+    #[error("{} is not a valid save: {source}", path.display())]
+    InvalidSave {
+        /// The save file.
+        path: PathBuf,
+        /// Why parsing failed.
+        source: ttskit_core::SaveError,
+    },
     /// The file name is not usable as a cloud name.
     #[error("cannot use the file name of {} as a cloud name; give one with --name", path.display())]
     NameNotUtf8 {
@@ -1494,6 +1502,59 @@ pub fn show_manifest(
     };
     out.write_all(text.as_bytes())?;
     out.flush()?;
+    Ok(())
+}
+
+/// Lists the asset URLs of the save at `path`, grouped by host. Local only.
+pub fn scan(path: &Path, json: bool, out: &mut dyn io::Write) -> Result<(), CommandError> {
+    let data = std::fs::read(path).map_err(|source| CommandError::ReadFile {
+        path: path.to_owned(),
+        source,
+    })?;
+    let save =
+        ttskit_core::Save::from_slice(&data).map_err(|source| CommandError::InvalidSave {
+            path: path.to_owned(),
+            source,
+        })?;
+    let urls = save.asset_urls();
+    let classes = [
+        ttskit_core::HostClass::Imgur,
+        ttskit_core::HostClass::SteamUserContent,
+        ttskit_core::HostClass::Other,
+    ];
+    if json {
+        let mut hosts = serde_json::Map::new();
+        for class in classes {
+            let group: Vec<_> = urls
+                .iter()
+                .filter(|u| u.host_class() == class)
+                .map(|u| json!({"url": u.url, "labels": u.labels, "count": u.count}))
+                .collect();
+            hosts.insert(class.as_str().to_owned(), group.into());
+        }
+        let value = json!({
+            "save": path.display().to_string().replace('\\', "/"),
+            "total": urls.len(),
+            "hosts": hosts,
+        });
+        return write_pretty_json(&value, out);
+    }
+    if urls.is_empty() {
+        writeln!(out, "No asset URLs found.")?;
+        return Ok(());
+    }
+    for class in classes {
+        let group: Vec<_> = urls.iter().filter(|u| u.host_class() == class).collect();
+        writeln!(out, "{} ({})", class.as_str(), group.len())?;
+        for u in group {
+            write!(out, "  {}  [{}]", u.url, u.labels.join(", "))?;
+            if u.count > 1 {
+                write!(out, "  x{}", u.count)?;
+            }
+            writeln!(out)?;
+        }
+    }
+    writeln!(out, "{} unique URLs", urls.len())?;
     Ok(())
 }
 
@@ -5056,6 +5117,76 @@ mod tests {
             assert!(err.to_string().starts_with("cannot read "));
             std::fs::write(&path, "a\tb\n").unwrap();
             assert_eq!(read_tsv_file(&path).unwrap(), "a\tb\n");
+        }
+    }
+    mod scan_tests {
+        use super::*;
+
+        fn fixture() -> PathBuf {
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/custom_assets.json")
+        }
+
+        fn run(path: &Path, json: bool) -> Result<String, CommandError> {
+            let mut out = Vec::new();
+            scan(path, json, &mut out)?;
+            Ok(String::from_utf8(out).unwrap())
+        }
+
+        #[test]
+        fn text_groups_by_host_class() {
+            let text = run(&fixture(), false).unwrap();
+            let lines: Vec<&str> = text.lines().collect();
+            let pos = |prefix: &str| lines.iter().position(|l| l.starts_with(prefix)).unwrap();
+            assert!(pos("imgur (") < pos("steamusercontent ("));
+            assert!(pos("steamusercontent (") < pos("other ("));
+            assert!(text.contains("  https://i.imgur.com/AAAAAAA.png  ["));
+            assert!(text.contains("  x"), "{text}");
+            assert!(lines.last().unwrap().ends_with(" unique URLs"));
+            assert_eq!(text, run(&fixture(), false).unwrap());
+        }
+
+        #[test]
+        fn json_has_all_hosts_and_total() {
+            let text = run(&fixture(), true).unwrap();
+            let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+            let hosts = value["hosts"].as_object().unwrap();
+            assert_eq!(hosts.len(), 3);
+            let total: usize = hosts.values().map(|v| v.as_array().unwrap().len()).sum();
+            assert_eq!(value["total"], total);
+            assert_eq!(hosts["imgur"][0]["url"], "https://i.imgur.com/AAAAAAA.png");
+            assert!(hosts["steamusercontent"].as_array().unwrap().len() >= 2);
+            assert!(hosts["imgur"][0]["labels"].is_array());
+            assert!(hosts["imgur"][0]["count"].is_u64());
+            assert!(
+                value["save"]
+                    .as_str()
+                    .unwrap()
+                    .ends_with("custom_assets.json")
+            );
+        }
+
+        #[test]
+        fn no_urls() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("empty.json");
+            std::fs::write(&path, "{\"ObjectStates\": []}").unwrap();
+            assert_eq!(run(&path, false).unwrap(), "No asset URLs found.\n");
+            let value: serde_json::Value =
+                serde_json::from_str(&run(&path, true).unwrap()).unwrap();
+            assert_eq!(value["total"], 0);
+            assert_eq!(value["hosts"]["other"], json!([]));
+        }
+
+        #[test]
+        fn invalid_and_missing_files_fail() {
+            let dir = tempfile::tempdir().unwrap();
+            let bad = dir.path().join("bad.json");
+            std::fs::write(&bad, "{").unwrap();
+            let err = run(&bad, false).unwrap_err();
+            assert!(matches!(err, CommandError::InvalidSave { .. }));
+            assert!(err.to_string().contains("bad.json"));
+            let err = run(&dir.path().join("none.json"), false).unwrap_err();
+            assert!(matches!(err, CommandError::ReadFile { .. }));
         }
     }
 }

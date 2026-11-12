@@ -216,3 +216,49 @@ fn cloud_import_tsv_checks_local_input_before_connecting() {
     assert!(text.contains("cannot read"), "{text}");
     assert!(!text.contains("--features steam"));
 }
+
+fn fixture_path() -> String {
+    format!(
+        "{}/../../tests/fixtures/custom_assets.json",
+        env!("CARGO_MANIFEST_DIR")
+    )
+}
+
+#[test]
+fn cloud_scan_prints_json_without_steam() {
+    let output = ttskit(&["cloud", "scan", &fixture_path(), "--json"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let value: serde_json::Value = serde_json::from_str(&stdout(&output)).unwrap();
+    assert!(value["total"].as_u64().unwrap() > 0);
+    for host in ["imgur", "steamusercontent", "other"] {
+        assert!(value["hosts"][host].is_array(), "{host}");
+    }
+    assert_eq!(
+        value["hosts"]["imgur"][0]["url"],
+        "https://i.imgur.com/AAAAAAA.png"
+    );
+}
+
+#[test]
+fn cloud_scan_prints_text() {
+    let output = ttskit(&["cloud", "scan", &fixture_path()]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(stdout(&output).contains("imgur ("));
+}
+
+#[test]
+fn cloud_scan_fails_on_missing_or_invalid_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("none.json");
+    let output = ttskit(&["cloud", "scan", missing.to_str().unwrap()]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(stderr(&output).starts_with("error: "));
+
+    let bad = dir.path().join("bad.json");
+    std::fs::write(&bad, "{").unwrap();
+    let output = ttskit(&["cloud", "scan", bad.to_str().unwrap()]);
+    assert_eq!(output.status.code(), Some(1));
+    let text = stderr(&output);
+    assert!(text.starts_with("error: "), "{text}");
+    assert!(text.contains("not a valid save"), "{text}");
+}

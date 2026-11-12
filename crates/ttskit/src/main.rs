@@ -144,6 +144,14 @@ enum CloudCommand {
         #[arg(long)]
         json: bool,
     },
+    /// List the asset URLs of a save file, grouped by host (local only, no Steam needed)
+    Scan {
+        /// The save file (JSON)
+        save: PathBuf,
+        /// Print machine-readable JSON instead of text
+        #[arg(long)]
+        json: bool,
+    },
     /// Print the download URL of a cloud file
     Url {
         /// Folder path and name (`Decks/back.png`), display name, or cloud name
@@ -540,6 +548,13 @@ fn run_simple(command: Command) -> Result<(), String> {
             out.flush().map_err(|e| e.to_string())
         }
         Command::Cloud {
+            command: CloudCommand::Scan { save, json },
+        } => {
+            let mut out = std::io::stdout().lock();
+            cloud::scan(&save, json, &mut out).map_err(|e| e.to_string())?;
+            out.flush().map_err(|e| e.to_string())
+        }
+        Command::Cloud {
             command: CloudCommand::Status { .. },
         } => unreachable!("handled by run"),
     }
@@ -609,6 +624,21 @@ mod tests {
         assert!(parse(&[]).is_err());
         assert!(parse(&["--yes"]).is_err());
         assert!(parse(&["a.png", "--folder", "Decks"]).is_err());
+    }
+
+    #[test]
+    fn scan_parses() {
+        let cli = Cli::try_parse_from(["ttskit", "cloud", "scan", "s.json", "--json"]).unwrap();
+        let Command::Cloud {
+            command: CloudCommand::Scan { save, json },
+        } = cli.command
+        else {
+            panic!("expected scan");
+        };
+        assert_eq!(save, PathBuf::from("s.json"));
+        assert!(json);
+        assert!(Cli::try_parse_from(["ttskit", "cloud", "scan"]).is_err());
+        assert!(Cli::try_parse_from(["ttskit", "cloud", "scan", "s.json", "--adopt"]).is_err());
     }
 
     fn parse_push(args: &[&str]) -> Result<SyncCommand, clap::Error> {
