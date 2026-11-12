@@ -250,7 +250,44 @@ local directory, `pull` the reverse. Per file the plan says `upload`,
   index entries for one name, and the same name and content in two folders
   (they would be one cloud file).
 
-There is no `sync` command yet; push and pull come with the sync issues.
+### Sync: push
+
+`ttskit cloud sync push` makes the cloud folder named in `ttskit.toml` match
+the local directory (see above). It reads `./ttskit.toml`, or the file given
+with `--config PATH`; the local directory is relative to that file.
+
+```
+ttskit cloud sync push --dry-run   # print the plan, change nothing
+ttskit cloud sync push             # print the plan, ask, then push
+ttskit cloud sync push --yes       # push without asking
+ttskit cloud sync push --prune     # also delete what the local directory lacks
+```
+
+- The plan is printed first and is exactly what runs: the cloud is looked at
+  again just before the push, and the push is refused if it no longer matches
+  the plan. A plan with conflicts is printed and then refused, also with
+  `--dry-run`.
+- New files are uploaded and shared. Without `--prune` nothing in the cloud
+  is deleted, and a changed file is **not** pushed (it is listed as
+  `skip ... needs --prune`), because replacing it deletes the old version
+  and saves that use the old URL stop loading it. With `--prune` a changed
+  file is uploaded and its old version removed, files that exist only in the
+  cloud folder are deleted, and a renamed file is uploaded and then
+  deleted under its old name. Empty folders are left in place. A cloud file
+  that another index entry still uses is not deleted.
+- A real run takes one backup of the index first (see below) and writes the
+  index after every file, so an interruption loses at most one step. New
+  folders are added before the files that go into them.
+- If a step fails, the push stops, names the backup and says so. Run the same
+  command again: files that already made it into the cloud are not written
+  again, and the run continues where it stopped.
+- `--json` prints the plan and the result as one JSON object. Exit code 1 on
+  errors.
+- Not yet checked against the real Steam Cloud: a push with the game open
+  (like `cloud upload`, the Cloud Manager needs a folder reload) and an
+  interrupted run. Close the game for now.
+
+Pull and prune of the local side come with the next sync issue.
 
 ### Index backups and restore
 
