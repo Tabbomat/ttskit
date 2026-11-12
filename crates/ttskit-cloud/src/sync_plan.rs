@@ -123,6 +123,9 @@ pub enum Reason {
     CloudFileGone,
     /// A target-only file that is kept because prune was not requested.
     NotPruned,
+    /// Push only: the file changed, and replacing the old cloud version needs
+    /// prune, so it is not pushed.
+    NeedsPrune,
     /// See [`Collision`].
     Collision(Collision),
 }
@@ -139,6 +142,7 @@ impl Reason {
             Reason::Identical => "identical",
             Reason::CloudFileGone => "cloud file is gone",
             Reason::NotPruned => "only on the target, kept without --prune",
+            Reason::NeedsPrune => "changed; replacing the old version needs --prune",
             Reason::Collision(Collision::LocalCase) => "local files differ only by case",
             Reason::Collision(Collision::DuplicateEntry) => "several index entries for this name",
             Reason::Collision(Collision::SharedCloudFile) => {
@@ -158,6 +162,7 @@ impl Reason {
             Reason::Identical => "identical",
             Reason::CloudFileGone => "cloud_file_gone",
             Reason::NotPruned => "not_pruned",
+            Reason::NeedsPrune => "needs_prune",
             Reason::Collision(Collision::LocalCase) => "collision_local_case",
             Reason::Collision(Collision::DuplicateEntry) => "collision_duplicate_entry",
             Reason::Collision(Collision::SharedCloudFile) => "collision_shared_cloud_file",
@@ -570,13 +575,19 @@ pub fn plan_sync(
                             } else {
                                 Reason::Changed
                             };
-                            steps.push(push_upload(
-                                f,
-                                reason,
-                                &root_lower,
-                                &key_places,
-                                &local_keys,
-                            ));
+                            let mut step =
+                                push_upload(f, reason, &root_lower, &key_places, &local_keys);
+                            // Replacing the old version removes it from the
+                            // cloud, which only prune may do.
+                            if step.action == Action::Upload
+                                && reason == Reason::Changed
+                                && !options.prune
+                            {
+                                step.action = Action::Skip;
+                                step.reason = Reason::NeedsPrune;
+                                step.cloud_key = Some(e.key.clone());
+                            }
+                            steps.push(step);
                         }
                         Direction::Pull if !exists => steps.push(gone_step(side)),
                         Direction::Pull => steps.push(SyncStep {
@@ -845,7 +856,7 @@ mod tests {
         assert_eq!(
             summary(&p),
             [
-                ("chg.png", "upload", "changed"),
+                ("chg.png", "skip", "needs_prune"),
                 ("gone.png", "skip", "not_pruned"),
                 ("new.png", "upload", "new"),
                 ("same.png", "skip", "identical"),
@@ -855,7 +866,12 @@ mod tests {
         assert!(!p.is_in_sync());
         let p = run(Direction::Push, &w, &locals, "G", true);
         assert_eq!(p.count(Action::Delete), 1);
+        assert_eq!(p.steps[0].action, Action::Upload);
+        assert_eq!(p.steps[0].reason, Reason::Changed);
         assert_eq!(p.steps[1].action, Action::Delete);
+        // Pull is not affected.
+        let p = run(Direction::Pull, &w, &locals, "G", false);
+        assert_eq!(p.steps[0].action, Action::Download);
     }
 
     #[test]
@@ -1155,11 +1171,11 @@ mod tests {
     #[test]
     fn json_output() {
         let w = world(vec![entry("old", "a.png", "G")]);
-        let p = run(Direction::Push, &w, &[local("a.png", "new")], "G", false);
+        let p = run(Direction::Push, &w, &[local("a.png", "new")], "G", true);
         let j = p.to_json();
         assert_eq!(j["direction"], "push");
         assert_eq!(j["cloud_folder"], "G");
-        assert_eq!(j["prune"], false);
+        assert_eq!(j["prune"], true);
         assert_eq!(j["has_conflicts"], false);
         assert_eq!(j["counts"]["upload"], 1);
         assert_eq!(j["counts"]["delete"], 0);

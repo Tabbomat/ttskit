@@ -216,6 +216,43 @@ fn same_folder(a: &str, b: &str) -> bool {
     normalize_folder(a).eq_ignore_ascii_case(&normalize_folder(b))
 }
 
+/// Resolves `folder` level by level against the folders of `index`, keeping
+/// existing spellings (ASCII case-insensitive). Returns the folder as
+/// `/`-separated display path and the folders (all missing ancestors included,
+/// in the game's `\` form, ancestors first) that are not in `CloudFolder.bson`.
+pub(crate) fn resolve_folder(index: &CloudIndex, folder: &str) -> (String, Vec<String>) {
+    let known = index.all_folders();
+    let mut display_folder = String::new();
+    let mut levels = Vec::new();
+    for seg in normalize_folder(folder)
+        .split('/')
+        .filter(|s| !s.is_empty())
+    {
+        if !display_folder.is_empty() {
+            display_folder.push('/');
+        }
+        display_folder.push_str(seg);
+        if let Some(existing) = known
+            .iter()
+            .find(|k| k.eq_ignore_ascii_case(&display_folder))
+        {
+            display_folder.clone_from(existing);
+        }
+        levels.push(display_folder.clone());
+    }
+    let listed: HashSet<String> = index
+        .folders
+        .iter()
+        .map(|f| normalize_folder(f).to_ascii_lowercase())
+        .collect();
+    let new_folders = levels
+        .into_iter()
+        .filter(|l| !listed.contains(&l.to_ascii_lowercase()))
+        .map(|l| l.replace('/', "\\"))
+        .collect();
+    (display_folder, new_folders)
+}
+
 /// Works out what uploading `data` as `name` into `folder` would do, without
 /// changing anything.
 ///
@@ -249,36 +286,7 @@ pub fn plan_upload(
         .collect();
     let file_exists = present.contains(&key.to_ascii_lowercase());
 
-    // Resolve the target folder level by level, keeping existing spellings.
-    let known = index.all_folders();
-    let mut display_folder = String::new();
-    let mut levels = Vec::new();
-    for seg in normalize_folder(folder)
-        .split('/')
-        .filter(|s| !s.is_empty())
-    {
-        if !display_folder.is_empty() {
-            display_folder.push('/');
-        }
-        display_folder.push_str(seg);
-        if let Some(existing) = known
-            .iter()
-            .find(|k| k.eq_ignore_ascii_case(&display_folder))
-        {
-            display_folder.clone_from(existing);
-        }
-        levels.push(display_folder.clone());
-    }
-    let listed: HashSet<String> = index
-        .folders
-        .iter()
-        .map(|f| normalize_folder(f).to_ascii_lowercase())
-        .collect();
-    let new_folders = levels
-        .iter()
-        .filter(|l| !listed.contains(&l.to_ascii_lowercase()))
-        .map(|l| l.replace('/', "\\"))
-        .collect();
+    let (display_folder, new_folders) = resolve_folder(&index, folder);
     let game_folder = display_folder.replace('/', "\\");
 
     let same_key: Vec<&IndexEntry> = index
