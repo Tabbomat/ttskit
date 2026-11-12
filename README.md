@@ -287,7 +287,37 @@ ttskit cloud sync push --prune     # also delete what the local directory lacks
   (like `cloud upload`, the Cloud Manager needs a folder reload) and an
   interrupted run. Close the game for now.
 
-Pull and prune of the local side come with the next sync issue.
+### Sync: pull
+
+`ttskit cloud sync pull` makes the local directory match the cloud folder named
+in `ttskit.toml`, the reverse of push. It reads the same config and options.
+
+```
+ttskit cloud sync pull --dry-run   # print the plan, change nothing
+ttskit cloud sync pull             # print the plan, ask, then pull
+ttskit cloud sync pull --yes       # pull without asking
+ttskit cloud sync pull --prune     # also remove local files the cloud lacks
+```
+
+- The plan is printed first and is exactly what runs: the cloud is looked at
+  again just before the pull, and the pull is refused if it no longer matches.
+  A plan with conflicts is printed and then refused, also with `--dry-run`.
+- The cloud is only read, never changed, so no index backup is taken.
+- New cloud files are downloaded. A cloud file that differs from the local
+  one **replaces** it; this is listed as `download ... (changed)` and needs the
+  confirmation (or `--yes`). Before overwriting, ttskit checks that the local
+  file is still the one that was scanned, and refuses otherwise.
+- Without `--prune` nothing local is removed; local-only files are listed as
+  kept. With `--prune` they are listed first and then moved to the recycle
+  bin, not deleted for good. Empty directories are left in place.
+- Every download is checked against the SHA1 in the index and written
+  atomically. Names from the cloud that are not safe local paths (`..`,
+  characters or names invalid on Windows, names starting with `.`) make the
+  pull refuse before anything is changed.
+- If a step fails, the pull stops and says so; run the same command again to
+  finish. A local directory that does not exist yet is created.
+- `--json` prints the plan and the result as one JSON object.
+- Not yet checked against the real Steam Cloud.
 
 ### Index backups and restore
 
