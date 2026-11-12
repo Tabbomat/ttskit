@@ -217,6 +217,41 @@ Compare ./assets with cloud folder Decks:
 - Exit code: 0 when everything is identical, 2 when anything differs, 1 on
   errors.
 
+### Project config and sync plan
+
+A project can name its cloud folder and local directory in a `ttskit.toml`:
+
+```toml
+[cloud]
+folder = "MyGame"   # one cloud folder per game
+
+[local]
+dir = "assets"      # relative to the directory holding ttskit.toml
+```
+
+`assets/Boards/a.png` then belongs to the cloud folder `MyGame/Boards`. Both
+keys are required, unknown keys are refused, the cloud folder cannot be the
+root or contain `.`/`..` levels, and the local directory must be relative and
+free of `..`.
+
+The `ttskit-cloud` library can turn a local listing and the cloud index into
+a sync plan (`plan_sync`). It reads and changes nothing, and prints as text or
+JSON. Each direction runs one way: `push` makes the cloud folder match the
+local directory, `pull` the reverse. Per file the plan says `upload`,
+`download`, `delete`, `rename`, `skip` or `conflict`, with a reason.
+
+- Names compare ignoring case, as Steam Cloud does: same content with a
+  different spelling is a `skip` (case only).
+- Nothing is deleted unless prune is requested; without it, files only on the
+  target side are skipped. With prune, one deleted and one new file with the
+  same content form a `rename` (the cloud has no rename, so a push uploads
+  and then deletes).
+- Conflicts block the plan: local files that differ only by case, several
+  index entries for one name, and the same name and content in two folders
+  (they would be one cloud file).
+
+There is no `sync` command yet; push and pull come with the sync issues.
+
 ### Index backups and restore
 
 Before ttskit changes the cloud index, it saves a copy of both index files
