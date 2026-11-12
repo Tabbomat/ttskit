@@ -6,7 +6,7 @@ mods. Not affiliated with or endorsed by Berserk Games.
 
 > **Status:** early development. Only the `cloud` commands (`list`,
 > `upload`, `url`, `delete`, `status`, `restore`, `sync push`, `sync pull`,
-> `manifest` and `import-tsv`) work so far; see the issue tracker for the
+> `manifest`, `import-tsv` and `scan`) work so far; see the issue tracker for the
 > roadmap.
 
 ## Planned features
@@ -15,7 +15,7 @@ mods. Not affiliated with or endorsed by Berserk Games.
   assemble it again, byte-exact, with `require` / `<Include/>` bundling.
 - **Steam Cloud management:** one cloud folder per game, sync with a local
   directory, a committed manifest of asset URLs (done), and a scan of the
-  asset URLs a save uses.
+  asset URLs a save uses (done).
 - **External Editor API client:** talk to a running game to read and write
   scripts, run Lua and capture console output.
 - **MCP server:** expose the editor API to AI assistants.
@@ -384,6 +384,27 @@ ttskit cloud import-tsv list.tsv  # adopt an existing list
   imported if there is any.
 - Exporting with `--tsv` and importing the result into an empty manifest gives
   the same file again (for entries that have a local path).
+
+### Scan a save for asset URLs
+
+```
+ttskit cloud scan save.json                 # list the asset URLs of a save
+ttskit cloud scan save.json --json          # the same as one JSON object
+ttskit cloud scan save.json --adopt         # also adopt your own cloud files
+```
+
+- Every string that starts with `http://` or `https://` counts, wherever it
+  is in the save, so fields unknown to ttskit are not missed. The key holding
+  the URL is only used as a label.
+- The result is grouped by host (`imgur`, `steamusercontent`, `other`) and
+  sorted by URL; each URL shows its labels and, if it occurs more than once,
+  how often. Plain `scan` is local only and needs no Steam connection.
+- `--adopt` matches the Steam Cloud URLs of the save against the index of your
+  own cloud (by handle and SHA1) and adds them to the manifest without
+  uploading anything. Adopted entries have no local `path`. URLs that are not
+  in your cloud are listed as `unmatched` and not adopted; imgur and other
+  hosts are ignored. `--config PATH` selects the project, `--dry-run` writes
+  nothing, `--yes` skips the question, and `--json` adds an `adopt` object.
 
 ### Index backups and restore
 
