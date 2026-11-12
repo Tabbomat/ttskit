@@ -184,10 +184,12 @@ made while it runs, or overwrites them, has not been checked yet.
 ### Can the game stay open?
 
 Yes, for reading. `cloud list` gave the same result with the game closed and
-with the game running at its main menu, and the game kept running. For
-commands that change the cloud (`cloud upload`, `cloud url --share`,
-`cloud restore --yes`) this has not been checked yet, so close the game
-first.
+with the game running at its main menu, and the game kept running.
+
+`cloud upload` also works with the game open: an uploaded file appears in
+the open Cloud Manager once it reloads the folder (switch to another folder
+and back). For `cloud url --share` and `cloud restore --yes` this has not
+been checked yet, so close the game first.
 
 ### Open questions
 
