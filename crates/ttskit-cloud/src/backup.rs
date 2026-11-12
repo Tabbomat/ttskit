@@ -476,6 +476,40 @@ impl CloudIndex {
         store: &BackupStore,
         now: SystemTime,
     ) -> Result<SaveOutcome, BackupError> {
+        let pending = self.pending_writes(backend)?;
+        if pending.is_empty() {
+            return Ok(SaveOutcome {
+                backup: None,
+                changed: Vec::new(),
+            });
+        }
+        let backup = store.create(backend, now)?;
+        let changed = apply_writes(backend, &backup, &pending)?;
+        Ok(SaveOutcome {
+            backup: Some(backup),
+            changed,
+        })
+    }
+
+    /// Writes the index like [`save`](Self::save), but into an existing
+    /// `backup` taken earlier instead of taking a new one. Only files whose
+    /// bytes differ from the cloud are written. A failed write is reported as
+    /// [`BackupError::Incomplete`] naming `backup`.
+    pub(crate) fn write_after_backup(
+        &self,
+        backend: &mut dyn CloudBackend,
+        backup: &Backup,
+    ) -> Result<Vec<&'static str>, BackupError> {
+        let pending = self.pending_writes(backend)?;
+        apply_writes(backend, backup, &pending)
+    }
+
+    /// Encodes and checks both files and returns those that differ from the
+    /// cloud.
+    fn pending_writes(
+        &self,
+        backend: &dyn CloudBackend,
+    ) -> Result<Vec<(&'static str, Vec<u8>)>, BackupError> {
         let info = self.encode_info()?;
         let folders = self.encode_folders()?;
         let again = CloudIndex::decode(Some(&info), None)?.encode_info()?;
@@ -493,23 +527,20 @@ impl CloudIndex {
                 pending.push((file, data));
             }
         }
-        if pending.is_empty() {
-            return Ok(SaveOutcome {
-                backup: None,
-                changed: Vec::new(),
-            });
-        }
-        let backup = store.create(backend, now)?;
-        let changes = pending
-            .iter()
-            .map(|(file, data)| (*file, Change::Write(data)))
-            .collect();
-        let changed = apply(backend, &backup, changes)?;
-        Ok(SaveOutcome {
-            backup: Some(backup),
-            changed,
-        })
+        Ok(pending)
     }
+}
+
+fn apply_writes(
+    backend: &mut dyn CloudBackend,
+    backup: &Backup,
+    pending: &[(&'static str, Vec<u8>)],
+) -> Result<Vec<&'static str>, BackupError> {
+    let changes = pending
+        .iter()
+        .map(|(file, data)| (*file, Change::Write(data)))
+        .collect();
+    apply(backend, backup, changes)
 }
 
 fn round_trip_error(file: &'static str) -> BackupError {

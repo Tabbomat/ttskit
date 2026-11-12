@@ -10,6 +10,7 @@
 
 mod backend;
 mod backup;
+mod delete;
 mod index;
 mod memory;
 #[cfg(feature = "steam")]
@@ -20,6 +21,9 @@ pub use backend::{CloudBackend, CloudError, CloudFile, Op, Quota, UgcHandle};
 pub use backup::{
     Backup, BackupError, BackupFile, BackupStore, RestoreAction, RestoreOutcome, RestorePlan,
     RestoreStep, SaveOutcome, plan_restore, restore,
+};
+pub use delete::{
+    DeleteError, DeleteFile, DeleteOutcome, DeletePlan, DeleteTarget, delete, plan_delete,
 };
 pub use index::{
     CLOUD_FOLDER_FILE, CLOUD_INFO_FILE, CloudIndex, GAME_INTERNAL_FILES, IndexEntry, IndexError,
