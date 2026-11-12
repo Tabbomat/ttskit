@@ -10,6 +10,7 @@
 
 mod backend;
 mod backup;
+mod config;
 mod delete;
 mod index;
 mod memory;
@@ -23,6 +24,7 @@ pub use backup::{
     Backup, BackupError, BackupFile, BackupStore, RestoreAction, RestoreOutcome, RestorePlan,
     RestoreStep, SaveOutcome, plan_restore, restore,
 };
+pub use config::{ConfigError, ProjectConfig};
 pub use delete::{
     DeleteError, DeleteFile, DeleteOutcome, DeletePlan, DeleteTarget, delete, plan_delete,
 };
