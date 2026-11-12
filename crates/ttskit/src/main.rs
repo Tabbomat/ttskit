@@ -88,6 +88,17 @@ enum CloudCommand {
         #[arg(long, env = "TTSKIT_BACKUP_DIR", value_name = "DIR")]
         backup_dir: Option<PathBuf>,
     },
+    /// Compare a local directory with a cloud folder (read-only)
+    Status {
+        /// The local directory; its subdirectories map to cloud subfolders
+        dir: PathBuf,
+        /// Cloud folder to compare with (separator `/`); default is the root
+        #[arg(long, value_name = "FOLDER")]
+        folder: Option<String>,
+        /// Print machine-readable JSON instead of text
+        #[arg(long)]
+        json: bool,
+    },
     /// Print the download URL of a cloud file
     Url {
         /// Folder path and name (`Decks/back.png`), display name, or cloud name
@@ -139,8 +150,8 @@ fn connect() -> Result<Box<dyn CloudBackend>, String> {
     )
 }
 
-fn run(cli: Cli) -> Result<(), String> {
-    match cli.command {
+fn run_simple(command: Command) -> Result<(), String> {
+    match command {
         Command::Cloud {
             command: CloudCommand::List { folder, json },
         } => {
@@ -276,12 +287,50 @@ fn run(cli: Cli) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
             out.flush().map_err(|e| e.to_string())
         }
+        Command::Cloud {
+            command: CloudCommand::Status { .. },
+        } => unreachable!("handled by run"),
+    }
+}
+
+/// Exit code of `cloud status`: 0 in sync, 2 otherwise.
+fn status_exit_code(in_sync: bool) -> ExitCode {
+    if in_sync {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(2)
+    }
+}
+
+/// Runs the command; the exit code is 0 unless the command says otherwise.
+fn run(cli: Cli) -> Result<ExitCode, String> {
+    match cli.command {
+        Command::Cloud {
+            command: CloudCommand::Status { dir, folder, json },
+        } => {
+            // Scan the local side before connecting to Steam.
+            let local = ttskit_cloud::scan_local(&dir).map_err(|e| e.to_string())?;
+            let backend = connect()?;
+            let mut out = std::io::stdout().lock();
+            let in_sync = cloud::status(
+                backend.as_ref(),
+                &local,
+                folder.as_deref().unwrap_or_default(),
+                &dir.display().to_string(),
+                json,
+                &mut out,
+            )
+            .map_err(|e| e.to_string())?;
+            out.flush().map_err(|e| e.to_string())?;
+            Ok(status_exit_code(in_sync))
+        }
+        command => run_simple(command).map(|()| ExitCode::SUCCESS),
     }
 }
 
 fn main() -> ExitCode {
     match run(Cli::parse()) {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(code) => code,
         Err(message) => {
             eprintln!("error: {message}");
             ExitCode::FAILURE
@@ -308,5 +357,11 @@ mod tests {
         assert!(parse(&[]).is_err());
         assert!(parse(&["--yes"]).is_err());
         assert!(parse(&["a.png", "--folder", "Decks"]).is_err());
+    }
+
+    #[test]
+    fn status_exit_codes() {
+        assert_eq!(status_exit_code(true), ExitCode::SUCCESS);
+        assert_eq!(status_exit_code(false), ExitCode::from(2));
     }
 }

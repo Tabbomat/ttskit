@@ -8,9 +8,9 @@ use std::time::SystemTime;
 use serde_json::json;
 use ttskit_cloud::{
     Backup, BackupError, BackupStore, CloudBackend, CloudError, CloudIndex, DeleteError,
-    DeletePlan, DeleteTarget, IndexEntry, IndexError, RestoreAction, UgcUrl, UploadError,
-    UploadPlan, delete, find_entries, is_game_internal, normalize_folder, plan_delete,
-    plan_restore, plan_upload, restore, upload,
+    DeletePlan, DeleteTarget, FileState, IndexEntry, IndexError, LocalFile, RestoreAction,
+    StatusError, UgcUrl, UploadError, UploadPlan, compare, delete, find_entries, is_game_internal,
+    normalize_folder, plan_delete, plan_restore, plan_upload, restore, upload,
 };
 
 /// Errors of the `cloud` subcommands.
@@ -40,6 +40,9 @@ pub enum CommandError {
     /// Planning or running a delete failed.
     #[error(transparent)]
     Delete(DeleteError),
+    /// The local directory cannot be scanned.
+    #[error(transparent)]
+    Status(#[from] StatusError),
     /// The file to upload cannot be read.
     #[error("cannot read {}: {source}", path.display())]
     ReadFile {
@@ -529,6 +532,97 @@ pub fn show_url(
     }
     out.flush()?;
     Ok(())
+}
+
+/// Compares the scanned local files with the cloud folder `folder` and prints
+/// the differences, or JSON when `json` is set. `dir_label` names the local
+/// directory in the output. Returns whether everything is in sync.
+pub fn status(
+    backend: &dyn CloudBackend,
+    local: &[LocalFile],
+    folder: &str,
+    dir_label: &str,
+    json: bool,
+    out: &mut dyn io::Write,
+) -> Result<bool, CommandError> {
+    let index = CloudIndex::load(backend)?;
+    let cloud_files = backend.list()?;
+    let report = compare(&index, &cloud_files, folder, local);
+    let in_sync = report.is_in_sync();
+    let mut buf: Vec<u8> = Vec::new();
+
+    if json {
+        let counts: serde_json::Map<String, serde_json::Value> = FileState::ALL
+            .iter()
+            .map(|s| (s.as_str().to_owned(), json!(report.count(*s))))
+            .collect();
+        let files: Vec<serde_json::Value> = report
+            .rows
+            .iter()
+            .map(|r| {
+                json!({
+                    "path": r.path,
+                    "state": r.state.as_str(),
+                    "local_size": r.local_size,
+                    "local_sha1": r.local_sha1,
+                    "cloud_name": r.cloud_name,
+                    "url": r.url,
+                })
+            })
+            .collect();
+        let mut text = serde_json::to_string_pretty(&json!({
+            "dir": dir_label,
+            "folder": report.folder,
+            "folder_exists": report.folder_exists,
+            "in_sync": in_sync,
+            "counts": counts,
+            "files": files,
+        }))
+        .map_err(io::Error::from)?;
+        text.push('\n');
+        buf.extend_from_slice(text.as_bytes());
+    } else {
+        let target = if report.folder.is_empty() {
+            "the root folder".to_owned()
+        } else {
+            format!("cloud folder {}", report.folder)
+        };
+        let note = if report.folder_exists {
+            ""
+        } else {
+            " (does not exist yet)"
+        };
+        writeln!(buf, "Compare {dir_label} with {target}{note}:")?;
+        for row in report
+            .rows
+            .iter()
+            .filter(|r| r.state != FileState::Identical)
+        {
+            let detail = if row.state == FileState::Broken {
+                "  (cloud file is gone)"
+            } else {
+                ""
+            };
+            writeln!(buf, "  {:<9}  {}{detail}", row.state.as_str(), row.path)?;
+        }
+        if in_sync {
+            writeln!(
+                buf,
+                "In sync: {} identical.",
+                count(report.count(FileState::Identical), "file")
+            )?;
+        } else {
+            let parts: Vec<String> = FileState::ALL
+                .iter()
+                .filter(|s| report.count(**s) > 0)
+                .map(|s| format!("{} {}", report.count(*s), s.as_str()))
+                .collect();
+            writeln!(buf, "{}", parts.join(", "))?;
+        }
+    }
+    out.write_all(&buf)?;
+    out.flush()?;
+    Ok(in_sync)
 }
 
 fn write_delete_plan(plan: &DeletePlan, out: &mut Vec<u8>) -> io::Result<()> {
@@ -2446,6 +2540,166 @@ mod tests {
             assert!(err.to_string().contains("never deleted"));
             assert!(cloud.mutating_calls().is_empty());
             assert!(store.list().unwrap().is_empty());
+        }
+    }
+
+    mod status_tests {
+        use ttskit_cloud::sha1_hex;
+
+        use super::*;
+
+        fn local(path: &str, data: &str) -> LocalFile {
+            LocalFile {
+                path: path.to_owned(),
+                size: data.len() as u64,
+                sha1: sha1_hex(data.as_bytes()),
+            }
+        }
+
+        fn key(data: &str, name: &str) -> String {
+            format!("{}_{name}", sha1_hex(data.as_bytes()))
+        }
+
+        /// Cloud folder `Decks` with an identical, a changed, a missing and a
+        /// broken file; one more file lives outside it.
+        fn status_cloud() -> MemoryCloud {
+            let mut index = CloudIndex::empty();
+            index.folders = vec!["Decks".into(), "Decks\\Sub".into()];
+            let mk = |data: &str, name: &str, folder: &str| {
+                IndexEntry::new(
+                    key(data, name),
+                    name,
+                    Some(format!("https://u/{name}")),
+                    Some(1),
+                    None,
+                    folder,
+                )
+            };
+            index.entries = vec![
+                mk("same", "same.png", "Decks"),
+                mk("old", "changed.png", "Decks"),
+                mk("gone", "old.png", "Decks"),
+                mk("brk", "b.png", "Decks\\Sub"),
+                mk("other", "other.png", "Cards"),
+            ];
+            seed(
+                MemoryCloud::new()
+                    .with_file(&key("same", "same.png"), "x")
+                    .with_file(&key("old", "changed.png"), "x")
+                    .with_file(&key("gone", "old.png"), "x")
+                    .with_file(&key("other", "other.png"), "x"),
+                &index,
+            )
+        }
+
+        fn run(
+            cloud: &MemoryCloud,
+            files: &[LocalFile],
+            folder: &str,
+            json: bool,
+        ) -> (bool, String) {
+            let mut out = Vec::new();
+            let in_sync = status(cloud, files, folder, "assets", json, &mut out).unwrap();
+            (in_sync, String::from_utf8(out).unwrap())
+        }
+
+        #[test]
+        fn mixed_case_text() {
+            let cloud = status_cloud();
+            let files = [
+                local("same.png", "same"),
+                local("changed.png", "new"),
+                local("fresh.png", "f"),
+                local("sub/b.png", "brk"),
+                local("sub/x.png", "x"),
+            ];
+            let (in_sync, text) = run(&cloud, &files, "decks", false);
+            assert!(!in_sync);
+            assert_eq!(
+                text,
+                "Compare assets with cloud folder Decks:\n\
+                 \x20 changed    changed.png\n\
+                 \x20 new        fresh.png\n\
+                 \x20 missing    old.png\n\
+                 \x20 broken     sub/b.png  (cloud file is gone)\n\
+                 \x20 new        sub/x.png\n\
+                 2 new, 1 changed, 1 missing, 1 broken, 1 identical\n"
+            );
+        }
+
+        #[test]
+        fn in_sync_text() {
+            let files = [local("same.png", "same"), local("old.png", "gone")];
+            let mut index = CloudIndex::empty();
+            index.entries = vec![
+                IndexEntry::new(
+                    key("same", "same.png"),
+                    "same.png",
+                    None,
+                    None,
+                    None,
+                    "Decks",
+                ),
+                IndexEntry::new(key("gone", "old.png"), "old.png", None, None, None, "Decks"),
+            ];
+            let cloud = seed(
+                MemoryCloud::new()
+                    .with_file(&key("same", "same.png"), "x")
+                    .with_file(&key("gone", "old.png"), "x"),
+                &index,
+            );
+            let (in_sync, text) = run(&cloud, &files, "Decks", false);
+            assert!(in_sync);
+            assert_eq!(
+                text,
+                "Compare assets with cloud folder Decks:\nIn sync: 2 files identical.\n"
+            );
+        }
+
+        #[test]
+        fn json_fields() {
+            let cloud = status_cloud();
+            let files = [local("same.png", "same"), local("fresh.png", "f")];
+            let (in_sync, text) = run(&cloud, &files, "Decks", true);
+            assert!(!in_sync);
+            let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(v["dir"], "assets");
+            assert_eq!(v["folder"], "Decks");
+            assert_eq!(v["folder_exists"], true);
+            assert_eq!(v["in_sync"], false);
+            assert_eq!(
+                v["counts"],
+                json!({"new": 1, "changed": 0, "missing": 3, "broken": 0, "identical": 1})
+            );
+            let rows = v["files"].as_array().unwrap();
+            assert_eq!(rows.len(), 5);
+            let same = rows.iter().find(|r| r["path"] == "same.png").unwrap();
+            assert_eq!(same["state"], "identical");
+            assert_eq!(same["local_size"], 4);
+            assert_eq!(same["local_sha1"], sha1_hex(b"same"));
+            assert_eq!(same["cloud_name"], key("same", "same.png"));
+            assert_eq!(same["url"], "https://u/same.png");
+            let fresh = rows.iter().find(|r| r["path"] == "fresh.png").unwrap();
+            assert_eq!(fresh["state"], "new");
+            assert!(fresh["cloud_name"].is_null() && fresh["url"].is_null());
+            let missing = rows.iter().find(|r| r["path"] == "old.png").unwrap();
+            assert!(missing["local_size"].is_null() && missing["local_sha1"].is_null());
+        }
+
+        #[test]
+        fn nonexistent_folder_and_root_headers() {
+            let cloud = status_cloud();
+            let files = [local("a.png", "a")];
+            let (in_sync, text) = run(&cloud, &files, "No/Such", false);
+            assert!(!in_sync);
+            assert_eq!(
+                text,
+                "Compare assets with cloud folder No/Such (does not exist yet):\n\
+                 \x20 new        a.png\n\
+                 1 new\n"
+            );
+            let (_, text) = run(&cloud, &[], "", false);
+            assert!(text.starts_with("Compare assets with the root folder:\n"));
         }
     }
 }
