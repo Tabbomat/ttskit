@@ -340,7 +340,7 @@ fn new_entry_fields_are_written_in_order() {
     let out = encoded_entry(&idx, &key("n.png"));
     assert_eq!(
         out.keys().collect::<Vec<_>>(),
-        ["Name", "URL", "Size", "Date", "Folder"]
+        ["URL", "Folder", "Name", "Size", "Date"]
     );
     // And it decodes back to the same values.
     let back = CloudIndex::decode(Some(&idx.encode_info().unwrap()), None).unwrap();

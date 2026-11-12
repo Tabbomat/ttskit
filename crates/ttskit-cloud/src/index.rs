@@ -201,6 +201,9 @@ impl IndexEntry {
     }
 
     fn encode(&self) -> Result<Document, IndexError> {
+        if self.raw.is_empty() {
+            return self.encode_new();
+        }
         let mut raw = self.raw.clone();
         // Name and Folder have defaults, so an absent field stays absent
         // while it still holds the default.
@@ -229,6 +232,34 @@ impl IndexEntry {
         put(&mut raw, "Date", self.date.clone().map(Bson::String));
         if raw.contains_key("Folder") || !self.folder.is_empty() {
             raw.insert("Folder", self.folder.clone());
+        }
+        Ok(raw)
+    }
+}
+
+impl IndexEntry {
+    /// Encodes an entry without a backing document the way the game writes
+    /// one: fields in the order URL, Folder, Name, Size, Date, with Size as
+    /// Int32 when it fits.
+    fn encode_new(&self) -> Result<Document, IndexError> {
+        let mut raw = Document::new();
+        if let Some(url) = &self.url {
+            raw.insert("URL", url.clone());
+        }
+        raw.insert("Folder", self.folder.clone());
+        raw.insert("Name", self.name.clone());
+        if let Some(n) = self.size {
+            let value = match i32::try_from(n) {
+                Ok(small) => Bson::Int32(small),
+                Err(_) => Bson::Int64(
+                    i64::try_from(n)
+                        .map_err(|_| bson_err(CLOUD_INFO_FILE, format!("size {n} is too large")))?,
+                ),
+            };
+            raw.insert("Size", value);
+        }
+        if let Some(date) = &self.date {
+            raw.insert("Date", date.clone());
         }
         Ok(raw)
     }
@@ -408,5 +439,62 @@ impl fmt::Display for UgcUrl {
             "https://steamusercontent-a.akamaihd.net/ugc/{}/{}/",
             self.handle, self.sha1
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn keys(doc: &Document) -> Vec<&str> {
+        doc.keys().map(String::as_str).collect()
+    }
+
+    #[test]
+    fn new_entry_uses_the_game_field_order_and_int32_size() {
+        let e = IndexEntry::new(
+            "AB_x.png",
+            "x.png",
+            Some("https://example/".into()),
+            Some(1234),
+            Some("1/2/2026".into()),
+            r"A\B",
+        );
+        let doc = e.encode().unwrap();
+        assert_eq!(keys(&doc), ["URL", "Folder", "Name", "Size", "Date"]);
+        assert_eq!(doc.get("Size"), Some(&Bson::Int32(1234)));
+        assert_eq!(doc.get("Folder"), Some(&Bson::String(r"A\B".into())));
+    }
+
+    #[test]
+    fn new_entry_always_writes_folder_and_omits_missing_fields() {
+        let e = IndexEntry::new("AB_x.png", "x.png", None, None, None, "");
+        let doc = e.encode().unwrap();
+        assert_eq!(keys(&doc), ["Folder", "Name"]);
+        assert_eq!(doc.get("Folder"), Some(&Bson::String(String::new())));
+    }
+
+    #[test]
+    fn new_entry_uses_int64_for_large_sizes() {
+        let big = u64::from(u32::MAX);
+        let e = IndexEntry::new("AB_x.png", "x.png", None, Some(big), None, "");
+        let doc = e.encode().unwrap();
+        assert_eq!(doc.get("Size"), Some(&Bson::Int64(i64::from(u32::MAX))));
+    }
+
+    #[test]
+    fn new_entry_survives_a_decode_round_trip() {
+        let mut index = CloudIndex::empty();
+        index.entries.push(IndexEntry::new(
+            "AB_x.png",
+            "x.png",
+            Some("u".into()),
+            Some(5),
+            Some("d".into()),
+            "",
+        ));
+        let bytes = index.encode_info().unwrap();
+        let again = CloudIndex::decode(Some(&bytes), None).unwrap();
+        assert_eq!(again.encode_info().unwrap(), bytes);
     }
 }

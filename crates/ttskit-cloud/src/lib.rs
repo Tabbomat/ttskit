@@ -14,6 +14,7 @@ mod index;
 mod memory;
 #[cfg(feature = "steam")]
 mod steam;
+mod upload;
 
 pub use backend::{CloudBackend, CloudError, CloudFile, Op, Quota, UgcHandle};
 pub use backup::{
@@ -27,3 +28,7 @@ pub use index::{
 pub use memory::{Call, MemoryCloud};
 #[cfg(feature = "steam")]
 pub use steam::{SteamCloud, TTS_APP_ID};
+pub use upload::{
+    UploadError, UploadOutcome, UploadPlan, UploadStage, UploadWarning, cloud_key, find_entries,
+    plan_upload, sha1_hex, upload,
+};
