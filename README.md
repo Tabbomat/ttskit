@@ -85,9 +85,14 @@ Requirements:
 - Steam is running and logged in, as an account that owns Tabletop Simulator.
 - ttskit runs as the same Windows user (and elevation level) as Steam.
 - Steam Cloud is enabled for the account and for the game.
-- `steam_api64.dll` is next to `ttskit.exe`. `cargo run` and `cargo test`
-  find it on their own; to run the built executable directly, copy the DLL
-  from the Steamworks SDK (`redistributable_bin/win64`) next to it.
+- `steam_api64.dll` is next to `ttskit.exe`. A build with the `steam` feature
+  is linked against it, so without the DLL Windows refuses to start the
+  program at all, even for `ttskit --version`. `cargo run` and `cargo test`
+  find it on their own. For an installed or copied executable, take the DLL
+  from the build output (`target/release/build/steamworks-sys-*/out/`) or
+  from the Steamworks SDK (`redistributable_bin/win64`) and put it next to
+  the executable. With `cargo install --path crates/ttskit --features steam`
+  that is `%USERPROFILE%\.cargo\bin`.
 
 Without the `steam` feature, ttskit builds and runs without the Steamworks
 SDK, and the `cloud` commands that talk to Steam exit with an error.
