@@ -55,7 +55,7 @@ pub struct LocalFile {
     pub sha1: String,
 }
 
-fn lower_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+pub(crate) fn lower_cmp(a: &str, b: &str) -> std::cmp::Ordering {
     a.to_ascii_lowercase()
         .cmp(&b.to_ascii_lowercase())
         .then_with(|| a.cmp(b))

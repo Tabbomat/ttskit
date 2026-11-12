@@ -13,6 +13,7 @@ mod backup;
 mod config;
 mod delete;
 mod index;
+mod manifest;
 mod memory;
 mod status;
 #[cfg(feature = "steam")]
@@ -35,6 +36,7 @@ pub use index::{
     CLOUD_FOLDER_FILE, CLOUD_INFO_FILE, CloudIndex, GAME_INTERNAL_FILES, IndexEntry, IndexError,
     UgcUrl, is_game_internal, normalize_folder,
 };
+pub use manifest::{Manifest, ManifestEntry, ManifestError, TsvError, TsvProblem};
 pub use memory::{Call, MemoryCloud};
 pub use status::{FileState, LocalFile, StatusError, StatusReport, StatusRow, compare, scan_local};
 #[cfg(feature = "steam")]
