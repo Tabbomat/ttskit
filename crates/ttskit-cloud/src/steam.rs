@@ -1,6 +1,10 @@
 //! The real Steam Remote Storage backend.
 
+use std::ffi::CString;
 use std::io::Read;
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use steamworks::{Client, SteamAPIInitError};
 
@@ -15,8 +19,9 @@ pub const TTS_APP_ID: u32 = 286160;
 /// Simulator, and `steam_api64.dll` next to the executable. Not `Send`: use it
 /// on the thread that created it.
 ///
-/// `write`, `delete` and `share` are not implemented yet and return an error
-/// without touching the cloud.
+/// `write` accepts files up to [`MAX_FILE_SIZE`]. `share` waits up to 30
+/// seconds for Steam's answer. `delete` is not implemented yet and returns an
+/// error without touching the cloud.
 pub struct SteamCloud {
     client: Client,
 }
@@ -76,6 +81,41 @@ fn init_error_message(err: &SteamAPIInitError) -> String {
     }
 }
 
+/// Largest file Steam's `FileWrite` accepts in one call:
+/// `k_unMaxCloudFileChunkSize`, 100 MiB.
+pub const MAX_FILE_SIZE: u64 = 100 * 1024 * 1024;
+
+/// How long `share` waits for Steam's answer.
+const SHARE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How often `share` checks for Steam's answer.
+const POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+/// Rejects files larger than [`MAX_FILE_SIZE`].
+fn check_size(name: &str, size: u64) -> Result<(), CloudError> {
+    if size > MAX_FILE_SIZE {
+        return Err(CloudError::FileTooLarge {
+            name: name.to_owned(),
+            size,
+            max: MAX_FILE_SIZE,
+        });
+    }
+    Ok(())
+}
+
+/// The name as a C string; the Steam API cannot take empty names or names
+/// with NUL characters.
+fn c_name(name: &str) -> Result<CString, CloudError> {
+    let invalid = |reason: &str| CloudError::InvalidName {
+        name: name.to_owned(),
+        reason: reason.to_owned(),
+    };
+    if name.is_empty() {
+        return Err(invalid("name is empty"));
+    }
+    CString::new(name).map_err(|_| invalid("contains a NUL character"))
+}
+
 fn not_implemented(op: &str) -> CloudError {
     CloudError::Backend(format!("{op} is not implemented yet for the Steam backend"))
 }
@@ -117,16 +157,99 @@ impl CloudBackend for SteamCloud {
         Ok(data)
     }
 
-    fn write(&mut self, _name: &str, _data: &[u8]) -> Result<(), CloudError> {
-        Err(not_implemented("write"))
+    fn write(&mut self, name: &str, data: &[u8]) -> Result<(), CloudError> {
+        let c_name = c_name(name)?;
+        let size = u64::try_from(data.len()).unwrap_or(u64::MAX);
+        check_size(name, size)?;
+        // The size fits in an i32: it is at most MAX_FILE_SIZE (100 MiB).
+        let len = i32::try_from(data.len()).map_err(|_| CloudError::FileTooLarge {
+            name: name.to_owned(),
+            size,
+            max: MAX_FILE_SIZE,
+        })?;
+        // steamworks only offers a stream writer whose close result is
+        // ignored, so call the synchronous FileWrite directly, obtaining the
+        // interface pointer the same way the steamworks crate does.
+        // SAFETY: Steam is initialized for as long as `self.client` lives, so
+        // the interface pointer is valid; `c_name` is a NUL-terminated string
+        // and `data` is valid for `len` bytes for the duration of the call.
+        let ok = unsafe {
+            let rs = steamworks_sys::SteamAPI_SteamRemoteStorage_v016();
+            !rs.is_null()
+                && steamworks_sys::SteamAPI_ISteamRemoteStorage_FileWrite(
+                    rs,
+                    c_name.as_ptr(),
+                    data.as_ptr().cast(),
+                    len,
+                )
+        };
+        if ok {
+            return Ok(());
+        }
+        // Steam gives no reason; report a quota problem if that explains it.
+        if let Ok(quota) = self.quota() {
+            let old = self
+                .client
+                .remote_storage()
+                .files()
+                .into_iter()
+                .find(|f| f.name.eq_ignore_ascii_case(name))
+                .map_or(0, |f| f.size);
+            let needed = size.saturating_sub(old);
+            if needed > quota.available {
+                return Err(CloudError::QuotaExceeded {
+                    name: name.to_owned(),
+                    needed,
+                    available: quota.available,
+                });
+            }
+        }
+        Err(CloudError::Backend(format!(
+            "Steam refused to write cloud file {name}"
+        )))
     }
 
     fn delete(&mut self, _name: &str) -> Result<(), CloudError> {
         Err(not_implemented("delete"))
     }
 
-    fn share(&mut self, _name: &str) -> Result<UgcHandle, CloudError> {
-        Err(not_implemented("share"))
+    fn share(&mut self, name: &str) -> Result<UgcHandle, CloudError> {
+        c_name(name)?;
+        let file = self.client.remote_storage().file(name);
+        if !file.exists() {
+            return Err(CloudError::NotFound {
+                name: name.to_owned(),
+            });
+        }
+        let (tx, rx) = mpsc::channel();
+        file.share(move |result| {
+            let _ = tx.send(result);
+        });
+        let deadline = Instant::now() + SHARE_TIMEOUT;
+        loop {
+            self.client.run_callbacks();
+            match rx.try_recv() {
+                Ok(Ok(handle)) => return Ok(UgcHandle(handle)),
+                Ok(Err(err)) => {
+                    return Err(CloudError::Backend(format!(
+                        "Steam could not share cloud file {name}: {err}"
+                    )));
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    return Err(CloudError::Backend(format!(
+                        "Steam dropped the share request for cloud file {name}"
+                    )));
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+            if Instant::now() >= deadline {
+                return Err(CloudError::Backend(format!(
+                    "Steam did not answer the share request for cloud file {name} within {} seconds",
+                    SHARE_TIMEOUT.as_secs()
+                )));
+            }
+            thread::sleep(POLL_INTERVAL);
+        }
     }
 
     fn quota(&self) -> Result<Quota, CloudError> {
@@ -160,6 +283,29 @@ impl CloudBackend for SteamCloud {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn size_limit_is_inclusive() {
+        assert!(check_size("a", MAX_FILE_SIZE).is_ok());
+        assert_eq!(
+            check_size("a", MAX_FILE_SIZE + 1),
+            Err(CloudError::FileTooLarge {
+                name: "a".into(),
+                size: MAX_FILE_SIZE + 1,
+                max: MAX_FILE_SIZE,
+            })
+        );
+    }
+
+    #[test]
+    fn empty_and_nul_names_are_invalid() {
+        assert!(matches!(c_name(""), Err(CloudError::InvalidName { .. })));
+        assert!(matches!(
+            c_name("a\0b"),
+            Err(CloudError::InvalidName { .. })
+        ));
+        assert_eq!(c_name("AB_c.png").unwrap().as_bytes(), b"AB_c.png");
+    }
 
     #[test]
     fn no_steam_client_says_steam_is_not_running() {
