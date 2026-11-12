@@ -20,8 +20,8 @@ pub const TTS_APP_ID: u32 = 286160;
 /// on the thread that created it.
 ///
 /// `write` accepts files up to [`MAX_FILE_SIZE`]. `share` waits up to 30
-/// seconds for Steam's answer. `delete` is not implemented yet and returns an
-/// error without touching the cloud.
+/// seconds for Steam's answer. `delete` removes the file from the cloud and
+/// from Steam's local copy.
 pub struct SteamCloud {
     client: Client,
 }
@@ -116,10 +116,6 @@ fn c_name(name: &str) -> Result<CString, CloudError> {
     CString::new(name).map_err(|_| invalid("contains a NUL character"))
 }
 
-fn not_implemented(op: &str) -> CloudError {
-    CloudError::Backend(format!("{op} is not implemented yet for the Steam backend"))
-}
-
 impl CloudBackend for SteamCloud {
     fn list(&self) -> Result<Vec<CloudFile>, CloudError> {
         let mut files: Vec<CloudFile> = self
@@ -209,8 +205,22 @@ impl CloudBackend for SteamCloud {
         )))
     }
 
-    fn delete(&mut self, _name: &str) -> Result<(), CloudError> {
-        Err(not_implemented("delete"))
+    fn delete(&mut self, name: &str) -> Result<(), CloudError> {
+        // The steamworks crate panics on interior NUL bytes.
+        c_name(name)?;
+        let file = self.client.remote_storage().file(name);
+        if !file.exists() {
+            return Err(CloudError::NotFound {
+                name: name.to_owned(),
+            });
+        }
+        if file.delete() {
+            Ok(())
+        } else {
+            Err(CloudError::Backend(format!(
+                "Steam refused to delete cloud file {name}"
+            )))
+        }
     }
 
     fn share(&mut self, name: &str) -> Result<UgcHandle, CloudError> {
