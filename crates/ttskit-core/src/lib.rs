@@ -11,8 +11,11 @@
 //! round-trip guarantees apply.
 
 pub mod save;
+pub mod unpack;
 
+pub use save::write::Eol;
 pub use save::{
     AssetUrl, HostClass, ObjectView, ObjectViewMut, Occurrence, Save, SaveError, SaveView,
     SaveViewMut,
 };
+pub use unpack::{OutputFile, UnpackError, UnpackReport, Unpacked, unpack};

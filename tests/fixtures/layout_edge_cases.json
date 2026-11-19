@@ -1,0 +1,540 @@
+{
+  "SaveName": "Layout Edge Cases",
+  "GameMode": "Synthetic",
+  "Date": "1/1/2000 12:00:00 AM",
+  "VersionNumber": "v0.0.0",
+  "GameType": "Game",
+  "GameComplexity": "",
+  "Tags": [],
+  "Gravity": 0.5,
+  "PlayArea": 0.5,
+  "Table": "Table_RPG",
+  "Sky": "Sky_Museum",
+  "Note": "",
+  "TabStates": {
+    "0": {
+      "title": "Rules",
+      "body": "Line one\r\nLine two\r\n",
+      "color": "Grey",
+      "visibleColor": {
+        "r": 0.5,
+        "g": 0.5,
+        "b": 0.5
+      },
+      "id": 0
+    },
+    "1": {
+      "body": "Page without title",
+      "color": "Grey",
+      "id": 1
+    },
+    "2": {
+      "title": "Empty",
+      "body": "",
+      "color": "Grey",
+      "id": 2
+    },
+    "3": {
+      "title": "LF: page?",
+      "body": "x\ny\nz",
+      "color": "Grey",
+      "id": 3
+    }
+  },
+  "LuaScript": "-- global\r\nprint(\"hi\")",
+  "LuaScriptState": "",
+  "XmlUI": "",
+  "ObjectStates": [
+    {
+      "GUID": "f00d01",
+      "Name": "Custom_Model",
+      "Nickname": "Board",
+      "Description": "",
+      "Transform": {
+        "posX": 1E-05,
+        "posY": -0.0,
+        "posZ": 12345678901234567890123,
+        "rotX": -5.039668E-05,
+        "rotY": 179.999985,
+        "rotZ": 0.0,
+        "scaleX": 0.333333343,
+        "scaleY": 1E+20,
+        "scaleZ": -7
+      },
+      "Locked": false,
+      "LuaScript": "-- lf only\nfunction onLoad()\n  print(1)\nend\n",
+      "LuaScriptState": "{\"a\":1,\"b\":[1,2],\"c\":{\"d\":null,\"e\":\"x\\ny\"}}",
+      "XmlUI": "<Panel/>\r\n",
+      "ChildObjects": [
+        {
+          "GUID": "lamp01",
+          "Name": "Custom_Model",
+          "Nickname": "Lamp shade",
+          "Description": "",
+          "Transform": {
+            "posX": 0.0,
+            "posY": 0.0,
+            "posZ": 0.0,
+            "rotX": 0.0,
+            "rotY": 0.0,
+            "rotZ": 0.0,
+            "scaleX": 1.0,
+            "scaleY": 1.0,
+            "scaleZ": 1.0
+          },
+          "Locked": false,
+          "LuaScript": "-- shade",
+          "LuaScriptState": "",
+          "XmlUI": ""
+        },
+        {
+          "Name": "",
+          "Nickname": "",
+          "Description": "",
+          "Transform": {
+            "posX": 0.0,
+            "posY": 0.0,
+            "posZ": 0.0,
+            "rotX": 0.0,
+            "rotY": 0.0,
+            "rotZ": 0.0,
+            "scaleX": 1.0,
+            "scaleY": 1.0,
+            "scaleZ": 1.0
+          },
+          "Locked": false,
+          "LuaScript": "",
+          "LuaScriptState": "",
+          "XmlUI": ""
+        }
+      ]
+    },
+    {
+      "GUID": "crl001",
+      "Name": "Custom_Model",
+      "Nickname": "CRLF script",
+      "Description": "",
+      "Transform": {
+        "posX": 0.0,
+        "posY": 0.0,
+        "posZ": 0.0,
+        "rotX": 0.0,
+        "rotY": 0.0,
+        "rotZ": 0.0,
+        "scaleX": 1.0,
+        "scaleY": 1.0,
+        "scaleZ": 1.0
+      },
+      "Locked": false,
+      "LuaScript": "-- a\r\n-- b\r\n",
+      "LuaScriptState": "",
+      "XmlUI": ""
+    },
+    {
+      "GUID": "mix001",
+      "Name": "Custom_Model",
+      "Nickname": "Mixed script",
+      "Description": "",
+      "Transform": {
+        "posX": 0.0,
+        "posY": 0.0,
+        "posZ": 0.0,
+        "rotX": 0.0,
+        "rotY": 0.0,
+        "rotZ": 0.0,
+        "scaleX": 1.0,
+        "scaleY": 1.0,
+        "scaleZ": 1.0
+      },
+      "Locked": false,
+      "LuaScript": "a\r\nb\nc\r\nd",
+      "LuaScriptState": "",
+      "XmlUI": ""
+    },
+    {
+      "GUID": "tie001",
+      "Name": "Custom_Model",
+      "Nickname": "Tie script",
+      "Description": "",
+      "Transform": {
+        "posX": 0.0,
+        "posY": 0.0,
+        "posZ": 0.0,
+        "rotX": 0.0,
+        "rotY": 0.0,
+        "rotZ": 0.0,
+        "scaleX": 1.0,
+        "scaleY": 1.0,
+        "scaleZ": 1.0
+      },
+      "Locked": false,
+      "LuaScript": "a\r\nb\nc",
+      "LuaScriptState": "",
+      "XmlUI": ""
+    },
+    {
+      "GUID": "lcr001",
+      "Name": "Custom_Model",
+      "Nickname": "Lone CR",
+      "Description": "",
+      "Transform": {
+        "posX": 0.0,
+        "posY": 0.0,
+        "posZ": 0.0,
+        "rotX": 0.0,
+        "rotY": 0.0,
+        "rotZ": 0.0,
+        "scaleX": 1.0,
+        "scaleY": 1.0,
+        "scaleZ": 1.0
+      },
+      "Locked": false,
+      "LuaScript": "a\rb\r\nc\r",
+      "LuaScriptState": "{\"a\": 1}",
+      "XmlUI": ""
+    },
+    {
+      "GUID": "inv001",
+      "Name": "Custom_Model",
+      "Nickname": "bad<>:\"/\\|?*name",
+      "Description": "",
+      "Transform": {
+        "posX": 0.0,
+        "posY": 0.0,
+        "posZ": 0.0,
+        "rotX": 0.0,
+        "rotY": 0.0,
+        "rotZ": 0.0,
+        "scaleX": 1.0,
+        "scaleY": 1.0,
+        "scaleZ": 1.0
+      },
+      "Locked": false,
+      "LuaScript": "",
+      "LuaScriptState": "plain text\r\nstate",
+      "XmlUI": ""
+    },
+    {
+      "GUID": "long01",
+      "Name": "Custom_Model",
+      "Nickname": "A very long nickname that exceeds the limit",
+      "Description": "",
+      "Transform": {
+        "posX": 0.0,
+        "posY": 0.0,
+        "posZ": 0.0,
+        "rotX": 0.0,
+        "rotY": 0.0,
+        "rotZ": 0.0,
+        "scaleX": 1.0,
+        "scaleY": 1.0,
+        "scaleZ": 1.0
+      },
+      "Locked": false,
+      "LuaScript": "",
+      "LuaScriptState": "",
+      "XmlUI": ""
+    },
+    {
+      "GUID": "res001",
+      "Name": "Custom_Model",
+      "Nickname": "con",
+      "Description": "",
+      "Transform": {
+        "posX": 0.0,
+        "posY": 0.0,
+        "posZ": 0.0,
+        "rotX": 0.0,
+        "rotY": 0.0,
+        "rotZ": 0.0,
+        "scaleX": 1.0,
+        "scaleY": 1.0,
+        "scaleZ": 1.0
+      },
+      "Locked": false,
+      "LuaScript": "",
+      "LuaScriptState": "",
+      "XmlUI": ""
+    },
+    {
+      "GUID": "c00001",
+      "Name": "Card",
+      "Nickname": "Card",
+      "Description": "",
+      "Transform": {
+        "posX": 0.0,
+        "posY": 0.0,
+        "posZ": 0.0,
+        "rotX": 0.0,
+        "rotY": 0.0,
+        "rotZ": 0.0,
+        "scaleX": 1.0,
+        "scaleY": 1.0,
+        "scaleZ": 1.0
+      },
+      "Locked": false,
+      "LuaScript": "-- first",
+      "LuaScriptState": "",
+      "XmlUI": ""
+    },
+    {
+      "GUID": "c00001",
+      "Name": "Card",
+      "Nickname": "Card",
+      "Description": "",
+      "Transform": {
+        "posX": 0.0,
+        "posY": 0.0,
+        "posZ": 0.0,
+        "rotX": 0.0,
+        "rotY": 0.0,
+        "rotZ": 0.0,
+        "scaleX": 1.0,
+        "scaleY": 1.0,
+        "scaleZ": 1.0
+      },
+      "Locked": false,
+      "LuaScript": "-- second",
+      "LuaScriptState": "",
+      "XmlUI": ""
+    },
+    {
+      "GUID": "C00001",
+      "Name": "Card",
+      "Nickname": "CARD",
+      "Description": "",
+      "Transform": {
+        "posX": 0.0,
+        "posY": 0.0,
+        "posZ": 0.0,
+        "rotX": 0.0,
+        "rotY": 0.0,
+        "rotZ": 0.0,
+        "scaleX": 1.0,
+        "scaleY": 1.0,
+        "scaleZ": 1.0
+      },
+      "Locked": false,
+      "LuaScript": "-- third",
+      "LuaScriptState": "",
+      "XmlUI": ""
+    },
+    {
+      "GUID": "nam001",
+      "Name": "Custom_Token",
+      "Description": "",
+      "Transform": {
+        "posX": 0.0,
+        "posY": 0.0,
+        "posZ": 0.0,
+        "rotX": 0.0,
+        "rotY": 0.0,
+        "rotZ": 0.0,
+        "scaleX": 1.0,
+        "scaleY": 1.0,
+        "scaleZ": 1.0
+      },
+      "Locked": false,
+      "LuaScript": "",
+      "LuaScriptState": "",
+      "XmlUI": ""
+    },
+    {
+      "GUID": "nam002",
+      "Name": "Custom_Token",
+      "Nickname": "",
+      "Description": "",
+      "Transform": {
+        "posX": 0.0,
+        "posY": 0.0,
+        "posZ": 0.0,
+        "rotX": 0.0,
+        "rotY": 0.0,
+        "rotZ": 0.0,
+        "scaleX": 1.0,
+        "scaleY": 1.0,
+        "scaleZ": 1.0
+      },
+      "Locked": false,
+      "LuaScript": "",
+      "LuaScriptState": "",
+      "XmlUI": ""
+    },
+    {
+      "Name": "",
+      "Nickname": "",
+      "Transform": {
+        "posX": 0.0,
+        "posY": 0.0,
+        "posZ": 0.0,
+        "rotX": 0.0,
+        "rotY": 0.0,
+        "rotZ": 0.0,
+        "scaleX": 1.0,
+        "scaleY": 1.0,
+        "scaleZ": 1.0
+      },
+      "LuaScript": ""
+    },
+    {
+      "GUID": 5,
+      "Transform": {
+        "posX": 0.0,
+        "posY": 0.0,
+        "posZ": 0.0,
+        "rotX": 0.0,
+        "rotY": 0.0,
+        "rotZ": 0.0,
+        "scaleX": 1.0,
+        "scaleY": 1.0,
+        "scaleZ": 1.0
+      }
+    },
+    {
+      "Nickname": "Ends with dots. . ",
+      "Transform": {
+        "posX": 0.0,
+        "posY": 0.0,
+        "posZ": 0.0,
+        "rotX": 0.0,
+        "rotY": 0.0,
+        "rotZ": 0.0,
+        "scaleX": 1.0,
+        "scaleY": 1.0,
+        "scaleZ": 1.0
+      }
+    },
+    {
+      "GUID": "emp001",
+      "Name": "Bag",
+      "Nickname": "Empty bag",
+      "Description": "",
+      "Transform": {
+        "posX": 0.0,
+        "posY": 0.0,
+        "posZ": 0.0,
+        "rotX": 0.0,
+        "rotY": 0.0,
+        "rotZ": 0.0,
+        "scaleX": 1.0,
+        "scaleY": 1.0,
+        "scaleZ": 1.0
+      },
+      "Locked": false,
+      "LuaScript": "",
+      "LuaScriptState": "",
+      "XmlUI": "",
+      "ContainedObjects": []
+    },
+    {
+      "GUID": "mixc01",
+      "Name": "Bag",
+      "Nickname": "Mixed contents",
+      "Description": "",
+      "Transform": {
+        "posX": 0.0,
+        "posY": 0.0,
+        "posZ": 0.0,
+        "rotX": 0.0,
+        "rotY": 0.0,
+        "rotZ": 0.0,
+        "scaleX": 1.0,
+        "scaleY": 1.0,
+        "scaleZ": 1.0
+      },
+      "Locked": false,
+      "LuaScript": "",
+      "LuaScriptState": "",
+      "XmlUI": "",
+      "ContainedObjects": [
+        {
+          "GUID": "in0001",
+          "Name": "Custom_Token",
+          "Nickname": "Inner",
+          "Description": "",
+          "Transform": {
+            "posX": 0.0,
+            "posY": 0.0,
+            "posZ": 0.0,
+            "rotX": 0.0,
+            "rotY": 0.0,
+            "rotZ": 0.0,
+            "scaleX": 1.0,
+            "scaleY": 1.0,
+            "scaleZ": 1.0
+          },
+          "Locked": false,
+          "LuaScript": "-- inner",
+          "LuaScriptState": "",
+          "XmlUI": ""
+        },
+        5
+      ]
+    },
+    {
+      "GUID": "uni001",
+      "Name": "Custom_Model",
+      "Nickname": "Tüte 日本語 🎲",
+      "Description": "",
+      "Transform": {
+        "posX": 0.0,
+        "posY": 0.0,
+        "posZ": 0.0,
+        "rotX": 0.0,
+        "rotY": 0.0,
+        "rotZ": 0.0,
+        "scaleX": 1.0,
+        "scaleY": 1.0,
+        "scaleZ": 1.0
+      },
+      "Locked": false,
+      "LuaScript": "-- ö\n",
+      "LuaScriptState": "",
+      "XmlUI": ""
+    },
+    {
+      "GUID": "bag001",
+      "Name": "Bag",
+      "Nickname": "Outer bag",
+      "Description": "",
+      "Transform": {
+        "posX": 0.0,
+        "posY": 0.0,
+        "posZ": 0.0,
+        "rotX": 0.0,
+        "rotY": 0.0,
+        "rotZ": 0.0,
+        "scaleX": 1.0,
+        "scaleY": 1.0,
+        "scaleZ": 1.0
+      },
+      "Locked": false,
+      "LuaScript": "",
+      "LuaScriptState": "",
+      "XmlUI": "",
+      "ContainedObjects": [
+        {
+          "GUID": "in0002",
+          "Name": "Custom_Token",
+          "Nickname": "Inner",
+          "Description": "",
+          "Transform": {
+            "posX": 0.0,
+            "posY": 0.0,
+            "posZ": 0.0,
+            "rotX": 0.0,
+            "rotY": 0.0,
+            "rotZ": 0.0,
+            "scaleX": 1.0,
+            "scaleY": 1.0,
+            "scaleZ": 1.0
+          },
+          "Locked": false,
+          "LuaScript": "-- inner",
+          "LuaScriptState": "",
+          "XmlUI": ""
+        }
+      ]
+    }
+  ]
+}

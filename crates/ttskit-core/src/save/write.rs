@@ -20,20 +20,60 @@ use std::io::{self, BufWriter, Write};
 
 use serde_json::Value;
 
-const NL: &[u8] = b"\r\n";
 const SPACES: [u8; 64] = [b' '; 64];
+
+/// A line ending style for the JSON layout and for text files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Eol {
+    /// `\r\n`
+    Crlf,
+    /// `\n`
+    Lf,
+}
+
+impl Eol {
+    /// The native line ending of the operating system this runs on.
+    pub fn native() -> Eol {
+        if cfg!(windows) { Eol::Crlf } else { Eol::Lf }
+    }
+
+    /// The line ending as bytes.
+    pub fn as_bytes(self) -> &'static [u8] {
+        match self {
+            Eol::Crlf => b"\r\n",
+            Eol::Lf => b"\n",
+        }
+    }
+
+    /// Lower-case name used in metadata: `crlf` or `lf`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Eol::Crlf => "crlf",
+            Eol::Lf => "lf",
+        }
+    }
+}
 
 /// Serializes any JSON value in Tabletop Simulator format.
 pub fn to_tts_vec(value: &Value) -> Vec<u8> {
+    to_vec_with(value, Eol::Crlf, false)
+}
+
+/// Serializes any JSON value in Tabletop Simulator layout with the given line
+/// ending, optionally followed by one trailing line ending.
+pub fn to_vec_with(value: &Value, eol: Eol, trailing_newline: bool) -> Vec<u8> {
     let mut out = Vec::new();
-    write_node(&mut out, value, 0).expect("writing to a Vec cannot fail");
+    write_node(&mut out, value, 0, eol.as_bytes()).expect("writing to a Vec cannot fail");
+    if trailing_newline {
+        out.extend_from_slice(eol.as_bytes());
+    }
     out
 }
 
 /// Writes any JSON value in Tabletop Simulator format to `out`, buffered.
 pub fn write_value<W: Write>(value: &Value, out: W) -> io::Result<()> {
     let mut out = BufWriter::new(out);
-    write_node(&mut out, value, 0)?;
+    write_node(&mut out, value, 0, Eol::Crlf.as_bytes())?;
     out.flush()
 }
 
@@ -47,7 +87,7 @@ fn indent<W: Write>(out: &mut W, level: usize) -> io::Result<()> {
     Ok(())
 }
 
-fn write_node<W: Write>(out: &mut W, value: &Value, level: usize) -> io::Result<()> {
+fn write_node<W: Write>(out: &mut W, value: &Value, level: usize, nl: &[u8]) -> io::Result<()> {
     match value {
         Value::Null => out.write_all(b"null"),
         Value::Bool(true) => out.write_all(b"true"),
@@ -76,11 +116,11 @@ fn write_node<W: Write>(out: &mut W, value: &Value, level: usize) -> io::Result<
                 if i > 0 {
                     out.write_all(b",")?;
                 }
-                out.write_all(NL)?;
+                out.write_all(nl)?;
                 indent(out, level + 1)?;
-                write_node(out, item, level + 1)?;
+                write_node(out, item, level + 1, nl)?;
             }
-            out.write_all(NL)?;
+            out.write_all(nl)?;
             indent(out, level)?;
             out.write_all(b"]")
         }
@@ -93,13 +133,13 @@ fn write_node<W: Write>(out: &mut W, value: &Value, level: usize) -> io::Result<
                 if i > 0 {
                     out.write_all(b",")?;
                 }
-                out.write_all(NL)?;
+                out.write_all(nl)?;
                 indent(out, level + 1)?;
                 write_string(out, key)?;
                 out.write_all(b": ")?;
-                write_node(out, item, level + 1)?;
+                write_node(out, item, level + 1, nl)?;
             }
-            out.write_all(NL)?;
+            out.write_all(nl)?;
             indent(out, level)?;
             out.write_all(b"}")
         }
@@ -351,6 +391,18 @@ mod tests {
             Err(SaveError::NotAnObject)
         ));
         assert!(matches!(Save::from_slice(b"{"), Err(SaveError::Json(_))));
+    }
+
+    #[test]
+    fn lf_and_trailing_newline_options() {
+        let v = parse(r#"{"a":[1,"x\r\ny"],"b":{}}"#);
+        assert_eq!(to_vec_with(&v, Eol::Crlf, false), to_tts_vec(&v));
+        let lf = to_vec_with(&v, Eol::Lf, true);
+        assert_eq!(
+            String::from_utf8(lf).unwrap(),
+            "{\n  \"a\": [\n    1,\n    \"x\\r\\ny\"\n  ],\n  \"b\": {}\n}\n"
+        );
+        assert!(to_vec_with(&v, Eol::Crlf, true).ends_with(b"}\r\n"));
     }
 
     #[test]

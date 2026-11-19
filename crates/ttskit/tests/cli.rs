@@ -273,3 +273,151 @@ fn cloud_manifest_rejects_an_invalid_ignore_pattern() {
     assert!(stderr(&output).starts_with("error: "));
     assert_eq!(stdout(&output), "");
 }
+
+fn fixture(name: &str) -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("tests")
+        .join("fixtures")
+        .join(name)
+}
+
+#[test]
+fn save_unpack_writes_the_tree_and_prints_a_summary() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("MySave");
+    let save = fixture("layout_edge_cases.json");
+    let output = ttskit(&[
+        "save",
+        "unpack",
+        save.to_str().unwrap(),
+        "-o",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+    let first = text.lines().next().unwrap();
+    assert!(first.starts_with("Unpacked 23 objects into "), "{text}");
+    assert!(first.contains(&out.display().to_string()), "{text}");
+    assert_eq!(
+        text.lines().filter(|l| l.starts_with("warning: ")).count(),
+        2,
+        "{text}"
+    );
+    assert!(text.contains("objects/Mixed script.mix001/script.lua"));
+    assert!(out.join("save.json").is_file());
+    assert!(out.join(".ttskit").join("unpack.json").is_file());
+    assert!(
+        out.join("objects")
+            .join("Board.f00d01")
+            .join("script.lua")
+            .is_file()
+    );
+}
+
+#[test]
+fn save_unpack_json_has_the_documented_shape() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("MySave");
+    let save = fixture("layout_edge_cases.json");
+    let output = ttskit(&[
+        "save",
+        "unpack",
+        save.to_str().unwrap(),
+        "--output",
+        out.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let value: serde_json::Value = serde_json::from_str(&stdout(&output)).unwrap();
+    let keys: Vec<&str> = value
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(keys, ["output", "objects", "files", "mixed_eol"]);
+    assert_eq!(value["output"], out.display().to_string());
+    assert_eq!(value["objects"], 23);
+    assert_eq!(
+        value["mixed_eol"],
+        serde_json::json!([
+            "objects/Mixed script.mix001/script.lua",
+            "objects/Tie script.tie001/script.lua"
+        ])
+    );
+    let written = walk_count(&out);
+    assert_eq!(value["files"], written);
+}
+
+fn walk_count(dir: &std::path::Path) -> usize {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .flatten()
+        .map(|e| {
+            let path = e.path();
+            if path.is_dir() { walk_count(&path) } else { 1 }
+        })
+        .sum()
+}
+
+#[test]
+fn save_unpack_refuses_a_non_empty_output_dir() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("keep.txt"), "mine").unwrap();
+    let save = fixture("containers.json");
+    let output = ttskit(&[
+        "save",
+        "unpack",
+        save.to_str().unwrap(),
+        "-o",
+        tmp.path().to_str().unwrap(),
+    ]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(stderr(&output).contains("not empty"), "{}", stderr(&output));
+    assert!(stdout(&output).is_empty());
+    let names: Vec<_> = std::fs::read_dir(tmp.path()).unwrap().flatten().collect();
+    assert_eq!(names.len(), 1);
+}
+
+#[test]
+fn save_unpack_reports_unreadable_and_invalid_saves() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("out");
+    let missing = tmp.path().join("missing.json");
+    let output = ttskit(&[
+        "save",
+        "unpack",
+        missing.to_str().unwrap(),
+        "-o",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(stderr(&output).contains("cannot read"));
+
+    let bad = tmp.path().join("bad.json");
+    std::fs::write(&bad, "[1]").unwrap();
+    let output = ttskit(&[
+        "save",
+        "unpack",
+        bad.to_str().unwrap(),
+        "-o",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stderr(&output).contains("JSON object"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(!out.exists());
+}
+
+#[test]
+fn save_unpack_requires_output() {
+    let save = fixture("containers.json");
+    let output = ttskit(&["save", "unpack", save.to_str().unwrap()]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(stderr(&output).contains("--output"), "{}", stderr(&output));
+}

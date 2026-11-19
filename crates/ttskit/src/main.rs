@@ -1,4 +1,5 @@
 mod cloud;
+mod save;
 
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -22,6 +23,26 @@ enum Command {
     Cloud {
         #[command(subcommand)]
         command: CloudCommand,
+    },
+    /// Work with save files (local only, no Steam needed; unofficial)
+    Save {
+        #[command(subcommand)]
+        command: SaveCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum SaveCommand {
+    /// Unpack a save file into a directory of scripts, UI, state and objects
+    Unpack {
+        /// The save file (JSON)
+        save: PathBuf,
+        /// The output directory; it must be missing or empty
+        #[arg(short, long, value_name = "DIR")]
+        output: PathBuf,
+        /// Print machine-readable JSON instead of text
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -288,6 +309,13 @@ fn config_dir_of(config: &Path) -> &Path {
 
 fn run_simple(command: Command) -> Result<(), String> {
     match command {
+        Command::Save {
+            command: SaveCommand::Unpack { save, output, json },
+        } => {
+            let mut out = std::io::stdout().lock();
+            save::unpack(&save, &output, json, &mut out)?;
+            out.flush().map_err(|e| e.to_string())
+        }
         Command::Cloud {
             command: CloudCommand::List { folder, json },
         } => {

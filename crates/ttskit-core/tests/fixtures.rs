@@ -67,6 +67,7 @@ fn expected_fixtures_present() {
         "scripts_ui",
         "custom_assets",
         "numbers",
+        "layout_edge_cases",
     ] {
         assert!(
             names.iter().any(|n| n == expected),
