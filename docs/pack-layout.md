@@ -332,14 +332,19 @@ that no longer exist are ignored.
 | A file was edited | Its content is used. |
 | A marker names a file or directory that does not exist | The key is removed from the object. |
 | `script.lua`, `ui.xml`, `state.json`/`state.txt`, `contents/`, `states/` or `children/` exists, and the object has no such key | The key is added at the end of the object. |
-| Such a file or directory exists, but the key holds a non-marker value or a marker for another file | Error naming both. |
+| Such a file or directory exists, and the key holds an empty value (`""`, `[]` or `{}`, as unpack leaves it) | The value is replaced in place by the file or directory. |
+| Such a file or directory exists, but the key holds another non-marker value or a marker for another file | Error naming both. |
+| `state.json` and `state.txt` both exist | Error. |
 | A directory in `objects/`, `contents/`, `states/` or `children/` is not listed in its `index.json` | Error naming the directory. |
 | `index.json` lists a directory that does not exist | Error naming `index.json` and the entry. |
 | A prettified `state.json` was edited | It is compacted. If it is no longer valid JSON: error. |
 | A JSON file is malformed | Error with the path and position. |
-| Unknown files (no marker, not in an index) | Ignored with a warning. |
+| Unknown files (no marker, not in an index) | Ignored with a warning. Names starting with `.` (`.git`, `.gitattributes`, `.ttskit`) are ignored silently. |
+| A text file starts with a UTF-8 byte order mark | The mark is dropped. |
+| A text file is not valid UTF-8 | Error. |
 
-Errors abort pack before anything is written.
+Errors abort pack before anything is written. `ttskit save pack` also refuses to
+write over an existing output file; #8 adds an explicit way to overwrite.
 
 Unpack never deletes files it did not create. Writing into an existing tree and
 removing stale files are covered by #8: `--clean` removes only files listed in

@@ -10,9 +10,11 @@
 //! See the module documentation for why the model is value-backed and which
 //! round-trip guarantees apply.
 
+pub mod pack;
 pub mod save;
 pub mod unpack;
 
+pub use pack::{PackError, PackOptions, Packed, pack};
 pub use save::write::Eol;
 pub use save::{
     AssetUrl, HostClass, ObjectView, ObjectViewMut, Occurrence, Save, SaveError, SaveView,

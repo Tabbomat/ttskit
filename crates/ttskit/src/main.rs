@@ -44,6 +44,20 @@ enum SaveCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Pack an unpacked directory back into a save file
+    Pack {
+        /// The directory written by `save unpack`
+        dir: PathBuf,
+        /// The save file to write; it must not exist yet
+        #[arg(short, long, value_name = "FILE")]
+        output: PathBuf,
+        /// Keep the line endings recorded at unpack (default: LF everywhere)
+        #[arg(long)]
+        keep_eol: bool,
+        /// Print machine-readable JSON instead of text
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -314,6 +328,20 @@ fn run_simple(command: Command) -> Result<(), String> {
         } => {
             let mut out = std::io::stdout().lock();
             save::unpack(&save, &output, json, &mut out)?;
+            out.flush().map_err(|e| e.to_string())
+        }
+        Command::Save {
+            command:
+                SaveCommand::Pack {
+                    dir,
+                    output,
+                    keep_eol,
+                    json,
+                },
+        } => {
+            let mut out = std::io::stdout().lock();
+            let mut err = std::io::stderr().lock();
+            save::pack(&dir, &output, keep_eol, json, &mut out, &mut err)?;
             out.flush().map_err(|e| e.to_string())
         }
         Command::Cloud {

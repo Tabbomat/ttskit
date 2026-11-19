@@ -75,3 +75,37 @@ fn real_saves_round_trip() {
     );
     assert!(failures.is_empty(), "failures:\n{}", failures.join("\n"));
 }
+
+/// Unpack, then pack with `--keep-eol`: byte-exact for saves written by
+/// Tabletop Simulator, unless a field has mixed line endings.
+#[test]
+fn real_saves_pack_round_trip() {
+    use ttskit_core::{Eol, PackOptions, pack, unpack};
+
+    let Some(dir) = real_saves_dir() else {
+        eprintln!("TTSKIT_REAL_SAVES not set; skipping real save pack check");
+        return;
+    };
+    let mut failures = Vec::new();
+    for path in collect_json(&dir) {
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        let input = std::fs::read(&path).unwrap();
+        let Ok(unpacked) = unpack(&input, Eol::native()) else {
+            continue;
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let tree = tmp.path().join("tree");
+        unpacked.write_to_dir(&tree).unwrap();
+        let tts_written = input.starts_with(b"{\r\n") && !input.ends_with(b"\n");
+        match pack(&tree, &PackOptions::new(true)) {
+            Err(e) => failures.push(format!("{name}: {e}")),
+            Ok(out)
+                if tts_written && unpacked.report.mixed_eol.is_empty() && out.bytes != input =>
+            {
+                failures.push(format!("{name}: {}", first_diff(&input, &out.bytes)));
+            }
+            Ok(_) => {}
+        }
+    }
+    assert!(failures.is_empty(), "failures:\n{}", failures.join("\n"));
+}

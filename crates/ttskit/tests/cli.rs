@@ -421,3 +421,94 @@ fn save_unpack_requires_output() {
     assert_eq!(output.status.code(), Some(2));
     assert!(stderr(&output).contains("--output"), "{}", stderr(&output));
 }
+
+#[test]
+fn save_pack_round_trips_and_refuses_to_overwrite() {
+    let tmp = tempfile::tempdir().unwrap();
+    let tree = tmp.path().join("MySave");
+    let input = fixture("containers.json");
+    let unpack = ttskit(&[
+        "save",
+        "unpack",
+        input.to_str().unwrap(),
+        "-o",
+        tree.to_str().unwrap(),
+    ]);
+    assert_eq!(unpack.status.code(), Some(0), "{}", stderr(&unpack));
+
+    let out = tmp.path().join("sub").join("packed.json");
+    let args = [
+        "save",
+        "pack",
+        tree.to_str().unwrap(),
+        "-o",
+        out.to_str().unwrap(),
+        "--keep-eol",
+    ];
+    let output = ttskit(&args);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(
+        stdout(&output).starts_with("Packed "),
+        "{}",
+        stdout(&output)
+    );
+    assert_eq!(std::fs::read(&out).unwrap(), std::fs::read(&input).unwrap());
+
+    // A second run must not touch the existing file.
+    std::fs::write(&out, "mine").unwrap();
+    let output = ttskit(&args);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stderr(&output).contains("already exists"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(std::fs::read(&out).unwrap(), b"mine");
+}
+
+#[test]
+fn save_pack_reports_errors_and_warnings() {
+    let tmp = tempfile::tempdir().unwrap();
+    let tree = tmp.path().join("MySave");
+    let input = fixture("containers.json");
+    ttskit(&[
+        "save",
+        "unpack",
+        input.to_str().unwrap(),
+        "-o",
+        tree.to_str().unwrap(),
+    ]);
+    std::fs::write(tree.join("stray.txt"), "x").unwrap();
+    let out = tmp.path().join("packed.json");
+    let output = ttskit(&[
+        "save",
+        "pack",
+        tree.to_str().unwrap(),
+        "-o",
+        out.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(stderr(&output).contains("warning: ignored unknown file stray.txt"));
+    let value: serde_json::Value = serde_json::from_str(&stdout(&output)).unwrap();
+    assert_eq!(
+        value["warnings"],
+        serde_json::json!(["ignored unknown file stray.txt"])
+    );
+    assert_eq!(value["bytes"], std::fs::metadata(&out).unwrap().len());
+    // Default output is LF only.
+    assert!(!std::fs::read(&out).unwrap().contains(&b'\r'));
+
+    std::fs::write(tree.join("save.json"), "{").unwrap();
+    let out2 = tmp.path().join("other.json");
+    let output = ttskit(&[
+        "save",
+        "pack",
+        tree.to_str().unwrap(),
+        "-o",
+        out2.to_str().unwrap(),
+    ]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(stderr(&output).contains("save.json"), "{}", stderr(&output));
+    assert!(!out2.exists());
+}
