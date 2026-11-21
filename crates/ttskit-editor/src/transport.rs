@@ -45,6 +45,8 @@ pub enum EditorError {
     NotUtf8,
     #[error(transparent)]
     Codec(#[from] CodecError),
+    #[error("a custom message must be a JSON object; the game ignores anything else")]
+    CustomNotObject,
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 }

@@ -14,6 +14,10 @@ use crate::message::{Incoming, ScriptState};
 /// Raw JSON the fake game received, in order.
 type Received = Arc<Mutex<Vec<Value>>>;
 
+/// Decides what the fake game sends back for a received message that is not a
+/// "get scripts" request: it returns the raw documents to push to the editor.
+pub type Responder = Box<dyn Fn(&Value) -> Vec<Value> + Send + Sync>;
+
 pub struct FakeGame {
     addr: SocketAddr,
     received: Received,
@@ -26,6 +30,16 @@ impl FakeGame {
     pub async fn start(
         editor_addr: SocketAddr,
         scripts: Vec<ScriptState>,
+    ) -> std::io::Result<Self> {
+        Self::start_with(editor_addr, scripts, Box::new(|_| Vec::new())).await
+    }
+
+    /// Like [`FakeGame::start`], and every other received message is passed to
+    /// `responder`, whose documents are pushed to the editor in order.
+    pub async fn start_with(
+        editor_addr: SocketAddr,
+        scripts: Vec<ScriptState>,
+        responder: Responder,
     ) -> std::io::Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let addr = listener.local_addr()?;
@@ -41,7 +55,12 @@ impl FakeGame {
                     continue;
                 };
                 let is_get_scripts = value["messageID"] == 0;
-                log.lock().expect("lock").push(value);
+                log.lock().expect("lock").push(value.clone());
+                if !is_get_scripts {
+                    for doc in responder(&value) {
+                        let _ = push_raw(editor_addr, &doc).await;
+                    }
+                }
                 if is_get_scripts {
                     let reply = serde_json::json!({
                         "scriptStates": scripts,

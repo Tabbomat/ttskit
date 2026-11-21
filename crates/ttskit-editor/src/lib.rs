@@ -3,11 +3,13 @@
 //! Unofficial; not affiliated with Berserk Games. See `docs/editor-api.md`
 //! for the observed wire behaviour.
 
+mod exec;
 pub mod fake;
 mod message;
 mod scripts;
 mod transport;
 
+pub use exec::{ExecOutcome, GLOBAL_GUID, LuaError, execute_lua, send_custom};
 pub use message::{CodecError, Incoming, Outgoing, ScriptState};
 pub use scripts::{Desired, FieldChange, ObjectChange, PlanError, ScriptPlan, fetch_scripts, plan};
 pub use transport::{

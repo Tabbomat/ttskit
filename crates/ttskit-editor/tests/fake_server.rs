@@ -176,3 +176,204 @@ async fn fetch_scripts_times_out_without_a_reply() {
     .unwrap_err();
     assert!(matches!(err, EditorError::Timeout(_)), "{err:?}");
 }
+
+// ---- execute Lua and custom messages -------------------------------------
+
+use ttskit_editor::{GLOBAL_GUID, execute_lua, send_custom};
+
+const QUIET: Duration = Duration::from_millis(150);
+
+async fn exec_with(
+    replies: Vec<serde_json::Value>,
+    limit: Duration,
+) -> (
+    Result<ttskit_editor::ExecOutcome, EditorError>,
+    Vec<serde_json::Value>,
+) {
+    let (listener, editor_addr) = editor().await;
+    let game = FakeGame::start_with(
+        editor_addr,
+        vec![],
+        Box::new(move |m| {
+            if m["messageID"] == 3 {
+                replies.clone()
+            } else {
+                vec![]
+            }
+        }),
+    )
+    .await
+    .unwrap();
+    let r = execute_lua(
+        &listener,
+        game.addr(),
+        GLOBAL_GUID,
+        "return 42",
+        limit,
+        QUIET,
+    )
+    .await;
+    (r, game.received())
+}
+
+#[tokio::test]
+async fn exec_sends_guid_and_script_and_reads_the_return_value() {
+    let (r, received) = exec_with(
+        vec![json!({"messageID": 5, "returnValue": {"a": [1, 2]}})],
+        T,
+    )
+    .await;
+    let r = r.unwrap();
+    assert_eq!(r.return_value, Some(json!({"a": [1, 2]})));
+    assert!(r.errors.is_empty());
+    assert_eq!(received[0]["messageID"], 3);
+    assert_eq!(received[0]["guid"], "-1");
+    assert_eq!(received[0]["script"], "return 42");
+}
+
+#[tokio::test]
+async fn exec_collects_prints_until_quiet_and_has_no_return_value() {
+    let (r, _) = exec_with(
+        vec![
+            json!({"messageID": 2, "message": "one"}),
+            json!({"messageID": 2, "message": "two"}),
+        ],
+        T,
+    )
+    .await;
+    let r = r.unwrap();
+    assert_eq!(r.prints, ["one", "two"]);
+    assert_eq!(r.return_value, None);
+}
+
+#[tokio::test]
+async fn exec_without_any_reply_is_an_empty_outcome_not_an_error() {
+    let (r, _) = exec_with(vec![], T).await;
+    assert_eq!(r.unwrap(), ttskit_editor::ExecOutcome::default());
+}
+
+#[tokio::test]
+async fn exec_reports_lua_errors() {
+    let (r, _) = exec_with(
+        vec![json!({
+            "messageID": 3, "guid": "-1",
+            "error": "[Global] executeScript:(1,5-13): boom",
+            "errorMessagePrefix": "[Global] Lua Error <executeScript>: boom"
+        })],
+        T,
+    )
+    .await;
+    let r = r.unwrap();
+    assert_eq!(r.errors.len(), 1);
+    assert_eq!(r.errors[0].guid, "-1");
+    assert!(r.errors[0].error.contains("boom"));
+}
+
+#[tokio::test]
+async fn exec_error_for_unknown_guid_keeps_the_games_prefix() {
+    let (r, _) = exec_with(
+        vec![json!({
+            "messageID": 3, "guid": "-1", "error": "zzzzzz",
+            "errorMessagePrefix": "Error finding guid for execute script: "
+        })],
+        T,
+    )
+    .await;
+    assert_eq!(
+        r.unwrap().errors[0].prefix,
+        "Error finding guid for execute script: "
+    );
+}
+
+#[tokio::test]
+async fn exec_skips_unrelated_and_broken_messages() {
+    let (r, _) = exec_with(
+        vec![
+            json!({"messageID": 7, "guid": "abc"}),
+            json!({"messageID": 2}),
+            json!({"messageID": 5, "returnValue": 1}),
+        ],
+        T,
+    )
+    .await;
+    assert_eq!(r.unwrap().return_value, Some(json!(1)));
+}
+
+#[tokio::test]
+async fn exec_stops_at_the_limit_when_messages_keep_coming() {
+    // A chatty game keeps the quiet window from ever elapsing.
+    let (listener, editor_addr) = editor().await;
+    let game = FakeGame::start(editor_addr, vec![]).await.unwrap();
+    let addr = game.addr();
+    let spam = tokio::spawn(async move {
+        for _ in 0..40 {
+            let _ = game
+                .push(
+                    editor_addr,
+                    &Incoming::Print {
+                        message: "tick".into(),
+                    },
+                )
+                .await;
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+        game
+    });
+    let started = std::time::Instant::now();
+    let r = execute_lua(
+        &listener,
+        addr,
+        "-1",
+        "x",
+        Duration::from_millis(400),
+        Duration::from_millis(300),
+    )
+    .await
+    .unwrap();
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert!(!r.prints.is_empty());
+    spam.abort();
+}
+
+#[tokio::test]
+async fn exec_fails_when_the_game_is_not_running() {
+    let (listener, _) = editor().await;
+    let dead = {
+        let l = tokio::net::TcpListener::bind(any_local()).await.unwrap();
+        l.local_addr().unwrap()
+    };
+    let err = execute_lua(&listener, dead, "-1", "x", T, QUIET)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, EditorError::Connect { .. }), "{err:?}");
+}
+
+#[tokio::test]
+async fn custom_message_is_delivered_as_an_object() {
+    let (_l, editor_addr) = editor().await;
+    let game = FakeGame::start(editor_addr, vec![]).await.unwrap();
+    send_custom(game.addr(), json!({"hello": "world"}), T)
+        .await
+        .unwrap();
+    for _ in 0..40 {
+        if !game.received().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let got = game.received();
+    assert_eq!(got[0]["messageID"], 2);
+    assert_eq!(got[0]["customMessage"], json!({"hello": "world"}));
+}
+
+#[tokio::test]
+async fn custom_message_that_is_not_an_object_is_refused_before_sending() {
+    let dead = {
+        let l = tokio::net::TcpListener::bind(any_local()).await.unwrap();
+        l.local_addr().unwrap()
+    };
+    for bad in [json!(5), json!("s"), json!([1]), json!(null)] {
+        let err = send_custom(dead, bad, T).await.unwrap_err();
+        assert!(matches!(err, EditorError::CustomNotObject), "{err:?}");
+    }
+}
