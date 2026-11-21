@@ -214,7 +214,63 @@ Limitations:
   running.
 - The game's own scripts print at any time; nothing ties a line to a request.
 
-## Flags and exit codes of `ttskit editor`
+### `ttskit watch DIR [--include LIB...] [--once] [--pack-to SAVE.json]`
+
+A fast edit loop on top of `save-and-play`. Not under `editor` because it also
+reads the tree and can write the packed save.
+
+```
+ttskit save unpack mysave.json -o mymod
+ttskit watch mymod --include lib
+```
+
+- Watches `DIR` and every `--include` directory recursively (the `notify`
+  crate). Nothing is pushed at start; the first push follows the first change.
+- A change starts a push only after `--debounce-ms` (default 300) without
+  further file events, so a burst of writes from an editor is one push. Each
+  write restarts the wait.
+- A push packs the tree in memory exactly like `save pack --include`
+  (markers, `require` and `<Include/>` bundling), reads the live scripts and
+  sends Save & Play for the objects that changed, each with both fields from
+  the live state (the same planning as `editor save-and-play`). Nothing
+  changed means nothing is sent and the game is not reloaded.
+- **No `--yes`**: running `watch` is the consent to reload the game on every
+  push, which discards unsaved changes in it. Scripts or UI that the source
+  lacks but the game has are deleted, as with `save-and-play --allow-delete`.
+- Only scripts and UI are pushed. When another file of the tree changes (for
+  example `object.json`, `save.json`, `state.json`) the output says so: that
+  needs a full `save pack` and loading the save in the game. Editor temp files
+  (`~`, `.swp`, `.tmp`), hidden directories (`.git`, `.ttskit`) and
+  directories are ignored; in an include directory only `.lua`, `.ttslua` and
+  `.xml` files count.
+- A bundling or pack error, an unreachable game or a refused plan is printed
+  to standard error and the watch keeps running. A broken file watcher or an
+  unusable listener ends it with exit status 1.
+- The game's `print` output and Lua errors are shown as in `editor console`,
+  including those the reload itself produces (`onLoad`). Messages that arrive
+  while a push is waiting for the script list are dropped.
+- `--pack-to SAVE.json` also writes the packed save on every change: atomically
+  (temporary file next to it, then rename), only when the content changed, and
+  an existing file is overwritten. A failed write is a warning; the push still
+  happens.
+- `--once` packs, pushes once and exits (for editor tasks), then shows console
+  output until `--quiet-ms` (default 1000) pass without a message. Exit status
+  as above: 0, 1 for a bad tree or a refused plan, 3 if the game is
+  unreachable.
+- Ctrl+C stops the watch with exit status 0.
+
+Manual check (needs the game; every push reloads it): with a tree that holds
+the global script, run `ttskit watch DIR --include LIB --pack-to out.json`,
+then (1) write the script several times in quick succession, (2) edit a module
+in `LIB`, (3) `touch` `save.json`, (4) require a module that does not exist,
+(5) fix it with a script that prints and raises an error in `onLoad`. Observed:
+(1) and (2) give one push each and the print from the reload appears; (3)
+prints the note and pushes nothing; (4) prints the module error and keeps
+watching; (5) pushes, shows the `print` and the Lua error with its object
+GUID; `out.json` holds the packed save after each push. An unchanged tree with
+`--once` leaves the game alone.
+
+## Flags and exit codes of `ttskit editor` and `ttskit watch`
 
 Every subcommand takes `--game-port`, `--editor-port` and `--timeout SECONDS`
 (connecting, sending and reading one message) and `--json`. `exec` and

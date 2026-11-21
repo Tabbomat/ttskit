@@ -17,7 +17,7 @@ mods. Not affiliated with or endorsed by Berserk Games.
   directory, a committed manifest of asset URLs (done), and a scan of the
   asset URLs a save uses (done).
 - **External Editor API client (done):** talk to a running game to read and write
-  scripts, run Lua and capture console output.
+  scripts, run Lua and capture console output; `watch` pushes edits on save.
 - **MCP server:** expose the editor API to AI assistants.
 
 ## Building
@@ -39,6 +39,13 @@ policy and how to test against real saves locally.
 ```
 ttskit editor console --follow
 ttskit editor console --json            # one-shot, one JSON object per line
+```
+
+For a fast edit loop, `ttskit watch DIR [--include LIB...]` watches an unpacked directory and, after a debounced change, bundles the scripts and UI and sends them to the running game with Save & Play (which reloads it, so unsaved changes in the game are lost). The game's `print` output and Lua errors show in the same terminal. `--once` pushes a single time for editor tasks, `--pack-to SAVE.json` also writes the packed save on every change.
+
+```
+ttskit save unpack mysave.json -o mymod
+ttskit watch mymod --include lib
 ```
 
 All subcommands share `--game-port`, `--editor-port`, `--timeout` and `--json`, and exit with 0 (success), 1 (failure), 2 (usage error) or 3 (the game is not reachable). Messages the game sends while no `ttskit` listener is running are lost. Details, observed behaviour and limits: [docs/editor-api.md](docs/editor-api.md).
