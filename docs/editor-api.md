@@ -82,8 +82,14 @@ single-player game (only the table, default Global script):
   when it is a JSON object. A number or string is ignored without any error or
   reply. The game does not acknowledge a delivered message.
 
-Game saved (6) and object created (7) were not captured; their framing is
-assumed to be the same and is covered only by the fake server.
+**After Save & Play (observed):** the game sends "game saved" (ID 6, with
+`savePath`) about 10 ms later, then "loaded" (ID 1, with the `scriptStates` of
+the reloaded game and `savePath`) once the reload is done (about 0.6 s for a
+small save), then the output of `onLoad` (prints and errors). The reply to
+"get scripts" also carries `savePath`, the full path of the loaded save.
+
+Object created (7) was not captured; its framing is assumed to be the same and
+is covered only by the fake server.
 
 ## Commands
 
@@ -109,12 +115,21 @@ it. The command guards against that:
 - It always fetches the live state first and compares. Only objects whose
   script or UI differ are sent; every sent object carries **both** fields in
   full (an unchanged field is sent exactly as the game has it). Line endings
-  alone (CRLF vs LF) are not a change.
+  alone (CRLF vs LF) are not a change, and neither is one trailing newline:
+  the game drops exactly one trailing newline from every script and UI it is
+  sent (observed: `"x\n"` is stored as `"x"`, `"x\n\t\n"` as `"x\n\t"`), so a
+  file that ends with a newline matches the game's copy without it.
 - It prints a diff of every change. Without `--yes` nothing is sent;
   `--dry-run` never sends, even with `--yes`.
 - A field that has text in the game but none in the source is a `delete`. It
   is refused unless `--allow-delete` is given, and is then sent as an explicit
   empty string.
+- Global (`-1`) is never deleted: a Global script or UI missing from the source
+  leaves the game's text alone. Observed: an empty Global UI or script makes
+  the game put its default UI comment or default script back, so the deletion
+  would show up again on every run. Once, the game also stopped accepting
+  editor connections right after an empty Global script, until it was
+  restarted (the cause is unclear; the game had also lost focus).
 - Objects only in the game are left alone. The game lists only objects that
   have a script or UI. A source object that has one but is not listed gets its
   first script added (verified); it is shown as "not listed by the game". The
@@ -270,6 +285,81 @@ watching; (5) pushes, shows the `print` and the Lua error with its object
 GUID; `out.json` holds the packed save after each push. An unchanged tree with
 `--once` leaves the game alone.
 
+### `ttskit mcp`
+
+A Model Context Protocol server on stdio (the `rmcp` crate) for AI assistants.
+Stdout carries only the protocol; it exits 0 when the client closes stdin.
+`--root DIR` (default: the working directory) and the shared `--game-port`,
+`--editor-port` and `--timeout` flags configure it. Setup for clients: see the
+README.
+
+- **Port use:** every tool call binds the editor port only while it runs, and
+  the calls are serialized, so they never compete for it. Between calls the
+  port is free for `ttskit watch`, `editor console` or another integration; a
+  call while one of them holds it fails with the busy-port error. A server
+  that owns the port and buffers messages is a separate issue.
+- **Results:** JSON text, using the same structures as the `--json` output of
+  the CLI. Failures the assistant should see (game unreachable, busy port,
+  timeout, Lua error, refused plan) are tool results with `isError: true` and
+  a JSON body with `error` and `gameUnreachable`. Invalid arguments are
+  rejected by the schema before anything is sent.
+- `get_status`: a "get scripts" round trip; reports `gameReachable`,
+  `savePath`, `objectsWithScripts`, ports, root and version. It never fails:
+  an unreachable game or a busy port is `gameReachable: false` with `error`.
+- `get_scripts`: without arguments, guid, name and the byte sizes of script
+  and UI of every listed object, plus `savePath`. With `guids`, the full
+  script and UI of those objects and the `missing` GUIDs that the game does not
+  list.
+- `execute_lua`: as `editor exec --json` (`guid`, `prints`, `errors`, `ok`,
+  `returnValue` only if sent). `guid` defaults to `-1`, `quiet_ms` to 1000. A
+  Lua error makes the result an error, with the hints for an unknown GUID or
+  an object without a script.
+- `send_custom_message`: `message` must be a JSON object (checked by the
+  schema); returns `{"sent": true}`. The game does not acknowledge it.
+- `get_console`: collects `print` output and Lua errors (`editor console
+  --json` objects) until `quiet_ms` (default 1000) pass without a message or
+  `max_ms` (default `--timeout`, at most 60000) in total. Only what arrives
+  during the call is returned.
+- `save_and_play`: `dir` is a tree written by `save unpack`, `include` a list
+  of library directories, both relative to the root or absolute, and both
+  must resolve inside the root (`..` is refused, symlinks are resolved first).
+  The plan is the one `editor save-and-play` makes, with the same rules.
+  - Without `confirm` nothing is sent. The result holds `changes`,
+    `untouched`, the `diff` as the CLI prints it, `deletes` and a
+    `fingerprint`: 16 hex digits of a SHA-256 over every change (GUID,
+    listed, and the kind, old and new text of script and UI).
+  - With `confirm` set to the fingerprint of the current plan, it is sent. A
+    fingerprint that no longer matches (the tree or the game changed) is
+    refused with the new plan and fingerprint. A plan that deletes something
+    also needs `allow_delete: true`.
+  - After sending it waits up to `--timeout` for the game's "loaded" message,
+    then collects console output until `quiet_ms` (default 1000) pass without
+    a message. The result has `sent: true`, `reloaded` and `console`. Without a
+    "loaded" message in time, `reloaded` is false and a `note` says that the
+    output may be incomplete.
+  - Nothing changed: nothing is sent and the game is not reloaded.
+
+Manual check (needs the game; Save & Play reloads it): drive `ttskit mcp
+--root DIR` from a small stdio client (or an assistant), with `DIR`
+holding a tree unpacked from the loaded save.
+
+1. `get_status`, then `get_scripts` with and without `guids`.
+2. `execute_lua` with a print, with `error()`, with a syntax error, with an
+   unknown GUID and in an object without a script.
+3. `send_custom_message` after defining `onExternalMessage` with
+   `execute_lua`, then `get_console` while `Wait.time` prints.
+4. `save_and_play` with no change, with a changed Global script that prints
+   and raises an error in `onLoad` (plan, then confirm), with a stale
+   fingerprint, with a deleted object script (refused, then `allow_delete`),
+   with a first script for an object without one, with an unknown GUID,
+   with an `include` bundle, and with paths outside the root.
+
+Observed on Windows with a new single-player game. Every tool behaved as
+described above: the `onLoad` print and error came back in the confirm result
+together with `reloaded: true`, a source GUID the game does not have was
+sent without effect, and paths with `..` or outside the root were refused
+before the game was contacted.
+
 ## Flags and exit codes of `ttskit editor` and `ttskit watch`
 
 Every subcommand takes `--game-port`, `--editor-port` and `--timeout SECONDS`
@@ -284,6 +374,11 @@ prints one object per line so that it can stream.
 | 1      | Failure: a Lua error in `exec`, a refused plan, bad input, a busy port, a timeout |
 | 2      | Command line usage error (from the argument parser)                             |
 | 3      | The game did not accept a connection (not running, or not listening)            |
+
+On Windows a refused connection to a local port is only reported after about
+2 seconds (observed), because the connection attempt is retried. With
+`--timeout 2` or less, an absent game therefore shows up as a timeout (status
+1, and `gameUnreachable: false` in `ttskit mcp`) instead of status 3.
 
 ## Workshop mods
 

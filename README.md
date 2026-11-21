@@ -4,10 +4,8 @@ An unofficial command line toolkit (and MCP server) for developing
 [Tabletop Simulator](https://store.steampowered.com/app/286160/Tabletop_Simulator/)
 mods. Not affiliated with or endorsed by Berserk Games.
 
-> **Status:** early development. Only the `cloud` commands (`list`,
-> `upload`, `url`, `delete`, `status`, `restore`, `sync push`, `sync pull`,
-> `manifest`, `import-tsv` and `scan`) work so far; see the issue tracker for the
-> roadmap.
+> **Status:** early development. The `cloud`, `save`, `editor`, `watch` and
+> `mcp` commands work; see the issue tracker for the roadmap.
 
 ## Planned features
 
@@ -18,7 +16,7 @@ mods. Not affiliated with or endorsed by Berserk Games.
   asset URLs a save uses (done).
 - **External Editor API client (done):** talk to a running game to read and write
   scripts, run Lua and capture console output; `watch` pushes edits on save.
-- **MCP server:** expose the editor API to AI assistants.
+- **MCP server (done):** expose the editor API to AI assistants.
 
 ## Building
 
@@ -51,6 +49,47 @@ ttskit watch mymod --include lib
 All subcommands share `--game-port`, `--editor-port`, `--timeout` and `--json`, and exit with 0 (success), 1 (failure), 2 (usage error) or 3 (the game is not reachable). Messages the game sends while no `ttskit` listener is running are lost. Details, observed behaviour and limits: [docs/editor-api.md](docs/editor-api.md).
 
 Shell completions are not generated yet (tracked in the issue tracker); until then `ttskit editor --help` and `ttskit editor <command> --help` list every flag.
+
+## MCP server
+
+`ttskit mcp` runs a [Model Context Protocol](https://modelcontextprotocol.io/) server on stdio, so an AI assistant can work with the running game: read scripts, run Lua, push an edited tree with Save & Play and read the errors. It is a client of the same External Editor API as the `editor` commands, with the same safeguards; nothing here needs Steam.
+
+| Tool | What it does |
+| --- | --- |
+| `get_status` | Whether the game answers, the loaded save, ports and root |
+| `get_scripts` | Summary of all objects with a script or UI; with `guids`, their full text |
+| `execute_lua` | Run Lua in Global or an object and return prints and Lua errors |
+| `send_custom_message` | Send a JSON object to the game's `onExternalMessage` |
+| `get_console` | Collect `print` output and Lua errors for a short time |
+| `save_and_play` | Send the scripts and UI of an unpacked tree and reload the game |
+
+Safeguards and limits:
+
+- `save_and_play` never sends on the first call: it returns the diff and a fingerprint of the plan. Only a second call with `confirm` set to that fingerprint sends, and only if the plan is still the same. Deleting a script or UI that the tree lacks also needs `allow_delete`.
+- `save_and_play` only reads paths inside the server's root: the working directory, or `--root DIR`. Paths with `..` are refused.
+- Each tool call holds the editor port (39998) only while it runs, so `ttskit watch` or another editor integration can use it in between. Messages the game sends between calls are lost; `save_and_play` returns the console output of the reload it causes.
+- `--game-port`, `--editor-port` and `--timeout` work as for the `editor` commands.
+
+Claude Code, from the directory with the unpacked mod (writes `.mcp.json` for the project):
+
+```
+claude mcp add --scope project ttskit -- ttskit mcp
+```
+
+Any client that takes an `mcpServers` JSON configuration, such as Claude Desktop (`claude_desktop_config.json`) or a project `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "ttskit": {
+      "command": "ttskit",
+      "args": ["mcp", "--root", "C:\\path\\to\\mymod"]
+    }
+  }
+}
+```
+
+Use the full path to `ttskit.exe` as `command` if it is not on `PATH`. Details: [docs/editor-api.md](docs/editor-api.md#ttskit-mcp).
 
 ## Steam Cloud
 
