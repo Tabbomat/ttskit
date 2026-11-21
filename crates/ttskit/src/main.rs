@@ -5,6 +5,8 @@ mod save;
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+
+use editor::CliError;
 use std::time::SystemTime;
 
 use clap::{Parser, Subcommand};
@@ -35,6 +37,15 @@ enum Command {
         #[command(subcommand)]
         command: EditorCommand,
     },
+}
+
+/// How long to keep listening after the last message (shared by `exec` and
+/// `console`).
+#[derive(clap::Args)]
+struct QuietWindow {
+    /// Stop after this many milliseconds without a message
+    #[arg(long, default_value_t = 1000, value_name = "MILLISECONDS")]
+    quiet_ms: u64,
 }
 
 /// Ports of the External Editor API.
@@ -110,12 +121,32 @@ enum EditorCommand {
         /// GUID of the object to run in; the default `-1` is Global
         #[arg(long, default_value = ttskit_editor::GLOBAL_GUID)]
         guid: String,
-        /// Stop collecting output after this many milliseconds without a message
-        #[arg(long, default_value_t = 1000, value_name = "MILLISECONDS")]
-        wait: u64,
+        #[command(flatten)]
+        quiet: QuietWindow,
         /// Print machine-readable JSON instead of text
         #[arg(long)]
         json: bool,
+        #[command(flatten)]
+        ports: EditorPorts,
+    },
+    /// Print the game's `print` output and Lua errors, stamped on arrival
+    ///
+    /// Without --follow, listens until --quiet-ms pass without a message (or
+    /// --timeout seconds in total) and exits 0; with --follow, runs until
+    /// Ctrl+C. Only messages that arrive while this runs are seen, and it holds
+    /// the editor port, so other `editor` commands cannot run meanwhile. The
+    /// game sends no timestamp and no origin for `print`; a Lua error shows the
+    /// GUID of the failing object. Lua errors are output and do not change the
+    /// exit status. `--json` prints one JSON object per line.
+    Console {
+        /// Keep running until interrupted instead of exiting when output stops
+        #[arg(long, conflicts_with_all = ["quiet_ms"])]
+        follow: bool,
+        /// Print one JSON object per line instead of text
+        #[arg(long)]
+        json: bool,
+        #[command(flatten)]
+        quiet: QuietWindow,
         #[command(flatten)]
         ports: EditorPorts,
     },
@@ -447,14 +478,14 @@ fn config_dir_of(config: &Path) -> &Path {
     }
 }
 
-fn run_simple(command: Command) -> Result<(), String> {
+fn run_simple(command: Command) -> Result<(), CliError> {
     match command {
         Command::Editor {
             command: EditorCommand::GetScripts { json, ports },
         } => {
             let mut out = std::io::stdout().lock();
             editor::get_scripts(ports.endpoints(), json, &mut out)?;
-            out.flush().map_err(|e| e.to_string())
+            out.flush().map_err(|e| e.to_string().into())
         }
         Command::Editor {
             command:
@@ -478,22 +509,42 @@ fn run_simple(command: Command) -> Result<(), String> {
                 json,
             };
             editor::save_and_play(&desired, ports.endpoints(), options, &mut out)?;
-            out.flush().map_err(|e| e.to_string())
+            out.flush().map_err(|e| e.to_string().into())
         }
         Command::Editor {
             command:
                 EditorCommand::Exec {
                     code,
                     guid,
-                    wait,
+                    quiet,
                     json,
                     ports,
                 },
         } => {
             let mut out = std::io::stdout().lock();
-            let wait = std::time::Duration::from_millis(wait);
+            let wait = std::time::Duration::from_millis(quiet.quiet_ms);
             editor::exec(&code, &guid, wait, json, ports.endpoints(), &mut out)?;
-            out.flush().map_err(|e| e.to_string())
+            out.flush().map_err(|e| e.to_string().into())
+        }
+        Command::Editor {
+            command:
+                EditorCommand::Console {
+                    follow,
+                    json,
+                    quiet,
+                    ports,
+                },
+        } => {
+            let mode = if follow {
+                editor::ConsoleMode::Follow
+            } else {
+                editor::ConsoleMode::Once {
+                    quiet: std::time::Duration::from_millis(quiet.quiet_ms),
+                }
+            };
+            let mut out = std::io::stdout().lock();
+            editor::console(mode, json, ports.endpoints(), &mut out)?;
+            out.flush().map_err(|e| e.to_string().into())
         }
         Command::Editor {
             command:
@@ -505,7 +556,7 @@ fn run_simple(command: Command) -> Result<(), String> {
         } => {
             let mut out = std::io::stdout().lock();
             editor::send_message(&message, json, ports.endpoints(), &mut out)?;
-            out.flush().map_err(|e| e.to_string())
+            out.flush().map_err(|e| e.to_string().into())
         }
         Command::Save {
             command:
@@ -525,7 +576,7 @@ fn run_simple(command: Command) -> Result<(), String> {
                 dry_run,
             };
             save::unpack(&save, &output, safety, json, &mut out)?;
-            out.flush().map_err(|e| e.to_string())
+            out.flush().map_err(|e| e.to_string().into())
         }
         Command::Save {
             command:
@@ -551,7 +602,7 @@ fn run_simple(command: Command) -> Result<(), String> {
                 ..ttskit_core::PackOptions::new(keep_eol)
             };
             save::pack(&dir, &output, safety, &options, json, &mut out, &mut err)?;
-            out.flush().map_err(|e| e.to_string())
+            out.flush().map_err(|e| e.to_string().into())
         }
         Command::Cloud {
             command: CloudCommand::List { folder, json },
@@ -560,7 +611,7 @@ fn run_simple(command: Command) -> Result<(), String> {
             let mut out = std::io::stdout().lock();
             cloud::list(backend.as_ref(), folder.as_deref(), json, &mut out)
                 .map_err(|e| e.to_string())?;
-            out.flush().map_err(|e| e.to_string())
+            out.flush().map_err(|e| e.to_string().into())
         }
         Command::Cloud {
             command:
@@ -590,7 +641,7 @@ fn run_simple(command: Command) -> Result<(), String> {
                     .map_err(|e| e.to_string())?;
                 }
             }
-            out.flush().map_err(|e| e.to_string())
+            out.flush().map_err(|e| e.to_string().into())
         }
         Command::Cloud {
             command:
@@ -648,7 +699,7 @@ fn run_simple(command: Command) -> Result<(), String> {
                 &mut out,
             )
             .map_err(|e| e.to_string())?;
-            out.flush().map_err(|e| e.to_string())
+            out.flush().map_err(|e| e.to_string().into())
         }
         Command::Cloud {
             command:
@@ -678,7 +729,7 @@ fn run_simple(command: Command) -> Result<(), String> {
                 &mut out,
             )
             .map_err(|e| e.to_string())?;
-            out.flush().map_err(|e| e.to_string())
+            out.flush().map_err(|e| e.to_string().into())
         }
         Command::Cloud {
             command:
@@ -708,7 +759,7 @@ fn run_simple(command: Command) -> Result<(), String> {
                 &mut out,
             )
             .map_err(|e| e.to_string())?;
-            out.flush().map_err(|e| e.to_string())
+            out.flush().map_err(|e| e.to_string().into())
         }
         Command::Cloud {
             command:
@@ -752,7 +803,7 @@ fn run_simple(command: Command) -> Result<(), String> {
                 &mut out,
             )
             .map_err(|e| e.to_string())?;
-            out.flush().map_err(|e| e.to_string())
+            out.flush().map_err(|e| e.to_string().into())
         }
         Command::Cloud {
             command:
@@ -797,7 +848,7 @@ fn run_simple(command: Command) -> Result<(), String> {
                 &mut out,
             )
             .map_err(|e| e.to_string())?;
-            out.flush().map_err(|e| e.to_string())
+            out.flush().map_err(|e| e.to_string().into())
         }
         Command::Cloud {
             command:
@@ -816,7 +867,7 @@ fn run_simple(command: Command) -> Result<(), String> {
             };
             let mut out = std::io::stdout().lock();
             cloud::show_manifest(&file, format, &mut out).map_err(|e| e.to_string())?;
-            out.flush().map_err(|e| e.to_string())
+            out.flush().map_err(|e| e.to_string().into())
         }
         Command::Cloud {
             command:
@@ -843,7 +894,7 @@ fn run_simple(command: Command) -> Result<(), String> {
                 &mut out,
             )
             .map_err(|e| e.to_string())?;
-            out.flush().map_err(|e| e.to_string())
+            out.flush().map_err(|e| e.to_string().into())
         }
         Command::Cloud {
             command:
@@ -860,7 +911,7 @@ fn run_simple(command: Command) -> Result<(), String> {
             if !adopt {
                 let mut out = std::io::stdout().lock();
                 cloud::scan(&save, json, occurrences, &mut out).map_err(|e| e.to_string())?;
-                return out.flush().map_err(|e| e.to_string());
+                return out.flush().map_err(|e| e.to_string().into());
             }
             // Do all the local work before connecting to Steam.
             let scan = cloud::read_scan(&save)
@@ -881,13 +932,16 @@ fn run_simple(command: Command) -> Result<(), String> {
                 &mut out,
             )
             .map_err(|e| e.to_string())?;
-            out.flush().map_err(|e| e.to_string())
+            out.flush().map_err(|e| e.to_string().into())
         }
         Command::Cloud {
             command: CloudCommand::Status { .. },
         } => unreachable!("handled by run"),
     }
 }
+
+/// Exit code of `editor` commands when the game does not accept a connection.
+const EXIT_GAME_UNREACHABLE: u8 = 3;
 
 /// Exit code of `cloud status`: 0 in sync, 2 otherwise.
 fn status_exit_code(in_sync: bool) -> ExitCode {
@@ -899,7 +953,7 @@ fn status_exit_code(in_sync: bool) -> ExitCode {
 }
 
 /// Runs the command; the exit code is 0 unless the command says otherwise.
-fn run(cli: Cli) -> Result<ExitCode, String> {
+fn run(cli: Cli) -> Result<ExitCode, CliError> {
     match cli.command {
         Command::Cloud {
             command:
@@ -949,9 +1003,13 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
 fn main() -> ExitCode {
     match run(Cli::parse()) {
         Ok(code) => code,
-        Err(message) => {
-            eprintln!("error: {message}");
-            ExitCode::FAILURE
+        Err(error) => {
+            eprintln!("error: {error}");
+            if error.game_unreachable {
+                ExitCode::from(EXIT_GAME_UNREACHABLE)
+            } else {
+                ExitCode::FAILURE
+            }
         }
     }
 }

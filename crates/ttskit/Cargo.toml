@@ -21,7 +21,7 @@ jiff = "0.2"
 serde_json = "1"
 similar = "2"
 thiserror = "2"
-tokio = { version = "1", features = ["rt", "net", "time", "io-util"] }
+tokio = { version = "1", features = ["rt", "net", "time", "io-util", "macros", "signal"] }
 ttskit-cloud = { path = "../ttskit-cloud" }
 ttskit-core = { path = "../ttskit-core" }
 ttskit-editor = { path = "../ttskit-editor" }

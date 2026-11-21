@@ -9,7 +9,8 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use similar::TextDiff;
 use ttskit_editor::{
-    Desired, EditorError, FieldChange, Listener, ObjectChange, ScriptPlan, ScriptState, send,
+    ConsoleEvent, Desired, EditorError, FieldChange, Listener, ObjectChange, ScriptPlan,
+    ScriptState, send,
 };
 
 /// Where the two ends of the API live.
@@ -32,15 +33,47 @@ impl Endpoints {
     }
 }
 
-fn runtime() -> Result<tokio::runtime::Runtime, String> {
+fn runtime() -> Result<tokio::runtime::Runtime, CliError> {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .map_err(|e| format!("cannot start async runtime: {e}"))
+        .map_err(|e| CliError::from(format!("cannot start async runtime: {e}")))
 }
 
-fn editor_err(e: EditorError) -> String {
-    e.to_string()
+/// A command failure. `game_unreachable` selects exit status 3: the game did
+/// not accept a connection (it is not running, or not listening).
+#[derive(Debug)]
+pub struct CliError {
+    pub message: String,
+    pub game_unreachable: bool,
+}
+
+impl std::fmt::Display for CliError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl From<String> for CliError {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            game_unreachable: false,
+        }
+    }
+}
+
+impl From<&str> for CliError {
+    fn from(message: &str) -> Self {
+        message.to_owned().into()
+    }
+}
+
+fn editor_err(e: EditorError) -> CliError {
+    CliError {
+        game_unreachable: matches!(e, EditorError::Connect { .. }),
+        message: e.to_string(),
+    }
 }
 
 fn len_of(s: &Option<String>) -> usize {
@@ -49,14 +82,14 @@ fn len_of(s: &Option<String>) -> usize {
 
 /// `ttskit editor get-scripts`: list (or with `json`, dump) the scripts and UI
 /// of the loaded game. Read-only.
-pub fn get_scripts(ep: Endpoints, json: bool, out: &mut dyn Write) -> Result<(), String> {
+pub fn get_scripts(ep: Endpoints, json: bool, out: &mut dyn Write) -> Result<(), CliError> {
     let rt = runtime()?;
     let scripts = rt.block_on(async {
         let listener = Listener::bind(ep.editor).await?;
         ttskit_editor::fetch_scripts(&listener, ep.game, ep.timeout).await
     });
     let scripts = scripts.map_err(editor_err)?;
-    write_scripts(&scripts, json, out).map_err(|e| e.to_string())
+    write_scripts(&scripts, json, out).map_err(|e| e.to_string().into())
 }
 
 fn write_scripts(scripts: &[ScriptState], json: bool, out: &mut dyn Write) -> std::io::Result<()> {
@@ -220,7 +253,7 @@ pub fn save_and_play(
     ep: Endpoints,
     options: SaveAndPlayOptions,
     out: &mut dyn Write,
-) -> Result<(), String> {
+) -> Result<(), CliError> {
     let rt = runtime()?;
     rt.block_on(async {
         let listener = Listener::bind(ep.editor).await.map_err(editor_err)?;
@@ -234,7 +267,7 @@ pub async fn save_and_play_with(
     ep: Endpoints,
     options: SaveAndPlayOptions,
     out: &mut dyn Write,
-) -> Result<(), String> {
+) -> Result<(), CliError> {
     let io = |e: std::io::Error| e.to_string();
     let live = ttskit_editor::fetch_scripts(listener, ep.game, ep.timeout)
         .await
@@ -348,7 +381,7 @@ pub fn exec(
     json: bool,
     ep: Endpoints,
     out: &mut dyn Write,
-) -> Result<(), String> {
+) -> Result<(), CliError> {
     let rt = runtime()?;
     rt.block_on(async {
         let listener = Listener::bind(ep.editor).await.map_err(editor_err)?;
@@ -364,7 +397,7 @@ pub async fn exec_with(
     json: bool,
     ep: Endpoints,
     out: &mut dyn Write,
-) -> Result<(), String> {
+) -> Result<(), CliError> {
     let io = |e: std::io::Error| e.to_string();
     let outcome = ttskit_editor::execute_lua(listener, ep.game, guid, code, ep.timeout, wait)
         .await
@@ -383,7 +416,15 @@ pub async fn exec_with(
     }
     match outcome.errors.as_slice() {
         [] => Ok(()),
-        errors => Err(errors.iter().map(error_text).collect::<Vec<_>>().join("\n")),
+        errors => Err(errors
+            .iter()
+            .map(error_text)
+            .collect::<Vec<_>>()
+            .join(
+                "
+",
+            )
+            .into()),
     }
 }
 
@@ -393,17 +434,135 @@ pub fn send_message(
     json: bool,
     ep: Endpoints,
     out: &mut dyn Write,
-) -> Result<(), String> {
+) -> Result<(), CliError> {
     let value: Value =
         serde_json::from_str(message).map_err(|e| format!("the message is not valid JSON: {e}"))?;
     let rt = runtime()?;
     rt.block_on(ttskit_editor::send_custom(ep.game, value, ep.timeout))
         .map_err(editor_err)?;
     if json {
-        writeln!(out, "{}", json!({ "sent": true })).map_err(|e| e.to_string())
+        writeln!(out, "{}", json!({ "sent": true })).map_err(|e| e.to_string().into())
     } else {
         writeln!(out, "Sent; the game does not acknowledge custom messages.")
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string().into())
+    }
+}
+
+// ---- console -----------------------------------------------------------
+
+/// How long `console` listens.
+#[derive(Debug, Clone, Copy)]
+pub enum ConsoleMode {
+    /// Stop after `quiet` without a message, or after the total timeout.
+    Once { quiet: Duration },
+    /// Run until stopped (Ctrl+C).
+    Follow,
+}
+
+fn event_json(at: &jiff::Timestamp, event: &ConsoleEvent) -> Value {
+    match event {
+        ConsoleEvent::Print { message } => {
+            json!({ "time": at.to_string(), "type": "print", "message": message })
+        }
+        ConsoleEvent::Error(e) => json!({
+            "time": at.to_string(),
+            "type": "error",
+            "guid": e.guid,
+            "error": e.error,
+            "message": error_text(e),
+        }),
+    }
+}
+
+fn write_event(
+    at: jiff::Timestamp,
+    event: &ConsoleEvent,
+    json: bool,
+    out: &mut dyn Write,
+) -> std::io::Result<()> {
+    if json {
+        writeln!(out, "{}", event_json(&at, event))?;
+    } else {
+        let time = at
+            .to_zoned(jiff::tz::TimeZone::system())
+            .strftime("%H:%M:%S%.3f");
+        match event {
+            ConsoleEvent::Print { message } => writeln!(out, "{time} print  {message}")?,
+            ConsoleEvent::Error(e) => {
+                writeln!(out, "{time} error  [{}] {}", e.guid, error_text(e))?
+            }
+        }
+    }
+    // A followed stream must show up at once, also when stdout is a pipe.
+    out.flush()
+}
+
+/// `ttskit editor console`: print the game's `print` output and Lua errors as
+/// they arrive, stamped with the time they reached this program (the game
+/// sends no time). Only messages that arrive while this runs are seen. Ends
+/// when `stop` completes. Lua errors are output, not failures.
+pub fn console(
+    mode: ConsoleMode,
+    json: bool,
+    ep: Endpoints,
+    out: &mut dyn Write,
+) -> Result<(), CliError> {
+    let rt = runtime()?;
+    rt.block_on(async {
+        let listener = Listener::bind(ep.editor).await.map_err(editor_err)?;
+        let stop = async {
+            let _ = tokio::signal::ctrl_c().await;
+        };
+        console_with(&listener, mode, json, ep, out, stop).await
+    })
+}
+
+pub async fn console_with(
+    listener: &Listener,
+    mode: ConsoleMode,
+    json: bool,
+    ep: Endpoints,
+    out: &mut dyn Write,
+    stop: impl Future<Output = ()>,
+) -> Result<(), CliError> {
+    let io = |e: std::io::Error| e.to_string();
+    tokio::pin!(stop);
+    let deadline = tokio::time::Instant::now() + ep.timeout;
+    loop {
+        let next = listener.next_message(ep.timeout);
+        let result = match mode {
+            ConsoleMode::Follow => tokio::select! {
+                r = next => r,
+                () = &mut stop => return Ok(()),
+            },
+            ConsoleMode::Once { quiet } => {
+                let until = (tokio::time::Instant::now() + quiet).min(deadline);
+                tokio::select! {
+                    r = tokio::time::timeout_at(until, next) => match r {
+                        Ok(r) => r,
+                        Err(_) => return Ok(()),
+                    },
+                    () = &mut stop => return Ok(()),
+                }
+            }
+        };
+        match result {
+            Ok(message) => {
+                if let Some(event) = ConsoleEvent::from_incoming(message) {
+                    write_event(jiff::Timestamp::now(), &event, json, out).map_err(io)?;
+                }
+            }
+            // One bad message must not end a stream.
+            Err(
+                e @ (EditorError::Codec(_)
+                | EditorError::Timeout(_)
+                | EditorError::TooLarge
+                | EditorError::NotUtf8),
+            ) => {
+                eprintln!("warning: skipped a message: {e}");
+            }
+            Err(e) => return Err(editor_err(e)),
+        }
     }
 }
 
@@ -454,7 +613,7 @@ mod tests {
         live: Vec<ScriptState>,
         desired: Vec<Desired>,
         options: SaveAndPlayOptions,
-    ) -> (Result<(), String>, String, Vec<Value>) {
+    ) -> (Result<(), CliError>, String, Vec<Value>) {
         let (listener, game, ep) = setup(live).await;
         let mut out = Vec::new();
         let r = save_and_play_with(&listener, &desired, ep, options, &mut out).await;
@@ -486,7 +645,7 @@ mod tests {
             opts,
         )
         .await;
-        assert!(r.unwrap_err().contains("--yes"));
+        assert!(r.unwrap_err().message.contains("--yes"));
         assert!(out.contains("-old") && out.contains("+new"), "{out}");
         assert!(sent.is_empty());
     }
@@ -539,7 +698,7 @@ mod tests {
             YES,
         )
         .await;
-        assert!(r.unwrap_err().contains("--allow-delete"));
+        assert!(r.unwrap_err().message.contains("--allow-delete"));
         assert!(out.contains("ui: delete"), "{out}");
         assert!(sent.is_empty());
     }
@@ -583,7 +742,7 @@ mod tests {
             YES,
         )
         .await;
-        assert!(r.unwrap_err().contains("more than once"));
+        assert!(r.unwrap_err().message.contains("more than once"));
         assert!(sent.is_empty());
     }
 
@@ -625,7 +784,7 @@ mod tests {
         assert_eq!(found[2].ui.as_deref(), Some("<b/>"));
     }
 
-    async fn exec_run(replies: Vec<Value>, json: bool) -> (Result<(), String>, String) {
+    async fn exec_run(replies: Vec<Value>, json: bool) -> (Result<(), CliError>, String) {
         let listener = Listener::bind("127.0.0.1:0".parse().unwrap())
             .await
             .unwrap();
@@ -696,7 +855,11 @@ mod tests {
             false,
         )
         .await;
-        assert!(r.unwrap_err().contains("Lua Error <executeScript>: boom"));
+        assert!(
+            r.unwrap_err()
+                .message
+                .contains("Lua Error <executeScript>: boom")
+        );
         assert_eq!(out, "before\n");
     }
 
@@ -708,7 +871,7 @@ mod tests {
             false,
         )
         .await;
-        let e = r.unwrap_err();
+        let e = r.unwrap_err().message;
         assert!(
             e.contains("zzz") && e.contains("already have a script"),
             "{e}"
@@ -724,7 +887,7 @@ mod tests {
             false,
         )
         .await;
-        assert!(r.unwrap_err().contains("has no script"));
+        assert!(r.unwrap_err().message.contains("has no script"));
     }
 
     #[tokio::test]
@@ -755,9 +918,13 @@ mod tests {
     fn send_message_rejects_invalid_json_and_non_objects_without_connecting() {
         let ep = Endpoints::new(1, 2);
         let mut out = Vec::new();
-        let e = send_message("{nope", false, ep, &mut out).unwrap_err();
+        let e = send_message("{nope", false, ep, &mut out)
+            .unwrap_err()
+            .message;
         assert!(e.contains("not valid JSON"), "{e}");
-        let e = send_message("[1]", false, ep, &mut out).unwrap_err();
+        let e = send_message("[1]", false, ep, &mut out)
+            .unwrap_err()
+            .message;
         assert!(e.contains("JSON object"), "{e}");
         assert!(out.is_empty());
     }
@@ -790,5 +957,148 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
         assert_eq!(game.received()[0]["customMessage"], json!({"a": 1}));
+    }
+
+    async fn console_run(
+        mode: ConsoleMode,
+        json: bool,
+        docs: Vec<Value>,
+        stop_after: Option<Duration>,
+    ) -> (Result<(), CliError>, String) {
+        let listener = Listener::bind("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+        let editor = listener.local_addr().unwrap();
+        let game = FakeGame::start(editor, vec![]).await.unwrap();
+        for doc in &docs {
+            game.push_raw(editor, doc).await.unwrap();
+        }
+        let ep = Endpoints {
+            game: game.addr(),
+            editor,
+            timeout: Duration::from_secs(5),
+        };
+        let mut out = Vec::new();
+        let stop = async move {
+            match stop_after {
+                Some(d) => tokio::time::sleep(d).await,
+                None => std::future::pending().await,
+            }
+        };
+        let r = console_with(&listener, mode, json, ep, &mut out, stop).await;
+        (r, String::from_utf8(out).unwrap())
+    }
+
+    const QUIET: ConsoleMode = ConsoleMode::Once {
+        quiet: Duration::from_millis(200),
+    };
+
+    fn print_doc(m: &str) -> Value {
+        json!({"messageID": 2, "message": m})
+    }
+
+    fn error_doc(guid: &str, e: &str) -> Value {
+        json!({"messageID": 3, "guid": guid, "error": e,
+               "errorMessagePrefix": format!("[Obj] Lua Error: {e}")})
+    }
+
+    #[tokio::test]
+    async fn console_prints_prints_and_errors_in_order_and_ignores_other_messages() {
+        let (r, out) = console_run(
+            QUIET,
+            false,
+            vec![
+                print_doc("one"),
+                json!({"messageID": 4, "customMessage": {"a": 1}}),
+                error_doc("a53de1", "boom"),
+                print_doc("two\nlines"),
+            ],
+            None,
+        )
+        .await;
+        r.unwrap();
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 4, "{out}");
+        let after_time = |l: &str| l.split_once(' ').unwrap().1.to_owned();
+        assert_eq!(after_time(lines[0]), "print  one");
+        assert_eq!(
+            after_time(lines[1]),
+            "error  [a53de1] [Obj] Lua Error: boom"
+        );
+        assert_eq!(after_time(lines[2]), "print  two");
+        assert_eq!(lines[3], "lines");
+        // HH:MM:SS.mmm
+        let t = lines[0].split(' ').next().unwrap();
+        assert_eq!(t.len(), 12, "{t}");
+        assert_eq!(&t[2..3], ":");
+        assert_eq!(&t[8..9], ".");
+    }
+
+    #[tokio::test]
+    async fn console_json_is_one_object_per_line_with_a_utc_time() {
+        let (r, out) = console_run(
+            QUIET,
+            true,
+            vec![print_doc("hi"), error_doc("-1", "bad")],
+            None,
+        )
+        .await;
+        r.unwrap();
+        let docs: Vec<Value> = out
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(docs.len(), 2);
+        assert_eq!(docs[0]["type"], "print");
+        assert_eq!(docs[0]["message"], "hi");
+        assert!(docs[0]["time"].as_str().unwrap().ends_with('Z'));
+        assert!(docs[0].get("guid").is_none());
+        assert_eq!(docs[1]["type"], "error");
+        assert_eq!(docs[1]["guid"], "-1");
+        assert_eq!(docs[1]["error"], "bad");
+        assert_eq!(docs[1]["message"], "[Obj] Lua Error: bad");
+    }
+
+    #[tokio::test]
+    async fn console_with_no_output_succeeds_silently() {
+        let (r, out) = console_run(QUIET, false, vec![], None).await;
+        r.unwrap();
+        assert_eq!(out, "");
+    }
+
+    #[tokio::test]
+    async fn console_lua_errors_do_not_fail_the_command() {
+        let (r, out) = console_run(QUIET, false, vec![error_doc("a", "x")], None).await;
+        r.unwrap();
+        assert!(out.contains("error"));
+    }
+
+    #[tokio::test]
+    async fn console_skips_a_broken_message_and_keeps_going() {
+        let (r, out) = console_run(
+            QUIET,
+            false,
+            vec![json!({"messageID": 2, "message": 5}), print_doc("after")],
+            None,
+        )
+        .await;
+        r.unwrap();
+        assert!(out.contains("print  after"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn console_follow_runs_until_stopped() {
+        let started = std::time::Instant::now();
+        let (r, out) = console_run(
+            ConsoleMode::Follow,
+            false,
+            vec![print_doc("early")],
+            Some(Duration::from_millis(600)),
+        )
+        .await;
+        r.unwrap();
+        assert!(out.contains("print  early"));
+        // Longer than the quiet window of a one-shot run.
+        assert!(started.elapsed() >= Duration::from_millis(550));
     }
 }

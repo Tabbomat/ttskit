@@ -830,3 +830,101 @@ fn save_pack_include_bundles_modules_and_names_missing_ones() {
     let packed = std::fs::read_to_string(&out).unwrap();
     assert!(packed.contains("__bundle_register"), "{packed}");
 }
+
+// ---- editor -------------------------------------------------------------
+
+/// A port nothing listens on (bound once, then released).
+fn unused_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+#[test]
+fn editor_commands_exit_3_when_the_game_is_not_reachable() {
+    let game = unused_port().to_string();
+    let editor = unused_port().to_string();
+    let ports = ["--game-port", &game, "--editor-port", &editor];
+    for args in [
+        vec!["editor", "get-scripts"],
+        vec!["editor", "exec", "print(1)"],
+        vec!["editor", "send", "{\"a\":1}"],
+    ] {
+        let mut full = args.clone();
+        full.extend(ports);
+        let output = ttskit(&full);
+        assert_eq!(output.status.code(), Some(3), "{args:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("is Tabletop Simulator running?"),
+            "{args:?}"
+        );
+    }
+}
+
+#[test]
+fn editor_usage_errors_and_lua_free_failures_keep_exit_1_or_2() {
+    // A message that is not a JSON object is refused locally: plain failure.
+    let output = ttskit(&["editor", "send", "[1]"]);
+    assert_eq!(output.status.code(), Some(1));
+    // clap usage errors keep clap's status.
+    let output = ttskit(&["editor", "console", "--follow", "--quiet-ms", "5"]);
+    assert_eq!(output.status.code(), Some(2));
+}
+
+#[test]
+fn exec_and_console_share_the_quiet_ms_flag() {
+    for cmd in ["exec", "console"] {
+        let output = ttskit(&["editor", cmd, "--help"]);
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("--quiet-ms"),
+            "{cmd}"
+        );
+    }
+}
+
+#[test]
+fn console_prints_what_the_game_sends_and_exits_0() {
+    use std::io::Read;
+    use std::process::Stdio;
+    let editor_port = unused_port();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ttskit"))
+        .args(["editor", "console", "--quiet-ms", "700", "--json"])
+        .args(["--editor-port", &editor_port.to_string()])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let editor: std::net::SocketAddr = ([127, 0, 0, 1], editor_port).into();
+    let game = rt
+        .block_on(ttskit_editor::fake::FakeGame::start(editor, vec![]))
+        .unwrap();
+    // The child needs a moment to bind; retry until the first push lands.
+    let mut pushed = false;
+    for _ in 0..100 {
+        let doc = serde_json::json!({"messageID": 2, "message": "from the game"});
+        if rt.block_on(game.push_raw(editor, &doc)).is_ok() {
+            pushed = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(pushed, "console never started listening");
+    let status = child.wait().unwrap();
+    let mut out = String::new();
+    child
+        .stdout
+        .take()
+        .unwrap()
+        .read_to_string(&mut out)
+        .unwrap();
+    assert_eq!(status.code(), Some(0));
+    let v: serde_json::Value = serde_json::from_str(out.lines().next().unwrap()).unwrap();
+    assert_eq!(v["type"], "print");
+    assert_eq!(v["message"], "from the game");
+}
