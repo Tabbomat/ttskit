@@ -78,6 +78,9 @@ pub struct ObjectChange {
     pub name: String,
     pub script: FieldChange,
     pub ui: FieldChange,
+    /// False if the game does not list the object (it has no script or UI yet).
+    /// The game ignores a GUID that does not exist, without an error.
+    pub listed: bool,
     /// The complete state that will be sent for this object.
     pub state: ScriptState,
 }
@@ -95,8 +98,6 @@ pub enum PlanError {
 pub struct ScriptPlan {
     /// Objects that change, in the order the game listed them.
     pub changes: Vec<ObjectChange>,
-    /// Objects of the source the game did not list; they are not sent.
-    pub not_in_game: Vec<String>,
     /// Objects the game listed that the source does not contain; untouched.
     pub untouched: usize,
 }
@@ -165,6 +166,7 @@ pub fn plan(live: &[ScriptState], desired: &[Desired]) -> Result<ScriptPlan, Pla
         plan.changes.push(ObjectChange {
             guid: l.guid.clone(),
             name: l.name.clone(),
+            listed: true,
             state: ScriptState {
                 name: l.name.clone(),
                 guid: l.guid.clone(),
@@ -175,12 +177,35 @@ pub fn plan(live: &[ScriptState], desired: &[Desired]) -> Result<ScriptPlan, Pla
             ui,
         });
     }
+    // Objects the game does not list have no script or UI yet. A first script
+    // is accepted by the game (verified); an object with nothing to add is
+    // skipped.
     let live_guids: HashSet<&str> = live.iter().map(|l| l.guid.as_str()).collect();
-    plan.not_in_game = wanted
-        .keys()
-        .filter(|g| !live_guids.contains(**g))
-        .map(|g| g.to_string())
-        .collect();
+    let mut seen = HashSet::new();
+    for d in desired {
+        if live_guids.contains(d.guid.as_str()) || !seen.insert(d.guid.as_str()) {
+            continue;
+        }
+        let none = None;
+        let script = field(&none, &d.script);
+        let ui = field(&none, &d.ui);
+        if !script.is_change() && !ui.is_change() {
+            continue;
+        }
+        plan.changes.push(ObjectChange {
+            guid: d.guid.clone(),
+            name: String::new(),
+            listed: false,
+            state: ScriptState {
+                name: String::new(),
+                guid: d.guid.clone(),
+                script: full(&script, &none),
+                ui: full(&ui, &none),
+            },
+            script,
+            ui,
+        });
+    }
     Ok(plan)
 }
 
@@ -287,15 +312,21 @@ mod tests {
     }
 
     #[test]
-    fn objects_only_in_one_side_are_not_sent() {
+    fn unlisted_objects_get_a_first_script_only_if_they_have_one() {
         let p = plan(
             &[live("a", Some("s"), None), live("b", Some("s"), None)],
             &[want("a", Some("s"), None), want("c", Some("n"), None)],
         )
         .unwrap();
-        assert!(p.is_empty());
         assert_eq!(p.untouched, 1);
-        assert_eq!(p.not_in_game, vec!["c".to_string()]);
+        // "c" is not listed by the game but has a script: it is sent as a first script.
+        assert_eq!(p.changes.len(), 1);
+        assert!(!p.changes[0].listed);
+        assert_eq!(p.changes[0].script, FieldChange::Add { new: "n".into() });
+        assert_eq!(p.changes[0].state.ui.as_deref(), Some(""));
+        // an unlisted object with nothing to add is skipped
+        let p = plan(&[], &[want("d", Some(""), None)]).unwrap();
+        assert!(p.is_empty());
     }
 
     #[test]

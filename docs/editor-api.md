@@ -92,10 +92,12 @@ it. The command guards against that:
 - A field that has text in the game but none in the source is a `delete`. It
   is refused unless `--allow-delete` is given, and is then sent as an explicit
   empty string.
-- Objects only in the game are left alone. Objects of the source that the game
-  does not list (the game lists only objects that already have a script or
-  UI) are reported and skipped: whether Save & Play accepts a first script for
-  such an object is untested.
+- Objects only in the game are left alone. The game lists only objects that
+  have a script or UI. A source object that has one but is not listed gets its
+  first script added (verified); it is shown as "not listed by the game". The
+  game silently ignores a GUID that does not exist, so a source GUID that is
+  not in the loaded game is sent and has no effect, without an error. Source
+  objects with no script and no UI are never sent.
 - A GUID that occurs several times in the source with different scripts is an
   error (duplicate GUIDs are common in real saves).
 - Nothing changed: nothing is sent and the game is not reloaded.
@@ -110,3 +112,14 @@ built from the live state gave "nothing to do"; appending a comment to one
 object's script changed only that object (594 to 623 bytes), and restoring it
 brought the game back to the original text. Save & Play reloaded the game
 within a few seconds.
+
+Second check on a non-workshop save (68 objects): changing and restoring a
+script worked; adding a script to an object listed only for its UI kept the UI
+intact; removing it needed `--allow-delete`; a first script on an object that
+had neither script nor UI was accepted, and an unknown GUID was ignored.
+
+### Workshop mods
+
+The game prints "cannot commit save changes to a workshop mod" for Save & Play
+on a workshop mod. The scripts still change in the running game, but cannot be
+written back to the mod; work from your own save.

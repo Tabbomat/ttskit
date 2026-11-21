@@ -169,7 +169,15 @@ fn write_field_diff(label: &str, change: &FieldChange, out: &mut dyn Write) -> s
 }
 
 fn write_object(c: &ObjectChange, out: &mut dyn Write) -> std::io::Result<()> {
-    writeln!(out, "{} ({})", c.name, c.guid)?;
+    if c.listed {
+        writeln!(out, "{} ({})", c.name, c.guid)?;
+    } else {
+        writeln!(
+            out,
+            "({}) not listed by the game: no script or UI yet; a first one is added if the object exists",
+            c.guid
+        )?;
+    }
     write_field_diff("script", &c.script, out)?;
     write_field_diff("ui", &c.ui, out)
 }
@@ -184,13 +192,6 @@ fn write_plan(plan: &ScriptPlan, out: &mut dyn Write) -> std::io::Result<()> {
         plan.changes.len(),
         plan.untouched
     )?;
-    if !plan.not_in_game.is_empty() {
-        writeln!(
-            out,
-            "skipped: the game does not list these objects of the source (no script or UI there yet): {}",
-            plan.not_in_game.join(", ")
-        )?;
-    }
     Ok(())
 }
 
@@ -199,11 +200,11 @@ fn plan_json(plan: &ScriptPlan, sent: bool) -> Value {
         "changes": plan.changes.iter().map(|c| json!({
             "guid": c.guid,
             "name": c.name,
+            "listed": c.listed,
             "script": change_name(&c.script),
             "ui": change_name(&c.ui),
         })).collect::<Vec<_>>(),
         "untouched": plan.untouched,
-        "not_in_game": plan.not_in_game,
         "sent": sent,
     })
 }
