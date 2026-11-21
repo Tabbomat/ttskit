@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 
 use serde_json::{Map, Value};
 use ttskit_core::unpack::{compact_state, eol};
-use ttskit_core::{Eol, Save, Unpacked, unpack};
+use ttskit_core::{Eol, Save, Unpacked, WriteOptions, unpack};
 
 const EOLS: [Eol; 2] = [Eol::Crlf, Eol::Lf];
 
@@ -651,4 +651,138 @@ fn write_to_dir_refuses_a_non_empty_dir_and_writes_nothing() {
     std::fs::write(&file_path, "x").unwrap();
     assert!(u.write_to_dir(&file_path).is_err());
     assert_eq!(std::fs::read(&file_path).unwrap(), b"x");
+}
+
+fn write_tree(u: &Unpacked, dir: &std::path::Path) {
+    u.write_to_dir(dir).unwrap();
+}
+
+#[test]
+fn plan_with_force_overwrites_only_what_unpack_creates() {
+    let first = unpack_fixture("containers.json", Eol::Lf);
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("out");
+    write_tree(&first, &out);
+    std::fs::write(out.join("keep.txt"), "mine").unwrap();
+    std::fs::write(out.join("save.json"), "edited").unwrap();
+
+    let opts = WriteOptions {
+        force: true,
+        clean: false,
+    };
+    let plan = first.plan(&out, opts).unwrap();
+    assert_eq!(plan.change, ["save.json"]);
+    assert!(plan.create.is_empty() && plan.remove.is_empty());
+    assert_eq!(plan.unchanged.len(), first.files.len() - 1);
+    // Planning writes nothing.
+    assert_eq!(std::fs::read(out.join("save.json")).unwrap(), b"edited");
+
+    first.apply(&out, &plan).unwrap();
+    let save = first.files.iter().find(|f| f.path == "save.json").unwrap();
+    assert_eq!(std::fs::read(out.join("save.json")).unwrap(), save.data);
+    assert_eq!(std::fs::read(out.join("keep.txt")).unwrap(), b"mine");
+}
+
+#[test]
+fn plan_refuses_a_file_where_a_directory_is_needed() {
+    let u = unpack_fixture("containers.json", Eol::Lf);
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir(tmp.path().join("save.json")).unwrap();
+    let opts = WriteOptions {
+        force: true,
+        clean: false,
+    };
+    assert!(u.plan(tmp.path(), opts).is_err());
+}
+
+#[test]
+fn clean_removes_only_stale_files_of_the_previous_unpack() {
+    let old = unpack_fixture("containers.json", Eol::Lf);
+    let new = unpack_fixture("minimal_save.json", Eol::Lf);
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("out");
+    write_tree(&old, &out);
+    std::fs::write(out.join("keep.txt"), "mine").unwrap();
+    // An unknown file inside a directory of the old tree keeps that directory.
+    let stale_dirs: Vec<&str> = old
+        .files
+        .iter()
+        .map(|f| f.path.as_str())
+        .filter(|p| p.starts_with("objects/") && p.ends_with("/object.json"))
+        .collect();
+    let guarded = stale_dirs[0];
+    let guarded_dir = out.join(guarded.rsplit_once('/').unwrap().0);
+    std::fs::write(guarded_dir.join("notes.txt"), "mine too").unwrap();
+
+    let opts = WriteOptions {
+        force: true,
+        clean: true,
+    };
+    let plan = new.plan(&out, opts).unwrap();
+    let new_paths: HashSet<&str> = new.files.iter().map(|f| f.path.as_str()).collect();
+    let expected: Vec<&str> = old
+        .files
+        .iter()
+        .map(|f| f.path.as_str())
+        .filter(|p| !new_paths.contains(p))
+        .collect();
+    assert!(!expected.is_empty());
+    let mut got: Vec<&str> = plan.remove.iter().map(String::as_str).collect();
+    got.sort_unstable();
+    let mut want = expected.clone();
+    want.sort_unstable();
+    assert_eq!(got, want);
+    assert!(!plan.remove.iter().any(|p| p == "keep.txt"));
+
+    new.apply(&out, &plan).unwrap();
+    assert_eq!(std::fs::read(out.join("keep.txt")).unwrap(), b"mine");
+    assert_eq!(
+        std::fs::read(guarded_dir.join("notes.txt")).unwrap(),
+        b"mine too"
+    );
+    assert!(!guarded_dir.join("object.json").exists());
+    // A directory that became empty is gone, the root stays.
+    let gone = old
+        .files
+        .iter()
+        .map(|f| f.path.as_str())
+        .find(|p| p.starts_with("objects/") && !new_paths.contains(p) && *p != guarded)
+        .and_then(|p| p.rsplit_once('/'))
+        .map(|(d, _)| out.join(d));
+    if let Some(dir) = gone.filter(|d| d != &guarded_dir) {
+        let leftover = std::fs::read_dir(&dir).map(|mut e| e.next().is_some());
+        assert!(!matches!(leftover, Ok(false)), "{} is empty", dir.display());
+    }
+    assert!(out.is_dir());
+}
+
+#[test]
+fn clean_without_metadata_removes_nothing_and_bad_metadata_is_refused() {
+    let u = unpack_fixture("minimal_save.json", Eol::Lf);
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("out");
+    std::fs::create_dir(&out).unwrap();
+    std::fs::write(out.join("keep.txt"), "mine").unwrap();
+    let opts = WriteOptions {
+        force: true,
+        clean: true,
+    };
+    assert!(u.plan(&out, opts).unwrap().remove.is_empty());
+
+    let victim = tmp.path().join("victim.txt");
+    std::fs::write(&victim, "outside").unwrap();
+    std::fs::create_dir(out.join(".ttskit")).unwrap();
+    for bad in [
+        r#"{"files": ["../victim.txt"]}"#,
+        r#"{"files": ["/etc/passwd"]}"#,
+        r#"{"files": ["a\\b"]}"#,
+        r#"{"files": [1]}"#,
+        r#"{"nofiles": []}"#,
+        "not json",
+    ] {
+        std::fs::write(out.join(".ttskit").join("unpack.json"), bad).unwrap();
+        let err = u.plan(&out, opts).unwrap_err();
+        assert!(err.to_string().contains("cannot use"), "{bad}: {err}");
+    }
+    assert!(victim.is_file());
 }

@@ -2,7 +2,8 @@
 //!
 //! [`unpack`] is a pure function: it turns the bytes of a save into an ordered
 //! list of files held in memory ([`Unpacked`]). [`Unpacked::write_to_dir`]
-//! writes them to disk and never overwrites or deletes anything.
+//! writes them to disk; it overwrites or deletes only when asked to (see
+//! [`WriteOptions`]).
 //!
 //! Every field of the save ends up in exactly one file. Extracted fields keep
 //! their key position in `save.json` / `object.json`, where a marker string
@@ -40,6 +41,14 @@ pub enum UnpackError {
     /// The output path exists but is not a directory.
     #[error("output path {} exists and is not a directory", .0.display())]
     NotADirectory(PathBuf),
+    /// The metadata of a previous unpack cannot be used for `--clean`.
+    #[error("cannot use {} to clean: {reason}", path.display())]
+    BadMetadata {
+        /// The metadata file.
+        path: PathBuf,
+        /// What is wrong with it.
+        reason: String,
+    },
     /// Writing a file or directory failed.
     #[error("cannot write {}: {source}", path.display())]
     Io {
@@ -79,41 +88,193 @@ pub struct Unpacked {
     pub report: UnpackReport,
 }
 
+/// How [`Unpacked::plan`] treats an existing output directory.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WriteOptions {
+    /// Allow writing into a non-empty directory. Files that unpack creates are
+    /// overwritten; every other file is left alone.
+    pub force: bool,
+    /// Also remove the files a previous unpack created (listed in its
+    /// metadata) that this unpack no longer creates. Never removes anything
+    /// else.
+    pub clean: bool,
+}
+
+/// What writing an [`Unpacked`] tree into a directory would do. All paths are
+/// relative to the directory and `/` separated.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct WritePlan {
+    /// Files that do not exist yet.
+    pub create: Vec<String>,
+    /// Existing files whose content differs.
+    pub change: Vec<String>,
+    /// Existing files with identical content.
+    pub unchanged: Vec<String>,
+    /// Stale files of a previous unpack (only with [`WriteOptions::clean`]).
+    pub remove: Vec<String>,
+}
+
+/// Reads the `files` list of a previous metadata file. Entries that are not
+/// plain relative paths (absolute, `..`, empty components) are rejected, so a
+/// damaged or hand-made file can never point outside the directory. A missing
+/// metadata file means nothing was tracked.
+fn previous_files(dir: &Path) -> Result<Vec<String>, UnpackError> {
+    let path = dir.join(METADATA_PATH);
+    let bad = |reason: String| UnpackError::BadMetadata {
+        path: path.clone(),
+        reason,
+    };
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(source) => {
+            return Err(UnpackError::Io {
+                path: path.clone(),
+                source,
+            });
+        }
+    };
+    let value: Value = serde_json::from_slice(&bytes).map_err(|e| bad(e.to_string()))?;
+    let Some(Value::Array(files)) = value.get("files") else {
+        return Err(bad("missing `files` list".to_owned()));
+    };
+    let mut out = Vec::with_capacity(files.len());
+    for entry in files {
+        let Value::String(name) = entry else {
+            return Err(bad("`files` must hold strings".to_owned()));
+        };
+        let safe = name
+            .split('/')
+            .all(|c| !c.is_empty() && c != "." && c != ".." && !c.contains(['\\', ':']));
+        if !safe {
+            return Err(bad(format!("unsafe path `{name}` in `files`")));
+        }
+        out.push(name.clone());
+    }
+    Ok(out)
+}
+
 impl Unpacked {
     /// Writes the tree into `dir`.
     ///
     /// `dir` may be missing or an empty directory. If it is a non-empty
     /// directory the call fails before anything is written. Nothing is ever
-    /// overwritten or deleted.
+    /// overwritten or deleted. Use [`Unpacked::plan`] and [`Unpacked::apply`]
+    /// to overwrite or clean.
     pub fn write_to_dir(&self, dir: &Path) -> Result<(), UnpackError> {
+        let plan = self.plan(dir, WriteOptions::default())?;
+        self.apply(dir, &plan)
+    }
+
+    /// Works out what writing into `dir` would do, without changing anything.
+    ///
+    /// Fails if `dir` is a file, if it is a non-empty directory and `force` is
+    /// not set, if a file of the tree would land on something that is not a
+    /// regular file, or (with `clean`) if the previous metadata is unusable.
+    pub fn plan(&self, dir: &Path, options: WriteOptions) -> Result<WritePlan, UnpackError> {
         let io_err = |path: &Path| {
             let path = path.to_owned();
             move |source| UnpackError::Io { path, source }
         };
+        let mut exists = false;
         match std::fs::metadata(dir) {
             Ok(meta) if !meta.is_dir() => return Err(UnpackError::NotADirectory(dir.to_owned())),
             Ok(_) => {
-                let mut entries = std::fs::read_dir(dir).map_err(io_err(dir))?;
-                if entries.next().is_some() {
-                    return Err(UnpackError::NotEmpty(dir.to_owned()));
+                exists = true;
+                if !options.force {
+                    let mut entries = std::fs::read_dir(dir).map_err(io_err(dir))?;
+                    if entries.next().is_some() {
+                        return Err(UnpackError::NotEmpty(dir.to_owned()));
+                    }
                 }
             }
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
             Err(e) => return Err(io_err(dir)(e)),
         }
+        let mut plan = WritePlan::default();
+        for file in &self.files {
+            let mut path = dir.to_owned();
+            path.extend(file.path.split('/'));
+            match std::fs::symlink_metadata(&path) {
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                    plan.create.push(file.path.clone());
+                }
+                Err(e) => return Err(io_err(&path)(e)),
+                Ok(meta) if !meta.is_file() => {
+                    return Err(io_err(&path)(io::Error::other(
+                        "exists and is not a regular file",
+                    )));
+                }
+                Ok(_) => {
+                    let current = std::fs::read(&path).map_err(io_err(&path))?;
+                    if current == file.data {
+                        plan.unchanged.push(file.path.clone());
+                    } else {
+                        plan.change.push(file.path.clone());
+                    }
+                }
+            }
+        }
+        if options.clean && exists {
+            let keep: std::collections::HashSet<&str> =
+                self.files.iter().map(|f| f.path.as_str()).collect();
+            for name in previous_files(dir)? {
+                if keep.contains(name.as_str()) {
+                    continue;
+                }
+                let mut path = dir.to_owned();
+                path.extend(name.split('/'));
+                // Only regular files: a missing one is already gone, and a
+                // directory or link is not something unpack created.
+                if std::fs::symlink_metadata(&path).is_ok_and(|m| m.is_file()) {
+                    plan.remove.push(name);
+                }
+            }
+        }
+        Ok(plan)
+    }
+
+    /// Carries out a plan made by [`Unpacked::plan`] for the same `dir`:
+    /// creates and overwrites files, then removes the stale ones and the
+    /// directories that this leaves empty.
+    pub fn apply(&self, dir: &Path, plan: &WritePlan) -> Result<(), UnpackError> {
+        let io_err = |path: &Path| {
+            let path = path.to_owned();
+            move |source| UnpackError::Io { path, source }
+        };
         std::fs::create_dir_all(dir).map_err(io_err(dir))?;
         for file in &self.files {
+            if plan.unchanged.contains(&file.path) {
+                continue;
+            }
             let mut path = dir.to_owned();
             path.extend(file.path.split('/'));
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent).map_err(io_err(parent))?;
             }
-            let mut out = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&path)
-                .map_err(io_err(&path))?;
+            let mut open = std::fs::OpenOptions::new();
+            open.write(true);
+            if plan.create.contains(&file.path) {
+                open.create_new(true);
+            } else {
+                open.truncate(true);
+            }
+            let mut out = open.open(&path).map_err(io_err(&path))?;
             out.write_all(&file.data).map_err(io_err(&path))?;
+        }
+        for name in &plan.remove {
+            let mut path = dir.to_owned();
+            path.extend(name.split('/'));
+            std::fs::remove_file(&path).map_err(io_err(&path))?;
+            // Remove directories that became empty, never the root. One that
+            // still holds anything fails to go and stays.
+            let mut parent = path.parent();
+            while let Some(p) = parent.filter(|p| *p != dir) {
+                if std::fs::remove_dir(p).is_err() {
+                    break;
+                }
+                parent = p.parent();
+            }
         }
         Ok(())
     }

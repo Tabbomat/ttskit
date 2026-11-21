@@ -20,4 +20,6 @@ pub use save::{
     AssetUrl, HostClass, ObjectView, ObjectViewMut, Occurrence, Save, SaveError, SaveView,
     SaveViewMut,
 };
-pub use unpack::{OutputFile, UnpackError, UnpackReport, Unpacked, unpack};
+pub use unpack::{
+    OutputFile, UnpackError, UnpackReport, Unpacked, WriteOptions, WritePlan, unpack,
+};
