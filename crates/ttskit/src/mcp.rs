@@ -533,3 +533,6 @@ pub fn run(root: Option<&Path>, ep: Endpoints) -> Result<(), CliError> {
 
 #[cfg(test)]
 mod tests;
+
+#[allow(dead_code)] // wired into the server in the next change
+mod buffer;
