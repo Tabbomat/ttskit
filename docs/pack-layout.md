@@ -314,7 +314,7 @@ normalized. In both modes, unpack, pack and unpack again gives an identical tree
 - `layout_eol`: line ending style of the save's JSON layout. Used only by
   `--keep-eol`.
 - `files`: every file unpack created, relative to the root, `/` separated. Used
-  only by `--clean` (#8).
+  only by `unpack --clean`.
 - `eol`: original line ending style of each extracted text file. Used only by
   `--keep-eol`.
 - `mixed_eol`: files whose field had mixed line endings.
@@ -343,12 +343,47 @@ that no longer exist are ignored.
 | A text file starts with a UTF-8 byte order mark | The mark is dropped. |
 | A text file is not valid UTF-8 | Error. |
 
-Errors abort pack before anything is written. `ttskit save pack` also refuses to
-write over an existing output file; #8 adds an explicit way to overwrite.
+Errors abort pack before anything is written.
 
-Unpack never deletes files it did not create. Writing into an existing tree and
-removing stale files are covered by #8: `--clean` removes only files listed in
-`files` of the previous metadata.
+## Safe output handling
+
+Neither command silently destroys data, and output paths are always explicit:
+the save and the output are never searched for in a game directory.
+
+`ttskit save unpack SAVE -o DIR`
+
+| Situation | Behaviour |
+|---|---|
+| `DIR` is missing or empty | The tree is written. |
+| `DIR` is not empty | Refused, nothing is written. |
+| `DIR` is not empty and `--force` (alias `--yes`) | Files unpack creates are written, overwriting existing ones. Every other file is left alone. |
+| `--force --clean` | Also deletes the files listed in `files` of the previous `.ttskit/unpack.json` that this unpack does not create, and directories that this leaves empty. Nothing else is ever deleted. |
+| `--clean` without `--force` | Usage error. |
+| `--dry-run` | Prints `create`, `change` and `remove` lines and a summary, writes and deletes nothing. The same refusals apply, so a dry run predicts the real run. |
+
+- `--clean` removes only regular files named in the previous metadata. Entries
+  that are absolute, contain `..` or a backslash or a drive colon, or an
+  unreadable or malformed metadata file make `--clean` fail before anything is
+  written, so a damaged file can never point outside `DIR`. Without a metadata
+  file `--clean` removes nothing.
+- The metadata is rewritten by every unpack. Files left over from an earlier
+  unpack that ran without `--clean` are no longer tracked, so a later `--clean`
+  does not touch them.
+- A tracked file that was edited is still removed by `--clean`; use
+  `--dry-run` to review the list.
+
+`ttskit save pack DIR -o FILE`
+
+| Situation | Behaviour |
+|---|---|
+| `FILE` does not exist | It is created (with missing parent directories). |
+| `FILE` exists | Refused, nothing is written. |
+| `FILE` exists and `--force` (alias `--yes`) | Overwritten through a temporary file next to it, so a failure leaves the old file. |
+| `--dry-run` | Packs in memory (so errors in the tree are reported), prints whether `FILE` would be created or changed, writes nothing. |
+
+An output path that exists but is not a regular file is always an error.
+
+Unpack never deletes files it did not create.
 
 ## Reserved for later features
 

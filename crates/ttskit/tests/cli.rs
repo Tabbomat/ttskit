@@ -337,7 +337,20 @@ fn save_unpack_json_has_the_documented_shape() {
         .keys()
         .map(String::as_str)
         .collect();
-    assert_eq!(keys, ["output", "objects", "files", "mixed_eol"]);
+    assert_eq!(
+        keys,
+        [
+            "output",
+            "objects",
+            "files",
+            "mixed_eol",
+            "dry_run",
+            "create",
+            "change",
+            "remove",
+            "unchanged"
+        ]
+    );
     assert_eq!(value["output"], out.display().to_string());
     assert_eq!(value["objects"], 23);
     assert_eq!(
@@ -511,4 +524,257 @@ fn save_pack_reports_errors_and_warnings() {
     assert_eq!(output.status.code(), Some(1));
     assert!(stderr(&output).contains("save.json"), "{}", stderr(&output));
     assert!(!out2.exists());
+}
+
+fn unpack_args<'a>(save: &'a str, out: &'a str, extra: &[&'a str]) -> Vec<&'a str> {
+    let mut args = vec!["save", "unpack", save, "-o", out];
+    args.extend_from_slice(extra);
+    args
+}
+
+#[test]
+fn save_unpack_force_overwrites_ttskit_files_and_keeps_unknown_ones() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("tree");
+    let save = fixture("containers.json");
+    let (save, outs) = (save.to_str().unwrap(), out.to_str().unwrap());
+    assert_eq!(ttskit(&unpack_args(save, outs, &[])).status.code(), Some(0));
+    std::fs::write(out.join("keep.txt"), "mine").unwrap();
+    std::fs::write(out.join("save.json"), "edited").unwrap();
+
+    let refused = ttskit(&unpack_args(save, outs, &[]));
+    assert_eq!(refused.status.code(), Some(1));
+    assert!(stderr(&refused).contains("--force"), "{}", stderr(&refused));
+    assert_eq!(std::fs::read(out.join("save.json")).unwrap(), b"edited");
+
+    let forced = ttskit(&unpack_args(save, outs, &["--force"]));
+    assert_eq!(forced.status.code(), Some(0), "{}", stderr(&forced));
+    let text = stdout(&forced);
+    assert!(text.contains("change save.json"), "{text}");
+    assert_ne!(std::fs::read(out.join("save.json")).unwrap(), b"edited");
+    assert_eq!(std::fs::read(out.join("keep.txt")).unwrap(), b"mine");
+
+    // `--yes` is an alias.
+    std::fs::write(out.join("save.json"), "edited").unwrap();
+    let yes = ttskit(&unpack_args(save, outs, &["--yes"]));
+    assert_eq!(yes.status.code(), Some(0), "{}", stderr(&yes));
+}
+
+#[test]
+fn save_unpack_dry_run_lists_the_plan_and_writes_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("tree");
+    let save = fixture("containers.json");
+    let (save, outs) = (save.to_str().unwrap(), out.to_str().unwrap());
+
+    // Missing directory: everything would be created, nothing appears.
+    let dry = ttskit(&unpack_args(save, outs, &["--dry-run"]));
+    assert_eq!(dry.status.code(), Some(0), "{}", stderr(&dry));
+    let text = stdout(&dry);
+    assert!(text.starts_with("Dry run: nothing was written."), "{text}");
+    assert!(text.contains("create save.json"), "{text}");
+    assert!(text.contains("Would unpack "), "{text}");
+    assert!(!out.exists());
+
+    // A non-empty directory is still refused without --force.
+    std::fs::create_dir(&out).unwrap();
+    std::fs::write(out.join("keep.txt"), "mine").unwrap();
+    let refused = ttskit(&unpack_args(save, outs, &["--dry-run"]));
+    assert_eq!(refused.status.code(), Some(1));
+
+    // With --force the plan shows changes and removals.
+    assert_eq!(
+        ttskit(&unpack_args(save, outs, &["--force"])).status.code(),
+        Some(0)
+    );
+    std::fs::write(out.join("save.json"), "edited").unwrap();
+    std::fs::write(out.join("stale.lua"), "old").unwrap();
+    let before = walk_count(&out);
+    let other = fixture("minimal_save.json");
+    let other = other.to_str().unwrap();
+    let dry = ttskit(&unpack_args(
+        other,
+        outs,
+        &["--force", "--clean", "--dry-run"],
+    ));
+    assert_eq!(dry.status.code(), Some(0), "{}", stderr(&dry));
+    let text = stdout(&dry);
+    assert!(text.contains("change save.json"), "{text}");
+    assert!(text.lines().any(|l| l.starts_with("remove ")), "{text}");
+    assert!(
+        !text.contains("stale.lua"),
+        "unknown files are never listed: {text}"
+    );
+    assert_eq!(walk_count(&out), before);
+    assert_eq!(std::fs::read(out.join("save.json")).unwrap(), b"edited");
+
+    let json = ttskit(&unpack_args(
+        other,
+        outs,
+        &["--force", "--dry-run", "--json"],
+    ));
+    let value: serde_json::Value = serde_json::from_str(&stdout(&json)).unwrap();
+    assert_eq!(value["dry_run"], true);
+    let changed = value["change"].as_array().unwrap();
+    assert!(changed.contains(&serde_json::json!("save.json")));
+}
+
+#[test]
+fn save_unpack_clean_removes_only_files_ttskit_created() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("tree");
+    let first = fixture("containers.json");
+    let second = fixture("minimal_save.json");
+    let (first, second, outs) = (
+        first.to_str().unwrap(),
+        second.to_str().unwrap(),
+        out.to_str().unwrap(),
+    );
+    assert_eq!(
+        ttskit(&unpack_args(first, outs, &[])).status.code(),
+        Some(0)
+    );
+    std::fs::write(out.join("keep.txt"), "mine").unwrap();
+    std::fs::write(out.join("objects").join("keep.txt"), "mine too").unwrap();
+
+    // --clean needs --force.
+    let alone = ttskit(&unpack_args(second, outs, &["--clean"]));
+    assert_eq!(alone.status.code(), Some(2));
+
+    // Without --clean stale files stay (and, as the metadata is rewritten,
+    // are forgotten: a later --clean will not touch them).
+    let stale = out.join("objects").join("Outer bag.bag001");
+    let plain = ttskit(&unpack_args(second, outs, &["--force"]));
+    assert_eq!(plain.status.code(), Some(0), "{}", stderr(&plain));
+    assert!(stale.join("object.json").exists());
+    let later = ttskit(&unpack_args(second, outs, &["--force", "--clean"]));
+    assert!(stdout(&later).contains("0 removed"), "{}", stdout(&later));
+    assert!(stale.join("object.json").exists());
+
+    // Start over: the previous unpack is tracked, so --clean removes its leftovers.
+    std::fs::remove_dir_all(&stale).unwrap();
+    assert_eq!(
+        ttskit(&unpack_args(first, outs, &["--force"]))
+            .status
+            .code(),
+        Some(0)
+    );
+    assert!(stale.join("object.json").exists());
+
+    let cleaned = ttskit(&unpack_args(second, outs, &["--force", "--clean"]));
+    assert_eq!(cleaned.status.code(), Some(0), "{}", stderr(&cleaned));
+    let text = stdout(&cleaned);
+    assert!(
+        text.contains("remove objects/Outer bag.bag001/object.json"),
+        "{text}"
+    );
+    assert!(!stale.exists(), "emptied directories are removed");
+    assert!(out.join("script.lua").exists());
+    assert_eq!(std::fs::read(out.join("keep.txt")).unwrap(), b"mine");
+    assert_eq!(
+        std::fs::read(out.join("objects").join("keep.txt")).unwrap(),
+        b"mine too"
+    );
+}
+
+#[test]
+fn save_unpack_help_documents_the_safety_flags() {
+    let output = ttskit(&["save", "unpack", "--help"]);
+    let text = stdout(&output);
+    for needle in ["--force", "--clean", "--dry-run", "unpack.json"] {
+        assert!(text.contains(needle), "{needle} missing: {text}");
+    }
+}
+
+fn unpacked_tree(tmp: &std::path::Path) -> (String, String) {
+    let tree = tmp.join("tree");
+    let input = fixture("containers.json");
+    let unpack = ttskit(&[
+        "save",
+        "unpack",
+        input.to_str().unwrap(),
+        "-o",
+        tree.to_str().unwrap(),
+    ]);
+    assert_eq!(unpack.status.code(), Some(0), "{}", stderr(&unpack));
+    let out = tmp.join("packed.json");
+    (
+        tree.to_str().unwrap().to_owned(),
+        out.to_str().unwrap().to_owned(),
+    )
+}
+
+#[test]
+fn save_pack_force_overwrites_an_existing_save() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (tree, out) = unpacked_tree(tmp.path());
+    std::fs::write(&out, "old").unwrap();
+
+    let refused = ttskit(&["save", "pack", &tree, "-o", &out]);
+    assert_eq!(refused.status.code(), Some(1));
+    assert!(stderr(&refused).contains("--force"), "{}", stderr(&refused));
+    assert_eq!(std::fs::read(&out).unwrap(), b"old");
+
+    let forced = ttskit(&["save", "pack", &tree, "-o", &out, "--force"]);
+    assert_eq!(forced.status.code(), Some(0), "{}", stderr(&forced));
+    assert!(
+        stdout(&forced).starts_with("Packed "),
+        "{}",
+        stdout(&forced)
+    );
+    assert_ne!(std::fs::read(&out).unwrap(), b"old");
+    // No temporary file is left behind.
+    let names: Vec<_> = std::fs::read_dir(tmp.path()).unwrap().flatten().collect();
+    assert_eq!(names.len(), 2);
+
+    // Packing the same tree again is reported as unchanged.
+    let again = ttskit(&["save", "pack", &tree, "-o", &out, "--yes"]);
+    assert!(stdout(&again).contains("(unchanged)"), "{}", stdout(&again));
+}
+
+#[test]
+fn save_pack_dry_run_writes_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (tree, out) = unpacked_tree(tmp.path());
+
+    let dry = ttskit(&["save", "pack", &tree, "-o", &out, "--dry-run"]);
+    assert_eq!(dry.status.code(), Some(0), "{}", stderr(&dry));
+    let text = stdout(&dry);
+    assert!(text.starts_with("Dry run: nothing was written."), "{text}");
+    assert!(text.contains(&format!("create {out}")), "{text}");
+    assert!(text.contains("Would pack "), "{text}");
+    assert!(!std::path::Path::new(&out).exists());
+
+    // An existing file still needs --force, even for a dry run.
+    std::fs::write(&out, "old").unwrap();
+    let refused = ttskit(&["save", "pack", &tree, "-o", &out, "--dry-run"]);
+    assert_eq!(refused.status.code(), Some(1));
+
+    let json = ttskit(&[
+        "save",
+        "pack",
+        &tree,
+        "-o",
+        &out,
+        "--dry-run",
+        "--force",
+        "--json",
+    ]);
+    let value: serde_json::Value = serde_json::from_str(&stdout(&json)).unwrap();
+    assert_eq!(value["dry_run"], true);
+    assert_eq!(value["action"], "change");
+    assert_eq!(std::fs::read(&out).unwrap(), b"old");
+
+    // Errors in the tree are still reported by a dry run.
+    std::fs::write(std::path::Path::new(&tree).join("save.json"), "{").unwrap();
+    let bad = ttskit(&["save", "pack", &tree, "-o", &out, "--dry-run", "--force"]);
+    assert_eq!(bad.status.code(), Some(1));
+}
+
+#[test]
+fn save_pack_help_documents_the_safety_flags() {
+    let text = stdout(&ttskit(&["save", "pack", "--help"]));
+    for needle in ["--force", "--dry-run"] {
+        assert!(text.contains(needle), "{needle} missing: {text}");
+    }
 }

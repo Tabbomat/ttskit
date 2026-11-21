@@ -37,9 +37,22 @@ enum SaveCommand {
     Unpack {
         /// The save file (JSON)
         save: PathBuf,
-        /// The output directory; it must be missing or empty
+        /// The output directory. It must be missing or empty unless --force is given;
+        /// the path is never searched or guessed
         #[arg(short, long, value_name = "DIR")]
         output: PathBuf,
+        /// Write into a non-empty directory: files unpack creates are overwritten,
+        /// all other files are left alone [alias: --yes]
+        #[arg(long, visible_alias = "yes")]
+        force: bool,
+        /// With --force: also delete files a previous unpack created (listed in
+        /// .ttskit/unpack.json) that this unpack no longer creates; never deletes
+        /// anything else
+        #[arg(long, requires = "force")]
+        clean: bool,
+        /// Print the files that would be created, changed or removed and write nothing
+        #[arg(long)]
+        dry_run: bool,
         /// Print machine-readable JSON instead of text
         #[arg(long)]
         json: bool,
@@ -48,9 +61,15 @@ enum SaveCommand {
     Pack {
         /// The directory written by `save unpack`
         dir: PathBuf,
-        /// The save file to write; it must not exist yet
+        /// The save file to write; it must not exist yet unless --force is given
         #[arg(short, long, value_name = "FILE")]
         output: PathBuf,
+        /// Overwrite an existing output file [alias: --yes]
+        #[arg(long, visible_alias = "yes")]
+        force: bool,
+        /// Print whether the output file would be created or changed and write nothing
+        #[arg(long)]
+        dry_run: bool,
         /// Keep the line endings recorded at unpack (default: LF everywhere)
         #[arg(long)]
         keep_eol: bool,
@@ -324,10 +343,23 @@ fn config_dir_of(config: &Path) -> &Path {
 fn run_simple(command: Command) -> Result<(), String> {
     match command {
         Command::Save {
-            command: SaveCommand::Unpack { save, output, json },
+            command:
+                SaveCommand::Unpack {
+                    save,
+                    output,
+                    force,
+                    clean,
+                    dry_run,
+                    json,
+                },
         } => {
             let mut out = std::io::stdout().lock();
-            save::unpack(&save, &output, json, &mut out)?;
+            let safety = save::Safety {
+                force,
+                clean,
+                dry_run,
+            };
+            save::unpack(&save, &output, safety, json, &mut out)?;
             out.flush().map_err(|e| e.to_string())
         }
         Command::Save {
@@ -335,13 +367,20 @@ fn run_simple(command: Command) -> Result<(), String> {
                 SaveCommand::Pack {
                     dir,
                     output,
+                    force,
+                    dry_run,
                     keep_eol,
                     json,
                 },
         } => {
             let mut out = std::io::stdout().lock();
             let mut err = std::io::stderr().lock();
-            save::pack(&dir, &output, keep_eol, json, &mut out, &mut err)?;
+            let safety = save::Safety {
+                force,
+                clean: false,
+                dry_run,
+            };
+            save::pack(&dir, &output, safety, keep_eol, json, &mut out, &mut err)?;
             out.flush().map_err(|e| e.to_string())
         }
         Command::Cloud {
