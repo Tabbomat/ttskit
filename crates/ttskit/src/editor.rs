@@ -220,7 +220,7 @@ fn write_object(c: &ObjectChange, out: &mut dyn Write) -> std::io::Result<()> {
     write_field_diff("ui", &c.ui, out)
 }
 
-fn write_plan(plan: &ScriptPlan, out: &mut dyn Write) -> std::io::Result<()> {
+pub(crate) fn write_plan(plan: &ScriptPlan, out: &mut dyn Write) -> std::io::Result<()> {
     for c in &plan.changes {
         write_object(c, out)?;
     }
@@ -233,7 +233,7 @@ fn write_plan(plan: &ScriptPlan, out: &mut dyn Write) -> std::io::Result<()> {
     Ok(())
 }
 
-fn plan_json(plan: &ScriptPlan, sent: bool) -> Value {
+pub(crate) fn plan_json(plan: &ScriptPlan, sent: bool) -> Value {
     json!({
         "changes": plan.changes.iter().map(|c| json!({
             "guid": c.guid,

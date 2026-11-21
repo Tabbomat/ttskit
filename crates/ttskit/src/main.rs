@@ -45,7 +45,7 @@ enum Command {
     /// tool call holds the editor port only while it runs. Exits when stdin
     /// closes.
     Mcp {
-        /// The project directory reported by get_status (default: the current directory)
+        /// Project directory; save_and_play may only read paths inside it (default: the current directory)
         #[arg(long, value_name = "DIR")]
         root: Option<PathBuf>,
         #[command(flatten)]

@@ -22,6 +22,7 @@ notify = "8"
 rmcp = { version = "3.11", features = ["transport-io"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.11"
 similar = "2"
 thiserror = "2"
 tokio = { version = "1", features = ["rt", "net", "time", "io-util", "macros", "signal", "sync"] }
