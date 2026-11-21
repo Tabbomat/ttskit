@@ -88,6 +88,17 @@ the reloaded game and `savePath`) once the reload is done (about 0.6 s for a
 small save), then the output of `onLoad` (prints and errors). The reply to
 "get scripts" also carries `savePath`, the full path of the loaded save.
 
+**Empty Global script (observed):** Save & Play with a Global script of exactly
+`""` makes the game put its default Global script back and stop listening on
+port 39999. The reload itself looks normal (chat, System log and `Player.log`
+show no error), and the game being focused or in the background makes no
+difference. Loading the save again from the menu does not bring the port back;
+pressing Save & Play in the game's own Scripting editor does (as does
+restarting the game). Not affected: a Global script of `" "`, `"--"` or `"\n"`
+(stored as `""`), an empty Global UI, and an empty object script or UI. Since
+`ttskit` cannot repair this from outside, it never sends an empty Global
+script (see `editor save-and-play`).
+
 Object created (7) was not captured; its framing is assumed to be the same and
 is covered only by the fake server.
 
@@ -127,9 +138,9 @@ it. The command guards against that:
 - Global (`-1`) is never deleted: a Global script or UI missing from the source
   leaves the game's text alone. Observed: an empty Global UI or script makes
   the game put its default UI comment or default script back, so the deletion
-  would show up again on every run. Once, the game also stopped accepting
-  editor connections right after an empty Global script, until it was
-  restarted (the cause is unclear; the game had also lost focus).
+  would show up again on every run.
+- An empty Global script is never sent; `"\n"` is sent instead, which the game
+  stores as an empty script. See "Empty Global script" above for why.
 - Objects only in the game are left alone. The game lists only objects that
   have a script or UI. A source object that has one but is not listed gets its
   first script added (verified); it is shown as "not listed by the game". The

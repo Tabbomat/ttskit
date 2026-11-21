@@ -180,6 +180,18 @@ fn keep_global(guid: &str, change: FieldChange) -> FieldChange {
     }
 }
 
+/// The Global script as it is sent. Observed: Save & Play with an empty Global
+/// script makes the game restore its default script and stop listening on its
+/// editor port until Save & Play is pressed in the game. A single newline is
+/// stored as an empty script (the game drops one trailing newline) and keeps
+/// the port open, so it is sent instead of "".
+fn global_script(guid: &str, script: Option<String>) -> Option<String> {
+    match script {
+        Some(s) if s.is_empty() && guid == crate::exec::GLOBAL_GUID => Some("\n".to_owned()),
+        other => other,
+    }
+}
+
 /// A changed field takes the new text, an unchanged one is sent exactly as the
 /// game has it. A deleted or absent field is sent as "", never omitted.
 fn full(change: &FieldChange, live: &Option<String>) -> Option<String> {
@@ -223,7 +235,7 @@ pub fn plan(live: &[ScriptState], desired: &[Desired]) -> Result<ScriptPlan, Pla
             state: ScriptState {
                 name: l.name.clone(),
                 guid: l.guid.clone(),
-                script: full(&script, &l.script),
+                script: global_script(&l.guid, full(&script, &l.script)),
                 ui: full(&ui, &l.ui),
             },
             script,
@@ -252,7 +264,7 @@ pub fn plan(live: &[ScriptState], desired: &[Desired]) -> Result<ScriptPlan, Pla
             state: ScriptState {
                 name: String::new(),
                 guid: d.guid.clone(),
-                script: full(&script, &none),
+                script: global_script(&d.guid, full(&script, &none)),
                 ui: full(&ui, &none),
             },
             script,
@@ -391,6 +403,23 @@ mod tests {
         // Objects other than Global are still deleted.
         let p = plan(&[live("a", Some("s"), None)], &[want("a", None, None)]).unwrap();
         assert!(p.deletes());
+    }
+
+    #[test]
+    fn an_empty_global_script_is_never_sent_as_empty_text() {
+        let g = crate::exec::GLOBAL_GUID;
+        // The game's Global script is empty and only the UI changes.
+        let p = plan(
+            &[live(g, Some(""), Some("<a/>"))],
+            &[want(g, None, Some("<b/>"))],
+        )
+        .unwrap();
+        assert_eq!(p.changes[0].state.script.as_deref(), Some("\n"));
+        let json = p.message().to_value();
+        assert_eq!(json["scriptStates"][0]["script"], "\n");
+        // Other objects still get "" for a deleted script.
+        let p = plan(&[live("a", Some("s"), None)], &[want("a", None, None)]).unwrap();
+        assert_eq!(p.changes[0].state.script.as_deref(), Some(""));
     }
 
     #[test]
