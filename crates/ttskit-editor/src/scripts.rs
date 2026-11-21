@@ -12,6 +12,15 @@ use std::time::Duration;
 use crate::message::{Incoming, Outgoing, ScriptState};
 use crate::transport::{EditorError, Listener, send};
 
+/// The game's answer to "get scripts".
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct LoadedGame {
+    /// Objects with a script or UI, in the order the game lists them.
+    pub script_states: Vec<ScriptState>,
+    /// Full path of the loaded save, if the game reported a non-empty one.
+    pub save_path: Option<String>,
+}
+
 /// Ask the game for all scripts and wait for the answer.
 ///
 /// `limit` bounds the send and the wait for the reply. Other messages that
@@ -21,11 +30,28 @@ pub async fn fetch_scripts(
     game: SocketAddr,
     limit: Duration,
 ) -> Result<Vec<ScriptState>, EditorError> {
+    Ok(fetch_game(listener, game, limit).await?.script_states)
+}
+
+/// Like [`fetch_scripts`], and also returns the path of the loaded save.
+pub async fn fetch_game(
+    listener: &Listener,
+    game: SocketAddr,
+    limit: Duration,
+) -> Result<LoadedGame, EditorError> {
     send(game, &Outgoing::GetScripts, limit).await?;
     let wait = async {
         loop {
             match listener.next_message(limit).await {
-                Ok(Incoming::LoadGame { script_states, .. }) => return Ok(script_states),
+                Ok(Incoming::LoadGame {
+                    script_states,
+                    save_path,
+                }) => {
+                    return Ok(LoadedGame {
+                        script_states,
+                        save_path: save_path.filter(|p| !p.is_empty()),
+                    });
+                }
                 Ok(_) => {}
                 // A broken unrelated message must not hide the reply.
                 Err(EditorError::Codec(_)) => {}
@@ -358,5 +384,44 @@ mod tests {
             &[want("a", Some("1"), None), want("a", Some("1"), None)],
         )
         .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod fetch_tests {
+    use super::*;
+    use crate::fake::FakeGame;
+
+    async fn fetch(save_path: Option<&str>) -> LoadedGame {
+        let listener = Listener::bind("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+        let editor = listener.local_addr().unwrap();
+        let scripts = vec![ScriptState {
+            name: "n".into(),
+            guid: "a".into(),
+            script: Some("s".into()),
+            ui: None,
+        }];
+        let game = match save_path {
+            Some(p) => FakeGame::start_with_save_path(editor, scripts, p).await,
+            None => FakeGame::start(editor, scripts).await,
+        }
+        .unwrap();
+        fetch_game(&listener, game.addr(), Duration::from_secs(5))
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn fetch_game_returns_the_save_path_and_scripts() {
+        let game = fetch(Some("saves/TS_Save_1.json")).await;
+        assert_eq!(game.save_path.as_deref(), Some("saves/TS_Save_1.json"));
+        assert_eq!(game.script_states.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_empty_save_path_is_none() {
+        assert_eq!(fetch(None).await.save_path, None);
     }
 }

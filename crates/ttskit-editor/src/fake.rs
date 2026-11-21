@@ -41,6 +41,25 @@ impl FakeGame {
         scripts: Vec<ScriptState>,
         responder: Responder,
     ) -> std::io::Result<Self> {
+        Self::start_full(editor_addr, scripts, "", responder).await
+    }
+
+    /// Like [`FakeGame::start`], and the "get scripts" reply carries `save_path`.
+    pub async fn start_with_save_path(
+        editor_addr: SocketAddr,
+        scripts: Vec<ScriptState>,
+        save_path: &str,
+    ) -> std::io::Result<Self> {
+        Self::start_full(editor_addr, scripts, save_path, Box::new(|_| Vec::new())).await
+    }
+
+    async fn start_full(
+        editor_addr: SocketAddr,
+        scripts: Vec<ScriptState>,
+        save_path: &str,
+        responder: Responder,
+    ) -> std::io::Result<Self> {
+        let save_path = save_path.to_owned();
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let addr = listener.local_addr()?;
         let received: Received = Arc::default();
@@ -64,7 +83,7 @@ impl FakeGame {
                 if is_get_scripts {
                     let reply = serde_json::json!({
                         "scriptStates": scripts,
-                        "savePath": "",
+                        "savePath": save_path,
                         "messageID": 1
                     });
                     let _ = push_raw(editor_addr, &reply).await;

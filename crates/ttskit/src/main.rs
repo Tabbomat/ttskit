@@ -1,5 +1,6 @@
 mod cloud;
 mod editor;
+mod mcp;
 mod save;
 mod watch;
 
@@ -37,6 +38,18 @@ enum Command {
     Editor {
         #[command(subcommand)]
         command: EditorCommand,
+    },
+    /// Run a Model Context Protocol server on stdio that exposes the editor API to AI assistants (unofficial)
+    ///
+    /// Stdout is reserved for the protocol; diagnostics go to stderr. Every
+    /// tool call holds the editor port only while it runs. Exits when stdin
+    /// closes.
+    Mcp {
+        /// The project directory reported by get_status (default: the current directory)
+        #[arg(long, value_name = "DIR")]
+        root: Option<PathBuf>,
+        #[command(flatten)]
+        ports: EditorPorts,
     },
     /// Push scripts and UI to the running game whenever the unpacked tree changes
     ///
@@ -514,6 +527,7 @@ fn config_dir_of(config: &Path) -> &Path {
 
 fn run_simple(command: Command) -> Result<(), CliError> {
     match command {
+        Command::Mcp { root, ports } => mcp::run(root.as_deref(), ports.endpoints()),
         Command::Watch {
             dir,
             include,

@@ -334,7 +334,7 @@ pub async fn save_and_play_with(
 
 /// The text of a Lua error as the game would show it. The game's prefix
 /// already contains the message for Lua errors, but not for "unknown GUID".
-fn error_text(e: &ttskit_editor::LuaError) -> String {
+pub(crate) fn error_text(e: &ttskit_editor::LuaError) -> String {
     let text = if e.prefix.contains(&e.error) {
         e.prefix.clone()
     } else {
@@ -359,7 +359,7 @@ fn value_text(v: &Value) -> String {
     }
 }
 
-fn exec_json(guid: &str, outcome: &ttskit_editor::ExecOutcome) -> Value {
+pub(crate) fn exec_json(guid: &str, outcome: &ttskit_editor::ExecOutcome) -> Value {
     let mut doc = json!({
         "guid": guid,
         "prints": outcome.prints,
@@ -464,7 +464,7 @@ pub enum ConsoleMode {
     Follow,
 }
 
-fn event_json(at: &jiff::Timestamp, event: &ConsoleEvent) -> Value {
+pub(crate) fn event_json(at: &jiff::Timestamp, event: &ConsoleEvent) -> Value {
     match event {
         ConsoleEvent::Print { message } => {
             json!({ "time": at.to_string(), "type": "print", "message": message })

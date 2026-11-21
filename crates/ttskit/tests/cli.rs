@@ -962,3 +962,107 @@ fn watch_once_fails_on_a_missing_directory() {
     let output = ttskit(&["watch", "does-not-exist-dir", "--once"]);
     assert_eq!(output.status.code(), Some(1));
 }
+
+// ---- mcp ----
+
+fn closed_port() -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.local_addr().unwrap().port()
+}
+
+#[test]
+fn mcp_serves_on_stdio_and_exits_zero_when_stdin_closes() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    let game = closed_port().to_string();
+    let editor = closed_port().to_string();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ttskit"))
+        .args([
+            "mcp",
+            "--game-port",
+            &game,
+            "--editor-port",
+            &editor,
+            "--timeout",
+            "1",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    // Read on a thread so that a hung server fails the test instead of hanging it.
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            if tx.send(line.unwrap()).is_err() {
+                break;
+            }
+        }
+    });
+    let mut send = |doc: serde_json::Value| {
+        writeln!(stdin, "{doc}").unwrap();
+        stdin.flush().unwrap();
+    };
+    let response = |id: u64| -> serde_json::Value {
+        loop {
+            let line = rx
+                .recv_timeout(Duration::from_secs(20))
+                .expect("a response line");
+            let doc: serde_json::Value = serde_json::from_str(&line)
+                .unwrap_or_else(|e| panic!("stdout must carry only JSON-RPC, got {line:?}: {e}"));
+            if doc["id"] == id {
+                return doc;
+            }
+        }
+    };
+    send(serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {},
+            "clientInfo": {"name": "test-client", "version": "0"}
+        }
+    }));
+    assert_eq!(response(1)["result"]["serverInfo"]["name"], "ttskit");
+    send(serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
+    send(serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}));
+    assert_eq!(response(2)["result"]["tools"].as_array().unwrap().len(), 5);
+    send(serde_json::json!({
+        "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+        "params": {"name": "get_status", "arguments": {}}
+    }));
+    let result = response(3)["result"].clone();
+    let text = result["content"][0]["text"].as_str().unwrap();
+    let status: serde_json::Value = serde_json::from_str(text).unwrap();
+    assert_eq!(status["gameReachable"], false);
+    assert!(status["error"].is_string());
+
+    drop(stdin);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            panic!("ttskit mcp did not exit after stdin closed");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert_eq!(status.code(), Some(0));
+}
+
+#[test]
+fn mcp_with_a_missing_root_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("nope");
+    let output = ttskit(&["mcp", "--root", missing.to_str().unwrap()]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(stderr(&output).contains("root"));
+    assert!(stdout(&output).is_empty());
+}
