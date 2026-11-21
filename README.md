@@ -60,14 +60,14 @@ Shell completions are not generated yet (tracked in the issue tracker); until th
 | `get_scripts` | Summary of all objects with a script or UI; with `guids`, their full text |
 | `execute_lua` | Run Lua in Global or an object and return prints and Lua errors |
 | `send_custom_message` | Send a JSON object to the game's `onExternalMessage` |
-| `get_console` | Collect `print` output and Lua errors for a short time |
+| `get_console` | Read buffered `print` output, Lua errors, custom messages, saves and loads |
 | `save_and_play` | Send the scripts and UI of an unpacked tree and reload the game |
 
 Safeguards and limits:
 
 - `save_and_play` never sends on the first call: it returns the diff and a fingerprint of the plan. Only a second call with `confirm` set to that fingerprint sends, and only if the plan is still the same. Deleting a script or UI that the tree lacks also needs `allow_delete`.
 - `save_and_play` only reads paths inside the server's root: the working directory, or `--root DIR`. Paths with `..` are refused.
-- Each tool call holds the editor port (39998) only while it runs, so `ttskit watch` or another editor integration can use it in between. Messages the game sends between calls are lost; `save_and_play` returns the console output of the reload it causes.
+- The server holds the editor port (39998) for its whole life and buffers what the game sends, also between tool calls (1000 events and 4 MiB by default; `--console-buffer` changes the count). Every event has a sequence number, so `get_console` with `since` returns only what is new. While the server runs, `ttskit watch`, `ttskit editor console` and other editor integrations cannot receive from the game; the server does not start if one of them already listens. See [docs/editor-api.md](docs/editor-api.md#ttskit-mcp) for integrations that listen on the wildcard address.
 - `--game-port`, `--editor-port` and `--timeout` work as for the `editor` commands.
 
 Claude Code, from the directory with the unpacked mod (writes `.mcp.json` for the project):

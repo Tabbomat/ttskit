@@ -109,8 +109,18 @@ single-player game (only the table, default Global script):
 **After Save & Play (observed):** the game sends "game saved" (ID 6, with
 `savePath`) about 10 ms later, then "loaded" (ID 1, with the `scriptStates` of
 the reloaded game and `savePath`) once the reload is done (about 0.6 s for a
-small save), then the output of `onLoad` (prints and errors). The reply to
-"get scripts" also carries `savePath`, the full path of the loaded save.
+small save). The output of `onLoad` (prints and errors) comes around it: in a
+later check, the print and the error of Global's `onLoad` arrived just
+before "loaded", and a print from an object's script just after it. The
+reply to "get scripts" also carries `savePath`, the full path of the loaded
+save.
+
+**Without being asked (observed):** the game sends "game saved" (ID 6) for
+an autosave (`savePath` is the autosave file), and "loaded" (ID 1) when a
+save is loaded from the menu, also after the game was restarted. A message
+from Lua's `sendExternalMessage(table)` arrives as ID 4. Spawning an object,
+or setting its script with `setLuaScript`, sent no message (only the new
+script's own `onLoad` print).
 
 **Empty Global script (observed):** Save & Play with a Global script of exactly
 `""` makes the game put its default Global script back and stop listening on
@@ -255,8 +265,8 @@ and Lua errors. Other messages are ignored.
 Limitations:
 
 - Messages sent while no listener is running are lost; the game does not queue
-  or replay them. Start `console` before the action you want to watch. A
-  long-running listener with a buffer is the subject of the MCP issues.
+  or replay them. Start `console` before the action you want to watch.
+  `ttskit mcp` listens for its whole life and buffers what arrives.
 - `console` holds port 39998 while it runs, so no other `editor` command (or
   editor integration) can listen at the same time, and the other way round. A
   busy port is reported as for the other commands.
@@ -324,37 +334,87 @@ GUID; `out.json` holds the packed save after each push. An unchanged tree with
 
 A Model Context Protocol server on stdio (the `rmcp` crate) for AI assistants.
 Stdout carries only the protocol; it exits 0 when the client closes stdin.
-`--root DIR` (default: the working directory) and the shared `--game-port`,
-`--editor-port` and `--timeout` flags configure it. Setup for clients: see the
-README.
+`--root DIR` (default: the working directory), `--console-buffer EVENTS`
+(default 1000) and the shared `--game-port`, `--editor-port` and `--timeout`
+flags configure it. Setup for clients: see the README.
 
-- **Port use:** every tool call binds the editor port only while it runs, and
-  the calls are serialized, so they never compete for it. Between calls the
-  port is free for `ttskit watch`, `editor console` or another integration; a
-  call while one of them holds it fails with the busy-port error. A server
-  that owns the port and buffers messages is a separate issue.
+- **Port use:** the server binds the editor port at start and holds it until
+  it exits. If the port is in use (including the wildcard case described in
+  "Sharing port 39998 with other programs"), it does not start: exit status
+  1 with the busy-port error on stderr. While it runs, `ttskit watch`,
+  `editor console` and the other `editor` commands cannot listen and fail
+  with the busy-port error; their probe is an empty connection that the
+  server skips. Another editor integration that binds `127.0.0.1:39998`
+  gets an error too. One that listens on the wildcard address (Node.js's
+  default) starts without an error but receives nothing while the server
+  runs; stop the server, or that integration, to switch. Requests to the
+  game (port 39999) are not affected: other tools can still send.
+- **Listener failures:** a connection that cannot be read or decoded is
+  counted (`undecodable` in `get_status`) and skipped. Ten accept failures in
+  a row count as a broken listener: it is dropped, `listener.state` becomes
+  `failed` with the error, tools that need replies fail at once with a "not
+  listening" error, and binding the port again is tried every 2 s.
+  `get_console` keeps serving the buffer.
+- **Game restarts:** the listener does not depend on the game. While the game
+  is not running, tools that send fail with `gameUnreachable: true`; when it
+  is back, they work again without restarting the server. The game's
+  messages about saving and loading show up as `saved` and `loaded` events.
+- **Event buffer:** every message the game sends is read, also between tool
+  calls. Console output (`print`), Lua errors (`error`), messages from Lua's
+  `sendExternalMessage` (`custom`), "game saved" (`saved`, ID 6) and
+  "loaded" (`loaded`, ID 1, with `savePath` and `objectsWithScripts` but not
+  the scripts) are buffered, each with a `seq` that increases by one per
+  event from 1 and the time it arrived. The answer to the server's own "get
+  scripts" request is not an event. The buffer keeps at most
+  `--console-buffer` events and 4 MiB of text (messages, errors, custom
+  messages as JSON, paths) and drops the oldest first; the newest event
+  always stays, even if it is larger. Other messages (object pushed, return
+  values, unknown IDs) are not buffered.
 - **Results:** JSON text, using the same structures as the `--json` output of
   the CLI. Failures the assistant should see (game unreachable, busy port,
   timeout, Lua error, refused plan) are tool results with `isError: true` and
   a JSON body with `error` and `gameUnreachable`. Invalid arguments are
   rejected by the schema before anything is sent.
 - `get_status`: a "get scripts" round trip; reports `gameReachable`,
-  `savePath`, `objectsWithScripts`, ports, root and version. It never fails:
-  an unreachable game or a busy port is `gameReachable: false` with `error`.
+  `savePath`, `objectsWithScripts`, ports, root and version, and the
+  server's own state: `listener` (`state` `listening` or `failed`,
+  `address`, `since`, and `error` when failed), `lastMessageAt` (the last
+  message from the game, the round trip's answer included), `buffer`
+  (`events`, `bytes`, `lastSeq`, `evicted`), `undecodable` and
+  `lastUndecodable`. It never fails: an unreachable game or a failed
+  listener is `gameReachable: false` with `error`.
 - `get_scripts`: without arguments, guid, name and the byte sizes of script
   and UI of every listed object, plus `savePath`. With `guids`, the full
   script and UI of those objects and the `missing` GUIDs that the game does not
   list.
 - `execute_lua`: as `editor exec --json` (`guid`, `prints`, `errors`, `ok`,
-  `returnValue` only if sent). `guid` defaults to `-1`, `quiet_ms` to 1000. A
-  Lua error makes the result an error, with the hints for an unknown GUID or
-  an object without a script.
+  `returnValue` only if sent), plus `lastSeq`, the newest `seq` when the
+  call ended. `guid` defaults to `-1`, `quiet_ms` to 1000. A Lua error makes
+  the result an error, with the hints for an unknown GUID or an object
+  without a script. The prints and errors are also in the buffer.
 - `send_custom_message`: `message` must be a JSON object (checked by the
   schema); returns `{"sent": true}`. The game does not acknowledge it.
-- `get_console`: collects `print` output and Lua errors (`editor console
-  --json` objects) until `quiet_ms` (default 1000) pass without a message or
-  `max_ms` (default `--timeout`, at most 60000) in total. Only what arrives
-  during the call is returned.
+- `get_console`: reads the buffer. Events are `editor console --json`
+  objects with `seq` added for `print` and `error`, `{seq, time, type:
+  "custom", customMessage}`, `{seq, time, type: "saved", savePath}` and
+  `{seq, time, type: "loaded", savePath, objectsWithScripts}`.
+  - `since`: only events with a greater `seq`. Without it, the newest
+    `limit` events; `omitted` counts older matching ones left out. A `since`
+    beyond the newest event (for example from before a server restart) is an
+    error.
+  - `kinds`: a list of `print`, `error`, `custom`, `saved`, `loaded`
+    (default: all). An empty list is an error.
+  - `limit`: default 100, 1 to 1000. With `since`, the oldest matching events
+    come first and `more: true` says that others follow.
+  - The result has `events`, `nextSince` (pass it as `since` next time:
+    every event up to it was returned or filtered out), `more`, `omitted` and
+    `dropped`: events after `since` (or all, without it) that the buffer
+    dropped before they were read.
+  - It returns at once. With `wait_ms` (at most 60000) and no matching event
+    yet, it waits up to that long for one, then keeps collecting until
+    `quiet_ms` (default 1000) pass without another match, at most 60 s in
+    all.
+  - It only reads the buffer, so it does not wait for a running tool call.
 - `save_and_play`: `dir` is a tree written by `save unpack`, `include` a list
   of library directories, both relative to the root or absolute, and both
   must resolve inside the root (`..` is refused, symlinks are resolved first).
@@ -369,9 +429,11 @@ README.
     also needs `allow_delete: true`.
   - After sending it waits up to `--timeout` for the game's "loaded" message,
     then collects console output until `quiet_ms` (default 1000) pass without
-    a message. The result has `sent: true`, `reloaded` and `console`. Without a
-    "loaded" message in time, `reloaded` is false and a `note` says that the
-    output may be incomplete.
+    a message. The result has `sent: true`, `reloaded`, `console` (the
+    `print` and `error` events after the send, with `seq`) and `lastSeq`.
+    The `saved` and `loaded` events of the reload are in the buffer. Without
+    a "loaded" message in time, `reloaded` is false and a `note` says that
+    the output may be incomplete (read the rest with `get_console`).
   - Nothing changed: nothing is sent and the game is not reloaded.
 
 Manual check (needs the game; Save & Play reloads it): drive `ttskit mcp
@@ -394,6 +456,32 @@ described above: the `onLoad` print and error came back in the confirm result
 together with `reloaded: true`, a source GUID the game does not have was
 sent without effect, and paths with `..` or outside the root were refused
 before the game was contacted.
+
+Long-running mode, checked on Windows against the game with a small save:
+
+1. `execute_lua` that prints, then prints, sends a custom message and
+   raises an error from `Wait.time` callbacks; no call for 3 s; then
+   `get_console` with `since` set to the `lastSeq` of `execute_lua`.
+   Observed: the later print, the custom message and the error came back
+   with the next `seq` values.
+2. `ttskit editor exec` from another process while the server runs: refused
+   with the busy-port error; the server did not count its probe as
+   undecodable.
+3. `get_console` with `wait_ms` while a `Wait.time` print is pending:
+   returned it about a second later.
+4. `save_and_play` with a Global `onLoad` that prints and raises an error:
+   `console` had both with their `seq` and `lastSeq`; `get_console` showed
+   `saved`, the print, the error, `loaded` and the later prints.
+5. A Node.js listener on port 39998 (the default dual-stack `::`) started
+   first: the server did not start (busy-port error); Node.js saw one empty
+   connection. Started while the server ran: Node.js listened without an
+   error and received nothing; the server kept receiving.
+6. With the server running: an autosave appeared as `saved`; loading
+   another save from the menu as `loaded` with its path; quitting the game
+   gave `gameReachable: false` with the listener still `listening`;
+   starting it again and loading a save brought `loaded` and the `onLoad`
+   output into the buffer, and the tools worked again, without restarting
+   the server.
 
 ## Flags and exit codes of `ttskit editor` and `ttskit watch`
 
