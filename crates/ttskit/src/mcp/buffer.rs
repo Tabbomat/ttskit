@@ -154,6 +154,8 @@ impl Event {
     }
 }
 
+/// Default of `ttskit mcp --console-buffer`.
+#[cfg(test)]
 pub(crate) const DEFAULT_MAX_EVENTS: usize = 1000;
 pub(crate) const MAX_BYTES: usize = 4 * 1024 * 1024;
 

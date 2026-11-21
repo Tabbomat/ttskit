@@ -1066,3 +1066,24 @@ fn mcp_with_a_missing_root_fails() {
     assert!(stderr(&output).contains("root"));
     assert!(stdout(&output).is_empty());
 }
+
+#[test]
+fn mcp_fails_when_the_editor_port_is_in_use() {
+    // Something accepts connections on the port, so the server must not start.
+    let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = held.local_addr().unwrap().port().to_string();
+    let output = ttskit(&["mcp", "--editor-port", &port]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stderr(&output).contains("already in use"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(stdout(&output).is_empty());
+}
+
+#[test]
+fn mcp_console_buffer_must_be_at_least_one() {
+    let output = ttskit(&["mcp", "--console-buffer", "0"]);
+    assert_eq!(output.status.code(), Some(2));
+}

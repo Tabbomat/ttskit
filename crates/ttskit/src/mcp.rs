@@ -1,9 +1,12 @@
 //! `ttskit mcp`: a Model Context Protocol server on stdio that exposes the
 //! External Editor API to AI assistants (unofficial).
 //!
-//! Stdout carries only the protocol. Every tool call binds the editor port
-//! for its own duration and releases it afterwards; a mutex serializes the
-//! calls so that two of them never compete for the port.
+//! Stdout carries only the protocol. The server holds the editor port for
+//! its whole life ([`hub`]): every message the game sends is read, events
+//! (console output, errors, custom messages, saves and loads) are buffered
+//! with sequence numbers, and the tool call that waits for replies gets them
+//! too. A mutex serializes the tool calls that send requests, since the game
+//! ties no reply to its request.
 
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -17,23 +20,31 @@ use rmcp::{RoleServer, ServerHandler, ServiceExt, tool, tool_handler, tool_route
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
-use ttskit_editor::{ConsoleEvent, EditorError, FieldChange, Listener, ScriptPlan};
+use ttskit_editor::{EditorError, FieldChange, MessageSource, ScriptPlan};
+
+use self::buffer::{EventKind, Query};
+use self::hub::{Hub, Replies};
 
 use crate::editor::{
-    CliError, Endpoints, desired_from_tree, editor_err, event_json, exec_json, plan_json, runtime,
-    write_plan,
+    CliError, Endpoints, desired_from_tree, editor_err, exec_json, plan_json, runtime, write_plan,
 };
 
 /// Default quiet window of `execute_lua` and `get_console`, in milliseconds.
 const DEFAULT_QUIET_MS: u64 = 1000;
-/// Upper bound for the total listening time of `get_console`.
+/// Upper bound for the total waiting time of `get_console`.
 const MAX_CONSOLE_MS: u64 = 60_000;
+/// Default and upper bound of `get_console`'s `limit`.
+const DEFAULT_CONSOLE_LIMIT: usize = 100;
+const MAX_CONSOLE_LIMIT: usize = 1000;
 
 const INSTRUCTIONS: &str = "Unofficial client for the Tabletop Simulator External Editor API \
-(not affiliated with Berserk Games). The game must be running with its External Editor ports \
-39999 (game) and 39998 (this server) available. The game sends its output (print, errors) \
-without being asked, but this server only listens while a tool call runs: messages the game \
-sends between tool calls are lost.";
+(not affiliated with Berserk Games). The game must be running and listening on its External \
+Editor port 39999; this server holds port 39998 for its whole life, so no other editor \
+integration can use it meanwhile. Everything the game sends without being asked (print output, \
+Lua errors, custom messages from sendExternalMessage, and the game being saved or loaded) is \
+buffered with increasing sequence numbers (seq); read it with get_console and pass the returned \
+nextSince as `since` next time to get only newer events. execute_lua and save_and_play report \
+lastSeq for the same purpose.";
 
 #[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
@@ -78,10 +89,16 @@ struct SaveAndPlayArgs {
 #[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
 struct GetConsoleArgs {
-    /// Stop after this many milliseconds without a message (default 1000).
+    /// Only events with a seq greater than this (use nextSince of the previous result). Omit for the newest events in the buffer.
+    since: Option<u64>,
+    /// Only these kinds of events (default: all).
+    kinds: Option<Vec<EventKind>>,
+    /// At most this many events (default 100, at most 1000). With `since` the oldest matching ones come first and `more` says whether others follow; without it the newest ones.
+    limit: Option<usize>,
+    /// If no event matches yet, wait up to this many milliseconds for one (default 0: return at once; at most 60000).
+    wait_ms: Option<u64>,
+    /// After waiting brought a match, keep collecting until this many milliseconds pass without another (default 1000).
     quiet_ms: Option<u64>,
-    /// Stop after this many milliseconds in total (default: the server's --timeout; at most 60000).
-    max_ms: Option<u64>,
 }
 
 fn pretty(value: &Value) -> String {
@@ -125,25 +142,44 @@ fn strip_verbatim(path: PathBuf) -> PathBuf {
 struct EditorServer {
     ep: Endpoints,
     root: PathBuf,
-    /// Serializes tool calls: they all use the one editor port.
+    /// Holds the editor port and buffers what the game sends.
+    hub: Arc<Hub>,
+    /// Serializes the tool calls that send requests: the game ties no reply
+    /// to its request, so two of them must not wait at the same time.
     lock: Arc<tokio::sync::Mutex<()>>,
     tool_router: ToolRouter<Self>,
 }
 
 impl EditorServer {
-    fn new(ep: Endpoints, root: PathBuf) -> Self {
-        Self {
+    /// Bind the editor port; the server does not start if it is in use.
+    async fn start(ep: Endpoints, root: PathBuf, max_events: usize) -> Result<Self, CliError> {
+        let hub = Hub::start(ep.editor, ep.timeout, max_events)
+            .await
+            .map_err(editor_err)?;
+        Ok(Self {
             ep,
             root,
+            hub,
             lock: Arc::default(),
             tool_router: Self::tool_router(),
+        })
+    }
+
+    /// Start receiving replies; an error while the listener is down.
+    fn replies(&self) -> Result<Replies<'_>, CliError> {
+        match self.hub.not_listening() {
+            Some(error) => Err(error.into()),
+            None => Ok(self.hub.replies()),
         }
     }
 
-    async fn fetch(&self) -> Result<ttskit_editor::LoadedGame, EditorError> {
+    async fn fetch(&self) -> Result<ttskit_editor::LoadedGame, CliError> {
         let ep = self.ep;
-        let listener = Listener::bind(ep.editor).await?;
-        ttskit_editor::fetch_game(&listener, ep.game, ep.timeout).await
+        let replies = self.replies()?;
+        replies.expect_scripts_reply();
+        ttskit_editor::fetch_game(&replies, ep.game, ep.timeout)
+            .await
+            .map_err(editor_err)
     }
 
     async fn status(&self) -> Value {
@@ -163,13 +199,16 @@ impl EditorServer {
                 doc["savePath"] = json!(game.save_path);
                 doc["objectsWithScripts"] = json!(game.script_states.len());
             }
-            Err(e) => doc["error"] = json!(editor_err(e).message),
+            Err(e) => doc["error"] = json!(e.message),
+        }
+        if let (Value::Object(doc), Value::Object(hub)) = (&mut doc, self.hub.status()) {
+            doc.extend(hub);
         }
         doc
     }
 
     async fn scripts(&self, guids: Option<Vec<String>>) -> Result<Value, CliError> {
-        let game = self.fetch().await.map_err(editor_err)?;
+        let game = self.fetch().await?;
         let text = |s: &Option<String>| s.as_deref().unwrap_or_default().to_owned();
         let Some(guids) = guids.filter(|g| !g.is_empty()) else {
             let objects: Vec<Value> = game
@@ -210,10 +249,64 @@ impl EditorServer {
         }))
     }
 
-    async fn console(&self, quiet: Duration, max: Duration) -> Result<Value, CliError> {
-        let listener = Listener::bind(self.ep.editor).await.map_err(editor_err)?;
-        let events = collect_console(&listener, self.ep.timeout, quiet, max).await?;
-        Ok(json!({ "events": events }))
+    async fn console(&self, args: GetConsoleArgs) -> Result<Value, CliError> {
+        let last = self.hub.last_seq();
+        if let Some(since) = args.since.filter(|s| *s > last) {
+            return Err(format!(
+                "since {since} is ahead of the newest event ({last}); the server may have restarted. Omit since, or pass 0 for everything buffered"
+            )
+            .into());
+        }
+        if args.kinds.as_ref().is_some_and(Vec::is_empty) {
+            return Err("kinds is empty, so nothing could match; omit it for all kinds".into());
+        }
+        let limit = args.limit.unwrap_or(DEFAULT_CONSOLE_LIMIT);
+        if !(1..=MAX_CONSOLE_LIMIT).contains(&limit) {
+            return Err(format!("limit must be between 1 and {MAX_CONSOLE_LIMIT}").into());
+        }
+        let q = Query {
+            since: args.since,
+            kinds: args.kinds,
+            limit,
+        };
+        let cap = Duration::from_millis(MAX_CONSOLE_MS);
+        let wait = Duration::from_millis(args.wait_ms.unwrap_or(0)).min(cap);
+        let quiet = Duration::from_millis(args.quiet_ms.unwrap_or(DEFAULT_QUIET_MS));
+        let mut head = self.hub.watch_head();
+        let mut page = self.hub.query(&q);
+        if page.events.is_empty() && !wait.is_zero() {
+            let start = tokio::time::Instant::now();
+            let first_by = start + wait;
+            while page.events.is_empty() {
+                match tokio::time::timeout_at(first_by, head.changed()).await {
+                    Ok(Ok(())) => page = self.hub.query(&q),
+                    Ok(Err(_)) | Err(_) => break,
+                }
+            }
+            // After the first match, collect until a quiet period brings no new one.
+            let end_by = start + cap;
+            while !page.events.is_empty() && page.events.len() < limit {
+                let until = (tokio::time::Instant::now() + quiet).min(end_by);
+                let seen = page.events.len();
+                while let Ok(Ok(())) = tokio::time::timeout_at(until, head.changed()).await {
+                    page = self.hub.query(&q);
+                    if page.events.len() > seen {
+                        break;
+                    }
+                }
+                if page.events.len() == seen {
+                    break;
+                }
+            }
+        }
+        let events: Vec<Value> = page.events.iter().map(|e| e.to_json()).collect();
+        Ok(json!({
+            "events": events,
+            "nextSince": page.next_since,
+            "more": page.more,
+            "omitted": page.omitted,
+            "dropped": page.dropped,
+        }))
     }
 
     async fn save_and_play_call(&self, args: SaveAndPlayArgs) -> Result<CallToolResult, CliError> {
@@ -226,9 +319,10 @@ impl EditorServer {
             .map(|p| resolve_in_root(&self.root, Path::new(p)))
             .collect::<Result<Vec<_>, _>>()?;
         let desired = desired_from_tree(&dir, includes)?;
-        // One listener for the whole call, so that the reload's output is caught.
-        let listener = Listener::bind(ep.editor).await.map_err(editor_err)?;
-        let live = ttskit_editor::fetch_scripts(&listener, ep.game, ep.timeout)
+        // Replies for the whole call, so that the reload is noticed.
+        let replies = self.replies()?;
+        replies.expect_scripts_reply();
+        let live = ttskit_editor::fetch_scripts(&replies, ep.game, ep.timeout)
             .await
             .map_err(editor_err)?;
         let plan = ttskit_editor::plan(&live, &desired).map_err(|e| e.to_string())?;
@@ -272,15 +366,21 @@ impl EditorServer {
                 "the source has no script or UI for objects that have one in the game, so Save & Play would delete them (marked `delete` in the diff); nothing was sent. Add the missing files, or pass allow_delete: true if that is intended",
             );
         }
+        let before = self.hub.last_seq();
         ttskit_editor::send(ep.game, &plan.message(), ep.timeout)
             .await
             .map_err(editor_err)?;
         // The game answers Save & Play with "saved" (ID 6), then "loaded"
         // (ID 1) when the reload is done, then the output of `onLoad`.
-        let mut console = Vec::new();
-        let reloaded = wait_for_reload(&listener, ep.timeout, &mut console).await?;
+        let reloaded = wait_for_reload(&replies, ep.timeout).await?;
         let quiet = Duration::from_millis(args.quiet_ms.unwrap_or(DEFAULT_QUIET_MS));
-        console.extend(collect_console(&listener, ep.timeout, quiet, ep.timeout).await?);
+        wait_quiet(&replies, ep.timeout, quiet, ep.timeout).await?;
+        let page = self.hub.query(&Query {
+            since: Some(before),
+            kinds: Some(vec![EventKind::Print, EventKind::Error]),
+            limit: usize::MAX,
+        });
+        let console: Vec<Value> = page.events.iter().map(|e| e.to_json()).collect();
         doc["sent"] = json!(true);
         doc["reloaded"] = json!(reloaded);
         if !reloaded {
@@ -289,28 +389,24 @@ impl EditorServer {
                 ep.timeout.as_secs_f64()
             ));
         }
+        if page.dropped > 0 {
+            doc["dropped"] = json!(page.dropped);
+        }
         doc["console"] = json!(console);
+        doc["lastSeq"] = json!(page.next_since);
         Ok(success(&doc))
     }
 }
 
-/// Wait up to `limit` for the game's "loaded" message (ID 1) and collect the
-/// console events that arrive before it. False if none came in time.
-async fn wait_for_reload(
-    listener: &Listener,
-    limit: Duration,
-    events: &mut Vec<Value>,
-) -> Result<bool, CliError> {
+/// Wait up to `limit` for the game's "loaded" message (ID 1). False if none
+/// came in time. The hub buffers the messages before it.
+async fn wait_for_reload(source: &impl MessageSource, limit: Duration) -> Result<bool, CliError> {
     let deadline = tokio::time::Instant::now() + limit;
     loop {
-        match tokio::time::timeout_at(deadline, listener.next_message(limit)).await {
+        match tokio::time::timeout_at(deadline, source.next_message(limit)).await {
             Err(_) => return Ok(false),
             Ok(Ok(ttskit_editor::Incoming::LoadGame { .. })) => return Ok(true),
-            Ok(Ok(message)) => {
-                if let Some(event) = ConsoleEvent::from_incoming(message) {
-                    events.push(event_json(&jiff::Timestamp::now(), &event));
-                }
-            }
+            Ok(Ok(_)) => {}
             Ok(Err(
                 EditorError::Codec(_)
                 | EditorError::Timeout(_)
@@ -322,26 +418,21 @@ async fn wait_for_reload(
     }
 }
 
-/// Collect console events on `listener` until `quiet` of silence or `max` in
+/// Wait until `quiet` passes without a message from the game, or `max` in
 /// total. `read_limit` bounds the reading of one message.
-async fn collect_console(
-    listener: &Listener,
+async fn wait_quiet(
+    source: &impl MessageSource,
     read_limit: Duration,
     quiet: Duration,
     max: Duration,
-) -> Result<Vec<Value>, CliError> {
+) -> Result<(), CliError> {
     let deadline = tokio::time::Instant::now() + max;
-    let mut events = Vec::new();
     loop {
         let until = (tokio::time::Instant::now() + quiet).min(deadline);
-        match tokio::time::timeout_at(until, listener.next_message(read_limit)).await {
-            Err(_) => return Ok(events),
-            Ok(Ok(message)) => {
-                if let Some(event) = ConsoleEvent::from_incoming(message) {
-                    events.push(event_json(&jiff::Timestamp::now(), &event));
-                }
-            }
-            // One bad message must not end the listening.
+        match tokio::time::timeout_at(until, source.next_message(read_limit)).await {
+            Err(_) => return Ok(()),
+            Ok(Ok(_)) => {}
+            // One bad message must not end the waiting.
             Ok(Err(
                 EditorError::Codec(_)
                 | EditorError::Timeout(_)
@@ -439,15 +530,24 @@ impl EditorServer {
             .guid
             .unwrap_or_else(|| ttskit_editor::GLOBAL_GUID.to_owned());
         let quiet = Duration::from_millis(args.quiet_ms.unwrap_or(DEFAULT_QUIET_MS));
-        let outcome = async {
-            let listener = Listener::bind(ep.editor).await?;
-            ttskit_editor::execute_lua(&listener, ep.game, &guid, &args.code, ep.timeout, quiet)
-                .await
-        }
-        .await;
+        let replies = match self.replies() {
+            Ok(r) => r,
+            Err(e) => return failure_of(&e),
+        };
+        let outcome =
+            ttskit_editor::execute_lua(&replies, ep.game, &guid, &args.code, ep.timeout, quiet)
+                .await;
+        drop(replies);
         match outcome {
-            Ok(outcome) if outcome.errors.is_empty() => success(&exec_json(&guid, &outcome)),
-            Ok(outcome) => failure(&exec_json(&guid, &outcome)),
+            Ok(outcome) => {
+                let mut doc = exec_json(&guid, &outcome);
+                doc["lastSeq"] = json!(self.hub.last_seq());
+                if outcome.errors.is_empty() {
+                    success(&doc)
+                } else {
+                    failure(&doc)
+                }
+            }
             Err(e) => failure_of(&editor_err(e)),
         }
     }
@@ -479,16 +579,11 @@ impl EditorServer {
     }
 
     #[tool(
-        description = "Collect the game's print output and Lua errors. Listens until quiet_ms of silence or max_ms in total. Only messages that arrive during the call are returned; messages sent between calls are lost."
+        description = "Read the events the server buffered since it started: the game's print output (type print), Lua errors (error, with the guid of the failing object), messages from sendExternalMessage (custom), and the game being saved (saved) or loaded (loaded, also after save_and_play). Every event has an increasing seq. Pass the result's nextSince as `since` next time to get only newer events; `dropped` counts events after `since` that the bounded buffer no longer holds. Returns at once unless wait_ms is given."
     )]
     async fn get_console(&self, Parameters(args): Parameters<GetConsoleArgs>) -> CallToolResult {
-        let _guard = self.lock.lock().await;
-        let quiet = Duration::from_millis(args.quiet_ms.unwrap_or(DEFAULT_QUIET_MS));
-        let max = args
-            .max_ms
-            .map_or(self.ep.timeout, Duration::from_millis)
-            .min(Duration::from_millis(MAX_CONSOLE_MS));
-        match self.console(quiet, max).await {
+        // Reads the buffer only, so it does not wait for other tool calls.
+        match self.console(args).await {
             Ok(doc) => success(&doc),
             Err(e) => failure_of(&e),
         }
@@ -524,15 +619,18 @@ where
     Ok(())
 }
 
-/// `ttskit mcp`: serve on stdin and stdout until stdin closes.
-pub fn run(root: Option<&Path>, ep: Endpoints) -> Result<(), CliError> {
+/// `ttskit mcp`: hold the editor port and serve on stdin and stdout until
+/// stdin closes. `max_events` bounds the event buffer.
+pub fn run(root: Option<&Path>, ep: Endpoints, max_events: usize) -> Result<(), CliError> {
     let root = resolve_root(root)?;
-    let server = EditorServer::new(ep, root);
-    runtime()?.block_on(serve_on(server, rmcp::transport::stdio()))
+    runtime()?.block_on(async {
+        let server = EditorServer::start(ep, root, max_events).await?;
+        serve_on(server, rmcp::transport::stdio()).await
+    })
 }
 
 #[cfg(test)]
 mod tests;
 
-#[allow(dead_code)] // wired into the server in the next change
 mod buffer;
+mod hub;

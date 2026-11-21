@@ -41,13 +41,17 @@ enum Command {
     },
     /// Run a Model Context Protocol server on stdio that exposes the editor API to AI assistants (unofficial)
     ///
-    /// Stdout is reserved for the protocol; diagnostics go to stderr. Every
-    /// tool call holds the editor port only while it runs. Exits when stdin
+    /// Stdout is reserved for the protocol; diagnostics go to stderr. The
+    /// server holds the editor port for its whole life and buffers what the
+    /// game sends; it does not start if the port is in use. Exits when stdin
     /// closes.
     Mcp {
         /// Project directory; save_and_play may only read paths inside it (default: the current directory)
         #[arg(long, value_name = "DIR")]
         root: Option<PathBuf>,
+        /// Keep at most this many events (print, error, custom, saved, loaded) for get_console; the buffer also holds at most 4 MiB of text
+        #[arg(long, value_name = "EVENTS", default_value_t = 1000, value_parser = clap::value_parser!(u32).range(1..))]
+        console_buffer: u32,
         #[command(flatten)]
         ports: EditorPorts,
     },
@@ -527,7 +531,11 @@ fn config_dir_of(config: &Path) -> &Path {
 
 fn run_simple(command: Command) -> Result<(), CliError> {
     match command {
-        Command::Mcp { root, ports } => mcp::run(root.as_deref(), ports.endpoints()),
+        Command::Mcp {
+            root,
+            console_buffer,
+            ports,
+        } => mcp::run(root.as_deref(), ports.endpoints(), console_buffer as usize),
         Command::Watch {
             dir,
             include,
