@@ -15,7 +15,7 @@ pub enum CodecError {
 }
 
 /// One object's scripts. `script` and `ui` are omitted from the JSON when `None`.
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ScriptState {
     #[serde(default)]
     pub name: String,

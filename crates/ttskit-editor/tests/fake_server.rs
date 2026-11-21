@@ -140,3 +140,39 @@ async fn connect_failure_and_read_timeout() {
         .unwrap_err();
     assert!(matches!(err, EditorError::Timeout(_)), "{err:?}");
 }
+
+#[tokio::test]
+async fn fetch_scripts_skips_unrelated_messages() {
+    let (listener, editor_addr) = editor().await;
+    let game = FakeGame::start(editor_addr, vec![global("print(1)")])
+        .await
+        .unwrap();
+    // A print arrives before the reply is read; it must not be taken for it.
+    game.push(
+        editor_addr,
+        &Incoming::Print {
+            message: "hello".into(),
+        },
+    )
+    .await
+    .unwrap();
+    let scripts = ttskit_editor::fetch_scripts(&listener, game.addr(), T)
+        .await
+        .unwrap();
+    assert_eq!(scripts, vec![global("print(1)")]);
+}
+
+#[tokio::test]
+async fn fetch_scripts_times_out_without_a_reply() {
+    let (listener, _) = editor().await;
+    // Something listens on the game port but never answers.
+    let silent = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let err = ttskit_editor::fetch_scripts(
+        &listener,
+        silent.local_addr().unwrap(),
+        Duration::from_millis(200),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(err, EditorError::Timeout(_)), "{err:?}");
+}
