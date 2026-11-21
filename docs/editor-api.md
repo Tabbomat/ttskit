@@ -61,3 +61,46 @@ test, so its trigger conditions are unknown (it may need a different call shape
 or newer game version). Custom (4), game saved (6) and object created (7) were
 not captured; their framing is assumed to be the same and is covered only by the
 fake server. Slice #23 (execute Lua) should investigate ID 5.
+
+## Commands
+
+### `ttskit editor get-scripts`
+
+Read-only. Asks the game for the scripts of the loaded game and lists the
+objects that have a script or UI (the game lists only those; the Global script
+has GUID `-1`). `--json` prints the full texts. `--game-port` and
+`--editor-port` change the ports.
+
+### `ttskit editor save-and-play DIR`
+
+`DIR` is a tree written by `ttskit save unpack`. It is packed in memory first
+(so `--include` bundling and all pack errors behave as in `save pack`) and the
+`LuaScript` and `XmlUI` of the global part and of every object at any depth
+(`ObjectStates`, `ContainedObjects`, `ChildObjects`, `States`) are matched to
+the live game by GUID.
+
+Save & Play deletes the script or UI of every listed object that is missing or
+null in the message, and reloads the whole game, discarding unsaved changes in
+it. The command guards against that:
+
+- It always fetches the live state first and compares. Only objects whose
+  script or UI differ are sent; every sent object carries **both** fields in
+  full (an unchanged field is sent exactly as the game has it). Line endings
+  alone (CRLF vs LF) are not a change.
+- It prints a diff of every change. Without `--yes` nothing is sent;
+  `--dry-run` never sends, even with `--yes`.
+- A field that has text in the game but none in the source is a `delete`. It
+  is refused unless `--allow-delete` is given, and is then sent as an explicit
+  empty string.
+- Objects only in the game are left alone. Objects of the source that the game
+  does not list (the game lists only objects that already have a script or
+  UI) are reported and skipped: whether Save & Play accepts a first script for
+  such an object is untested.
+- A GUID that occurs several times in the source with different scripts is an
+  error (duplicate GUIDs are common in real saves).
+- Nothing changed: nothing is sent and the game is not reloaded.
+
+Manual check (needs the game; it reloads the loaded game): fetch with
+`get-scripts`, unpack a save of that game, edit one script, run
+`save-and-play DIR --dry-run`, then with `--yes`, and confirm the change in the
+game's script editor.
