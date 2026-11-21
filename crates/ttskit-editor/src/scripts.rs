@@ -10,7 +10,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use crate::message::{Incoming, Outgoing, ScriptState};
-use crate::transport::{EditorError, Listener, send};
+use crate::transport::{EditorError, MessageSource, send};
 
 /// The game's answer to "get scripts".
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -26,7 +26,7 @@ pub struct LoadedGame {
 /// `limit` bounds the send and the wait for the reply. Other messages that
 /// arrive meanwhile (print, errors, ...) are skipped.
 pub async fn fetch_scripts(
-    listener: &Listener,
+    listener: &impl MessageSource,
     game: SocketAddr,
     limit: Duration,
 ) -> Result<Vec<ScriptState>, EditorError> {
@@ -35,7 +35,7 @@ pub async fn fetch_scripts(
 
 /// Like [`fetch_scripts`], and also returns the path of the loaded save.
 pub async fn fetch_game(
-    listener: &Listener,
+    listener: &impl MessageSource,
     game: SocketAddr,
     limit: Duration,
 ) -> Result<LoadedGame, EditorError> {
@@ -516,6 +516,7 @@ mod tests {
 mod fetch_tests {
     use super::*;
     use crate::fake::FakeGame;
+    use crate::transport::Listener;
 
     async fn fetch(save_path: Option<&str>) -> LoadedGame {
         let listener = Listener::bind("127.0.0.1:0".parse().unwrap())

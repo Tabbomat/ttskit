@@ -399,3 +399,44 @@ async fn an_empty_connection_is_skipped() {
         }
     );
 }
+
+/// A source that forwards messages from a channel, as a server that shares one
+/// listener between requests would.
+struct Forwarded(tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<Incoming>>);
+
+impl ttskit_editor::MessageSource for Forwarded {
+    async fn next_message(&self, read_limit: Duration) -> Result<Incoming, EditorError> {
+        match tokio::time::timeout(read_limit, self.0.lock().await.recv()).await {
+            Ok(Some(m)) => Ok(m),
+            Ok(None) | Err(_) => Err(EditorError::Timeout(read_limit)),
+        }
+    }
+}
+
+#[tokio::test]
+async fn fetch_and_exec_work_with_any_message_source() {
+    let (listener, addr) = editor().await;
+    let game = FakeGame::start(addr, vec![global("x")]).await.unwrap();
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while let Ok(m) = listener.next_message(T).await {
+            let _ = tx.send(m);
+        }
+    });
+    let source = Forwarded(tokio::sync::Mutex::new(rx));
+    let scripts = ttskit_editor::fetch_scripts(&source, game.addr(), T)
+        .await
+        .unwrap();
+    assert_eq!(scripts, vec![global("x")]);
+    let outcome = ttskit_editor::execute_lua(
+        &source,
+        game.addr(),
+        "-1",
+        "print(1)",
+        T,
+        Duration::from_millis(100),
+    )
+    .await
+    .unwrap();
+    assert!(outcome.errors.is_empty());
+}

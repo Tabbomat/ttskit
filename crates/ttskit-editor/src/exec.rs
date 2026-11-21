@@ -14,7 +14,7 @@ use serde_json::Value;
 use tokio::time::{Instant, timeout_at};
 
 use crate::message::{Incoming, Outgoing};
-use crate::transport::{EditorError, Listener, send};
+use crate::transport::{EditorError, MessageSource, send};
 
 /// The GUID of the Global script.
 pub const GLOBAL_GUID: &str = "-1";
@@ -44,7 +44,7 @@ pub struct ExecOutcome {
 /// immediately on a return value or an error. Running into `limit` while
 /// messages keep arriving is not an error; the outcome so far is returned.
 pub async fn execute_lua(
-    listener: &Listener,
+    listener: &impl MessageSource,
     game: SocketAddr,
     guid: &str,
     script: &str,

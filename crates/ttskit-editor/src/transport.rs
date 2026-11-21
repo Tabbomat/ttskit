@@ -140,6 +140,26 @@ impl Listener {
     }
 }
 
+/// Where messages from the game come from: a [`Listener`], or anything that
+/// forwards what one received (such as a server that holds the port and
+/// shares it between requests).
+pub trait MessageSource: Sync {
+    /// The next message, with the semantics of [`Listener::next_message`].
+    fn next_message(
+        &self,
+        read_limit: Duration,
+    ) -> impl Future<Output = Result<Incoming, EditorError>> + Send;
+}
+
+impl MessageSource for Listener {
+    fn next_message(
+        &self,
+        read_limit: Duration,
+    ) -> impl Future<Output = Result<Incoming, EditorError>> + Send {
+        Listener::next_message(self, read_limit)
+    }
+}
+
 /// True if something accepts a connection to `addr` within [`PROBE_TIMEOUT`].
 async fn someone_listens(addr: SocketAddr) -> bool {
     matches!(

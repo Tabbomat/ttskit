@@ -18,5 +18,6 @@ pub use scripts::{
     fetch_scripts, plan,
 };
 pub use transport::{
-    DEFAULT_TIMEOUT, EDITOR_PORT, EditorError, GAME_PORT, Listener, MAX_MESSAGE_BYTES, send,
+    DEFAULT_TIMEOUT, EDITOR_PORT, EditorError, GAME_PORT, Listener, MAX_MESSAGE_BYTES,
+    MessageSource, PROBE_TIMEOUT, send,
 };
