@@ -928,3 +928,37 @@ fn console_prints_what_the_game_sends_and_exits_0() {
     assert_eq!(v["type"], "print");
     assert_eq!(v["message"], "from the game");
 }
+
+#[test]
+fn watch_once_exits_3_when_the_game_is_not_reachable() {
+    let dir = tempfile::tempdir().unwrap();
+    let tree = dir.path().join("tree");
+    let save = ttskit_testutil::fixture_path("scripts_ui.json");
+    let out = ttskit(&[
+        "save",
+        "unpack",
+        save.to_str().unwrap(),
+        "-o",
+        tree.to_str().unwrap(),
+    ]);
+    assert_eq!(out.status.code(), Some(0));
+    let game = unused_port().to_string();
+    let editor = unused_port().to_string();
+    let output = ttskit(&[
+        "watch",
+        tree.to_str().unwrap(),
+        "--once",
+        "--game-port",
+        &game,
+        "--editor-port",
+        &editor,
+    ]);
+    assert_eq!(output.status.code(), Some(3));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("is Tabletop Simulator running?"));
+}
+
+#[test]
+fn watch_once_fails_on_a_missing_directory() {
+    let output = ttskit(&["watch", "does-not-exist-dir", "--once"]);
+    assert_eq!(output.status.code(), Some(1));
+}

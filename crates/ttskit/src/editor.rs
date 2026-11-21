@@ -33,7 +33,7 @@ impl Endpoints {
     }
 }
 
-fn runtime() -> Result<tokio::runtime::Runtime, CliError> {
+pub(crate) fn runtime() -> Result<tokio::runtime::Runtime, CliError> {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -69,7 +69,7 @@ impl From<&str> for CliError {
     }
 }
 
-fn editor_err(e: EditorError) -> CliError {
+pub(crate) fn editor_err(e: EditorError) -> CliError {
     CliError {
         game_unreachable: matches!(e, EditorError::Connect { .. }),
         message: e.to_string(),
@@ -124,7 +124,12 @@ pub fn desired_from_tree(
         ..ttskit_core::PackOptions::new(false)
     };
     let packed = ttskit_core::pack(dir, &options).map_err(|e| e.to_string())?;
-    let save = ttskit_core::Save::from_slice(&packed.bytes).map_err(|e| e.to_string())?;
+    desired_from_packed(&packed.bytes)
+}
+
+/// Like [`desired_from_tree`] for a save that is already packed.
+pub fn desired_from_packed(bytes: &[u8]) -> Result<Vec<Desired>, String> {
+    let save = ttskit_core::Save::from_slice(bytes).map_err(|e| e.to_string())?;
     let mut found = Vec::new();
     collect(save.value(), "-1", &mut found);
     Ok(found)
@@ -170,7 +175,7 @@ pub struct SaveAndPlayOptions {
     pub json: bool,
 }
 
-fn change_name(c: &FieldChange) -> &'static str {
+pub(crate) fn change_name(c: &FieldChange) -> &'static str {
     match c {
         FieldChange::Unchanged => "unchanged",
         FieldChange::Add { .. } => "add",
@@ -474,7 +479,7 @@ fn event_json(at: &jiff::Timestamp, event: &ConsoleEvent) -> Value {
     }
 }
 
-fn write_event(
+pub(crate) fn write_event(
     at: jiff::Timestamp,
     event: &ConsoleEvent,
     json: bool,

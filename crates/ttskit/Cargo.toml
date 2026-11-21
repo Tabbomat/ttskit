@@ -18,17 +18,19 @@ steam = ["ttskit-cloud/steam"]
 clap = { version = "4", features = ["derive", "env"] }
 dirs = "6"
 jiff = "0.2"
+notify = "8"
 serde_json = "1"
 similar = "2"
 thiserror = "2"
-tokio = { version = "1", features = ["rt", "net", "time", "io-util", "macros", "signal"] }
+tokio = { version = "1", features = ["rt", "net", "time", "io-util", "macros", "signal", "sync"] }
 ttskit-cloud = { path = "../ttskit-cloud" }
 ttskit-core = { path = "../ttskit-core" }
 ttskit-editor = { path = "../ttskit-editor" }
 
 [dev-dependencies]
 tempfile = "3"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+ttskit-testutil = { path = "../ttskit-testutil" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "test-util"] }
 
 [lints]
 workspace = true

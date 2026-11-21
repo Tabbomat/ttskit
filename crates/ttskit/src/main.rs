@@ -1,6 +1,7 @@
 mod cloud;
 mod editor;
 mod save;
+mod watch;
 
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -36,6 +37,35 @@ enum Command {
     Editor {
         #[command(subcommand)]
         command: EditorCommand,
+    },
+    /// Push scripts and UI to the running game whenever the unpacked tree changes
+    ///
+    /// Watches DIR (written by `save unpack`) and the --include directories.
+    /// After a change (debounced) the scripts and UI are bundled as `save pack`
+    /// does and sent with Save & Play. This reloads the whole game and discards
+    /// unsaved changes in it, so running watch counts as consent; scripts or UI
+    /// missing in the source are deleted in the game. Only scripts and UI are
+    /// pushed: other changes are reported and need a full pack and load.
+    /// Errors are printed and the watch keeps running. The game's `print`
+    /// output and Lua errors are shown. Ctrl+C stops.
+    Watch {
+        /// The directory written by `save unpack`
+        dir: PathBuf,
+        /// Inline `require("Name")` and `<Include src="Name"/>` from this directory
+        /// and watch it too; repeatable, searched in order
+        #[arg(long, value_name = "LIB_DIR")]
+        include: Vec<PathBuf>,
+        /// Push once and exit (for editor tasks), then show the game's console
+        /// output until --quiet-ms pass without a message
+        #[arg(long)]
+        once: bool,
+        /// Milliseconds without file changes before a push starts
+        #[arg(long, default_value_t = watch::DEFAULT_DEBOUNCE.as_millis() as u64, value_name = "MILLISECONDS")]
+        debounce_ms: u64,
+        #[command(flatten)]
+        quiet: QuietWindow,
+        #[command(flatten)]
+        ports: EditorPorts,
     },
 }
 
@@ -480,6 +510,27 @@ fn config_dir_of(config: &Path) -> &Path {
 
 fn run_simple(command: Command) -> Result<(), CliError> {
     match command {
+        Command::Watch {
+            dir,
+            include,
+            once,
+            debounce_ms,
+            quiet,
+            ports,
+        } => {
+            let options = watch::WatchOptions {
+                dir,
+                includes: include,
+                once,
+                quiet: std::time::Duration::from_millis(quiet.quiet_ms),
+                debounce: std::time::Duration::from_millis(debounce_ms),
+            };
+            // Unlocked handles: they are Send, the locked ones are not.
+            let mut out = std::io::stdout();
+            let mut err = std::io::stderr();
+            watch::run(options, ports.endpoints(), &mut out, &mut err)?;
+            out.flush().map_err(|e| e.to_string().into())
+        }
         Command::Editor {
             command: EditorCommand::GetScripts { json, ports },
         } => {
