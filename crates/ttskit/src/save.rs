@@ -157,7 +157,7 @@ fn inspect_target(output: &Path, bytes: &[u8], force: bool) -> Result<Target, St
 
 /// Writes `bytes` to `output`: a new file, or with `replace` through a
 /// temporary file next to it, so a failure leaves the old file intact.
-fn write_output(output: &Path, bytes: &[u8], replace: bool) -> Result<(), String> {
+pub(crate) fn write_output(output: &Path, bytes: &[u8], replace: bool) -> Result<(), String> {
     let fail = |e: std::io::Error| format!("cannot write {}: {e}", output.display());
     if let Some(parent) = output.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent)

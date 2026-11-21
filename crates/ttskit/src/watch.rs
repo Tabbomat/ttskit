@@ -93,6 +93,7 @@ pub fn classify(root: &Path, includes: &[PathBuf], path: &Path) -> Kind {
 }
 
 /// What to build from the tree when something changed.
+#[derive(Debug)]
 pub struct Built {
     pub desired: Vec<Desired>,
     /// Lines to print (for example that the packed save was written).
@@ -321,9 +322,52 @@ pub struct WatchOptions {
     pub dir: PathBuf,
     pub includes: Vec<PathBuf>,
     pub once: bool,
+    /// Also write the packed save here on every change.
+    pub pack_to: Option<PathBuf>,
     /// With `once`: how long to show the game's console output after the push.
     pub quiet: Duration,
     pub debounce: Duration,
+}
+
+/// Pack the tree once. The scripts and UI come from that packed save; with
+/// `pack_to` the save is also written there (atomically, and only when its
+/// content changed). A failed write is a warning, the push still happens.
+pub fn build_tree(
+    root: &Path,
+    includes: &[PathBuf],
+    pack_to: Option<&Path>,
+) -> Result<Built, String> {
+    let options = ttskit_core::PackOptions {
+        includes: includes.to_vec(),
+        ..ttskit_core::PackOptions::new(false)
+    };
+    let packed = ttskit_core::pack(root, &options).map_err(|e| e.to_string())?;
+    let desired = crate::editor::desired_from_packed(&packed.bytes)?;
+    let mut notes: Vec<String> = packed
+        .warnings
+        .iter()
+        .map(|w| format!("warning: {w}"))
+        .collect();
+    if let Some(output) = pack_to {
+        match write_packed(output, &packed.bytes) {
+            Ok(true) => notes.push(format!("Wrote packed save to {}", output.display())),
+            Ok(false) => {}
+            Err(e) => notes.push(format!("warning: {e}")),
+        }
+    }
+    Ok(Built { desired, notes })
+}
+
+fn write_packed(output: &Path, bytes: &[u8]) -> Result<bool, String> {
+    match std::fs::read(output) {
+        Ok(current) if current == bytes => return Ok(false),
+        Ok(_) => crate::save::write_output(output, bytes, true)?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            crate::save::write_output(output, bytes, false)?;
+        }
+        Err(e) => return Err(format!("cannot read {}: {e}", output.display())),
+    }
+    Ok(true)
 }
 
 /// Absolute path, so file events (which carry absolute paths) can be compared.
@@ -343,14 +387,10 @@ pub fn run(
         .iter()
         .map(|p| absolute(p))
         .collect::<Result<Vec<_>, _>>()?;
+    let pack_to = options.pack_to.as_deref().map(absolute).transpose()?;
     let mut build = {
         let (root, includes) = (root.clone(), includes.clone());
-        move || {
-            crate::editor::desired_from_tree(&root, includes.clone()).map(|desired| Built {
-                desired,
-                notes: vec![],
-            })
-        }
+        move || build_tree(&root, &includes, pack_to.as_deref())
     };
     let rt = crate::editor::runtime()?;
     rt.block_on(async {
@@ -862,5 +902,74 @@ mod tests {
         })
         .await;
         assert_eq!(got, Ok(true));
+    }
+
+    // ---- build_tree and --pack-to ----
+
+    fn unpacked_tree() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let tree = dir.path().join("tree");
+        let bytes = ttskit_testutil::read_fixture("scripts_ui.json");
+        let unpacked = ttskit_core::unpack(&bytes, ttskit_core::Eol::Lf).unwrap();
+        let plan = unpacked
+            .plan(&tree, ttskit_core::WriteOptions::default())
+            .unwrap();
+        unpacked.apply(&tree, &plan).unwrap();
+        (dir, tree)
+    }
+
+    #[test]
+    fn build_tree_writes_the_packed_save_only_when_it_changes() {
+        let (dir, tree) = unpacked_tree();
+        let output = dir.path().join("out").join("save.json");
+        let first = build_tree(&tree, &[], Some(&output)).unwrap();
+        assert_eq!(first.notes.len(), 1, "{:?}", first.notes);
+        assert!(first.notes[0].starts_with("Wrote packed save"));
+        let packed = ttskit_core::pack(&tree, &ttskit_core::PackOptions::new(false)).unwrap();
+        assert_eq!(std::fs::read(&output).unwrap(), packed.bytes);
+        assert!(!first.desired.is_empty());
+
+        let again = build_tree(&tree, &[], Some(&output)).unwrap();
+        assert!(again.notes.is_empty(), "{:?}", again.notes);
+
+        let script = std::fs::read_dir(&tree)
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .find(|p| p.file_name().is_some_and(|n| n == "script.lua"))
+            .expect("the fixture has a global script");
+        std::fs::write(&script, "-- edited\n").unwrap();
+        let third = build_tree(&tree, &[], Some(&output)).unwrap();
+        assert_eq!(third.notes.len(), 1);
+        assert!(
+            std::fs::read_to_string(&output)
+                .unwrap()
+                .contains("-- edited")
+        );
+        assert!(!dir.path().join("out").join("save.json.ttskit-tmp").exists());
+    }
+
+    #[test]
+    fn a_failed_pack_to_write_is_a_warning_and_the_push_data_is_kept() {
+        let (dir, tree) = unpacked_tree();
+        // The output path is an existing directory: it cannot be replaced.
+        let output = dir.path().join("blocked");
+        std::fs::create_dir(&output).unwrap();
+        let built = build_tree(&tree, &[], Some(&output)).unwrap();
+        assert!(!built.desired.is_empty());
+        assert!(
+            built.notes.iter().any(|n| n.starts_with("warning:")),
+            "{:?}",
+            built.notes
+        );
+    }
+
+    #[test]
+    fn build_tree_without_pack_to_writes_nothing_and_a_bad_tree_is_an_error() {
+        let (dir, tree) = unpacked_tree();
+        let built = build_tree(&tree, &[], None).unwrap();
+        assert!(built.notes.is_empty());
+        let e = build_tree(&dir.path().join("missing"), &[], None).unwrap_err();
+        assert!(e.contains("not a directory"), "{e}");
     }
 }

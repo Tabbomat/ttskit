@@ -59,6 +59,10 @@ enum Command {
         /// output until --quiet-ms pass without a message
         #[arg(long)]
         once: bool,
+        /// Also write the packed save to this file on every change (atomically;
+        /// an existing file is overwritten, and only when its content changes)
+        #[arg(long, value_name = "SAVE.json")]
+        pack_to: Option<PathBuf>,
         /// Milliseconds without file changes before a push starts
         #[arg(long, default_value_t = watch::DEFAULT_DEBOUNCE.as_millis() as u64, value_name = "MILLISECONDS")]
         debounce_ms: u64,
@@ -514,6 +518,7 @@ fn run_simple(command: Command) -> Result<(), CliError> {
             dir,
             include,
             once,
+            pack_to,
             debounce_ms,
             quiet,
             ports,
@@ -522,6 +527,7 @@ fn run_simple(command: Command) -> Result<(), CliError> {
                 dir,
                 includes: include,
                 once,
+                pack_to,
                 quiet: std::time::Duration::from_millis(quiet.quiet_ms),
                 debounce: std::time::Duration::from_millis(debounce_ms),
             };
