@@ -148,7 +148,7 @@ game reports. Because the game linked no answer to a request and did not send
 return values in any check, the command collects instead of waiting for one:
 
 - It sends the code, then reads messages until a return value or a Lua error
-  arrives, or until nothing arrives for `--wait` milliseconds (default 1000),
+  arrives, or until nothing arrives for `--quiet-ms` milliseconds (default 1000),
   or `--timeout` seconds in total (default 5; also bounds connecting).
 - `print` output is shown in arrival order, then the return value if the game
   sent one (strings as is, other values as JSON). Prints from the game's own
@@ -175,7 +175,61 @@ Manual check (needs the game): `ttskit editor exec "print(1+1)"`,
 `ttskit editor send '{"hello":"hi"}'` and confirm that `hi` is printed in the
 game.
 
-### Workshop mods
+### `ttskit editor console [--follow] [--json]`
+
+Prints the game's console output as it arrives: `print` text (this includes
+`printToAll`, `broadcastToAll` and `log`, which the game sends the same way)
+and Lua errors. Other messages are ignored.
+
+```
+20:26:59.858 print  live one
+20:26:59.881 error  [-1] [Global] Lua Error <executeScript>: ...
+```
+
+- **Time:** the game sends no timestamp. The time shown is when the message
+  reached `ttskit` (local time in text, UTC RFC 3339 in `--json`).
+- **Origin:** only errors say where they came from: the GUID of the object
+  (`-1` is Global) and the game's `[Name]` prefix. A `print` carries nothing
+  but the text (checked on a real game for `print`, `printToAll`,
+  `broadcastToAll` and `log`), so no object can be shown for it.
+- **One-shot (default):** listens until `--quiet-ms` (default 1000) pass
+  without a message, or `--timeout` seconds in total (default 5), then exits 0,
+  also when nothing arrived.
+- **`--follow`:** runs until Ctrl+C and exits 0. It cannot be combined with
+  `--quiet-ms`. Each line is flushed at once, so the output can be piped.
+- **`--json`:** one JSON object per line, `{time, type: "print", message}` or
+  `{time, type: "error", guid, error, message}`.
+- A Lua error is output, not a failure: `console` exits 0. A message that
+  cannot be decoded is skipped with a warning on stderr.
+
+Limitations:
+
+- Messages sent while no listener is running are lost; the game does not queue
+  or replay them. Start `console` before the action you want to watch. A
+  long-running listener with a buffer is the subject of the MCP issues.
+- `console` holds port 39998 while it runs, so no other `editor` command (or
+  editor integration) can listen at the same time, and the other way round. A
+  busy port is reported as for the other commands.
+- It never connects to the game, so it does not notice that the game is not
+  running.
+- The game's own scripts print at any time; nothing ties a line to a request.
+
+## Flags and exit codes of `ttskit editor`
+
+Every subcommand takes `--game-port`, `--editor-port` and `--timeout SECONDS`
+(connecting, sending and reading one message) and `--json`. `exec` and
+`console` share `--quiet-ms` (stop after that long without a message; `exec`
+used to call it `--wait`). `--json` prints one object, except `console`, which
+prints one object per line so that it can stream.
+
+| Status | Meaning                                                                         |
+| ------ | ------------------------------------------------------------------------------- |
+| 0      | Success                                                                         |
+| 1      | Failure: a Lua error in `exec`, a refused plan, bad input, a busy port, a timeout |
+| 2      | Command line usage error (from the argument parser)                             |
+| 3      | The game did not accept a connection (not running, or not listening)            |
+
+## Workshop mods
 
 The game prints "cannot commit save changes to a workshop mod" for Save & Play
 on a workshop mod. The scripts still change in the running game, but cannot be

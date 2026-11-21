@@ -16,7 +16,7 @@ mods. Not affiliated with or endorsed by Berserk Games.
 - **Steam Cloud management:** one cloud folder per game, sync with a local
   directory, a committed manifest of asset URLs (done), and a scan of the
   asset URLs a save uses (done).
-- **External Editor API client:** talk to a running game to read and write
+- **External Editor API client (done):** talk to a running game to read and write
   scripts, run Lua and capture console output.
 - **MCP server:** expose the editor API to AI assistants.
 
@@ -31,6 +31,19 @@ Windows is the primary platform at first.
 
 See [CONTRIBUTING](CONTRIBUTING.md) for the checks to run, the test fixture
 policy and how to test against real saves locally.
+
+## Editor commands
+
+`ttskit editor` talks to a running game through its External Editor API: `get-scripts`, `save-and-play`, `exec`, `send` and `console`. The game must be running; nothing here needs Steam. For example, watch the game's console while you work:
+
+```
+ttskit editor console --follow
+ttskit editor console --json            # one-shot, one JSON object per line
+```
+
+All subcommands share `--game-port`, `--editor-port`, `--timeout` and `--json`, and exit with 0 (success), 1 (failure), 2 (usage error) or 3 (the game is not reachable). Messages the game sends while no `ttskit` listener is running are lost. Details, observed behaviour and limits: [docs/editor-api.md](docs/editor-api.md).
+
+Shell completions are not generated yet (tracked in the issue tracker); until then `ttskit editor --help` and `ttskit editor <command> --help` list every flag.
 
 ## Steam Cloud
 
