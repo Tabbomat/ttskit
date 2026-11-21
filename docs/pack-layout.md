@@ -385,11 +385,93 @@ An output path that exists but is not a regular file is always an error.
 
 Unpack never deletes files it did not create.
 
+## Bundling
+
+Shared Lua and XML modules live in their own directories and are inlined by
+`pack`. The unpacked tree always keeps the unbundled form.
+
+`ttskit save pack DIR -o FILE --include LIB_DIR [--include LIB_DIR2 ...]`
+
+Without `--include`, scripts and UI are packed exactly as they are (a
+`require` stays a `require`). With it, every `script.lua` and `ui.xml` is
+bundled: the global ones and those of every object at any depth. Inline
+scripts written directly in `object.json` are not bundled. Include
+directories are searched in the order given; the first match wins.
+
+### Lua
+
+`require("Name")` resolves to `<lib-dir>/Name.lua`, or `Name.ttslua` if there
+is no `.lua` file. Dots and `/` both separate directories:
+`require("util.math")` and `require("util/math")` find `util/math.lua`.
+
+- Only `require` calls with a literal string argument are followed
+  (`require("x")`, `require 'x'`, `require([[x]])`). Calls in comments and
+  strings, `obj.require(...)`, `obj:require(...)` and `require(name)` are
+  ignored.
+- Names that could leave the include directory (`..`, a leading `/`, empty
+  parts) are an error.
+- A script with no `require` calls is left byte for byte as it is.
+- A script that already contains `__bundle_register` is considered bundled
+  and left alone, so packing a tree that holds a bundled script does not
+  bundle twice.
+
+The result uses the module registry of the Tabletop Simulator editor plugins
+(Atom and VS Code): a prelude, one `__bundle_register("Name", function(...)
+... end)` per module, the original script as `__root`, and
+`return __bundle_require("__root")`. At runtime each module runs once on its
+first `require`, and the result is cached. Cyclic requires are legal, as in
+plain Lua: the second `require` inside the cycle returns `nil`. If one module
+is required under two spellings (`util.math` and `util/math`) the file is
+registered once and the other spelling is a one-line alias. The script's
+globals (`onLoad`, `onSave`, ...) still work: the game calls them as before.
+Line numbers in Lua error messages refer to the bundle, not to the source
+files.
+
+Every object that requires a module gets its own copy, because scripts of
+different objects are isolated in the game. Packing never reorders or
+changes anything else.
+
+### XML
+
+`<Include src="Name"/>` (or `<Include src="Name"></Include>`) is replaced by
+the content of `<lib-dir>/Name.xml`; `/` separates directories. Includes
+inside included files are expanded too. Includes inside XML comments and
+CDATA sections are left alone. An include cycle is an error that lists the
+chain.
+
+### Errors
+
+Pack stops before writing anything. A module that cannot be found is
+reported with the module name and the file that requires it (the script or UI
+file for a direct require, the module file for a nested one), together with
+the directories searched. A missing include directory, a name that is not
+valid, an unreadable file or invalid UTF-8 are errors as well.
+
+### How bundled output differs from the unpacked source
+
+- A script that used modules is longer and starts with the bundle prelude.
+- Unpacking such a save writes the bundled text to `script.lua`. The round
+  trip of a bundled save is therefore: edit the unbundled tree, pack with
+  `--include`, and do not unpack the result into the same tree.
+- Line endings follow the normal rules (LF by default; with `--keep-eol` the
+  recorded style of the script file, applied to the whole bundle).
+
+### Manual check
+
+Not automated, because it needs the game (the unit tests check the structure,
+and the bundle was run once with a stand-alone Lua interpreter):
+
+1. Make a tree with a global script that requires two modules, one of which
+   requires a third, and a `ui.xml` with an `<Include>`.
+2. `ttskit save pack TREE -o Bundled.json --include lib`.
+3. Copy the file into the game's Saves folder, load it and check that the
+   script runs (for example with `print` calls in `onLoad`) and that the UI
+   shows the included part.
+
 ## Reserved for later features
 
-- **Bundling (#9):** unpacked scripts and UI keep the unbundled form with
-  `require()` and `<Include>`. Pack may inline modules from include
-  directories; the layout above does not change.
+- **Bundling (#9):** implemented, see [Bundling](#bundling). The layout above
+  does not change.
 - **Asset placeholders (#47):** an `asset:<path>` placeholder may appear in any
   string, in `object.json` and `save.json` as well as inside Lua and XML files.
   Markers and placeholders use different prefixes and different fields, so they
