@@ -1,4 +1,5 @@
 mod cloud;
+mod editor;
 mod save;
 
 use std::io::{IsTerminal, Write};
@@ -28,6 +29,67 @@ enum Command {
     Save {
         #[command(subcommand)]
         command: SaveCommand,
+    },
+    /// Talk to a running Tabletop Simulator through its External Editor API (unofficial)
+    Editor {
+        #[command(subcommand)]
+        command: EditorCommand,
+    },
+}
+
+/// Ports of the External Editor API.
+#[derive(clap::Args)]
+struct EditorPorts {
+    /// Port the game listens on
+    #[arg(long, default_value_t = ttskit_editor::GAME_PORT)]
+    game_port: u16,
+    /// Port this command listens on for the game's replies
+    #[arg(long, default_value_t = ttskit_editor::EDITOR_PORT)]
+    editor_port: u16,
+}
+
+impl EditorPorts {
+    fn endpoints(&self) -> editor::Endpoints {
+        editor::Endpoints::new(self.game_port, self.editor_port)
+    }
+}
+
+#[derive(Subcommand)]
+enum EditorCommand {
+    /// List the objects with a script or UI in the loaded game (read-only)
+    GetScripts {
+        /// Print the full scripts and UI as JSON instead of a summary
+        #[arg(long)]
+        json: bool,
+        #[command(flatten)]
+        ports: EditorPorts,
+    },
+    /// Send the scripts and UI of an unpacked save to the game and reload it (Save & Play)
+    ///
+    /// Reloads the whole game and discards unsaved changes in it. Only objects
+    /// whose script or UI differ from the game are sent, each with both fields
+    /// in full. Without --yes the changes are shown and nothing is sent.
+    SaveAndPlay {
+        /// A directory written by `save unpack`; objects are matched by GUID
+        dir: PathBuf,
+        /// Inline `require("Name")` and `<Include src="Name"/>` from this
+        /// directory, as `save pack --include` does; repeatable
+        #[arg(long, value_name = "LIB_DIR")]
+        include: Vec<PathBuf>,
+        /// Show the changes and send nothing
+        #[arg(long)]
+        dry_run: bool,
+        /// Really send the changes (required; the game reloads)
+        #[arg(long)]
+        yes: bool,
+        /// Allow scripts or UI that exist in the game but not in the source to be deleted
+        #[arg(long)]
+        allow_delete: bool,
+        /// Print machine-readable JSON instead of text
+        #[arg(long)]
+        json: bool,
+        #[command(flatten)]
+        ports: EditorPorts,
     },
 }
 
@@ -346,6 +408,37 @@ fn config_dir_of(config: &Path) -> &Path {
 
 fn run_simple(command: Command) -> Result<(), String> {
     match command {
+        Command::Editor {
+            command: EditorCommand::GetScripts { json, ports },
+        } => {
+            let mut out = std::io::stdout().lock();
+            editor::get_scripts(ports.endpoints(), json, &mut out)?;
+            out.flush().map_err(|e| e.to_string())
+        }
+        Command::Editor {
+            command:
+                EditorCommand::SaveAndPlay {
+                    dir,
+                    include,
+                    dry_run,
+                    yes,
+                    allow_delete,
+                    json,
+                    ports,
+                },
+        } => {
+            // Read and pack the tree before touching the game.
+            let desired = editor::desired_from_tree(&dir, include)?;
+            let mut out = std::io::stdout().lock();
+            let options = editor::SaveAndPlayOptions {
+                dry_run,
+                yes,
+                allow_delete,
+                json,
+            };
+            editor::save_and_play(&desired, ports.endpoints(), options, &mut out)?;
+            out.flush().map_err(|e| e.to_string())
+        }
         Command::Save {
             command:
                 SaveCommand::Unpack {

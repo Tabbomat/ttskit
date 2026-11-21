@@ -107,7 +107,7 @@ impl Listener {
         let (mut stream, _) = self.inner.accept().await?;
         let buf = within(read_limit, async {
             let mut buf = Vec::new();
-            let mut chunk = [0u8; 64 * 1024];
+            let mut chunk = vec![0u8; 64 * 1024];
             loop {
                 let n = stream.read(&mut chunk).await?;
                 if n == 0 {
