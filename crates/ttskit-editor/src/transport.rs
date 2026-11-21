@@ -21,12 +21,21 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
 /// Upper bound for one incoming message; protects against a peer that never closes.
 pub const MAX_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
 
+/// How long [`Listener::bind`] waits for a connection to the port it is about
+/// to bind. A local listener accepts within a millisecond; a port nobody
+/// listens on is only reported as refused after about 2 s on Windows, so the
+/// probe treats a timeout as "nobody listens".
+pub const PROBE_TIMEOUT: Duration = Duration::from_millis(200);
+
 #[derive(Debug, thiserror::Error)]
 pub enum EditorError {
     #[error(
         "cannot listen on {addr}: the port is already in use (another editor integration may be running)"
     )]
     PortInUse { addr: SocketAddr },
+    /// Accepting a connection failed; the listener itself may be broken.
+    #[error("cannot accept a connection: {0}")]
+    Accept(std::io::Error),
     #[error("cannot listen on {addr}: {source}")]
     Bind {
         addr: SocketAddr,
@@ -87,7 +96,18 @@ pub struct Listener {
 
 impl Listener {
     /// Bind to `addr`. Reports a clear error if the port is taken.
+    ///
+    /// Before binding, it connects to `addr` (unless the port is 0) and
+    /// reports the port as in use if something accepts within
+    /// [`PROBE_TIMEOUT`]. On Windows, binding `127.0.0.1` succeeds while
+    /// another program listens on the wildcard address (`0.0.0.0`, or `::`
+    /// with dual stack, the Node.js default) and then takes all of its
+    /// connections, without an error on either side. The probe is an empty
+    /// connection, closed at once.
     pub async fn bind(addr: SocketAddr) -> Result<Self, EditorError> {
+        if addr.port() != 0 && someone_listens(addr).await {
+            return Err(EditorError::PortInUse { addr });
+        }
         match TcpListener::bind(addr).await {
             Ok(inner) => Ok(Self { inner }),
             Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
@@ -104,26 +124,74 @@ impl Listener {
     /// Wait for the next message. Waiting for a connection has no limit (wrap in
     /// `tokio::time::timeout` if needed); reading the message is bounded by
     /// `read_limit`. A message that fails to decode is returned as an error and
-    /// does not stop the listener; call again for the next one.
+    /// does not stop the listener; call again for the next one. A connection
+    /// that closes without sending anything (such as the probe of
+    /// [`Listener::bind`] in another process) is skipped.
     pub async fn next_message(&self, read_limit: Duration) -> Result<Incoming, EditorError> {
-        let (mut stream, _) = self.inner.accept().await?;
-        let buf = within(read_limit, async {
-            let mut buf = Vec::new();
-            let mut chunk = vec![0u8; 64 * 1024];
-            loop {
-                let n = stream.read(&mut chunk).await?;
-                if n == 0 {
-                    return Ok(Some(buf));
-                }
-                if buf.len() + n > MAX_MESSAGE_BYTES {
-                    return Ok(None);
-                }
-                buf.extend_from_slice(&chunk[..n]);
+        loop {
+            let (stream, _) = self.inner.accept().await.map_err(EditorError::Accept)?;
+            let buf = read_document(stream, read_limit).await?;
+            if buf.is_empty() {
+                continue;
             }
-        })
-        .await?
-        .ok_or(EditorError::TooLarge)?;
-        let text = String::from_utf8(buf).map_err(|_| EditorError::NotUtf8)?;
-        Ok(Incoming::parse(&text)?)
+            let text = String::from_utf8(buf).map_err(|_| EditorError::NotUtf8)?;
+            return Ok(Incoming::parse(&text)?);
+        }
+    }
+}
+
+/// True if something accepts a connection to `addr` within [`PROBE_TIMEOUT`].
+async fn someone_listens(addr: SocketAddr) -> bool {
+    matches!(
+        timeout(PROBE_TIMEOUT, TcpStream::connect(addr)).await,
+        Ok(Ok(_))
+    )
+}
+
+/// Read one document: everything until the peer closes the connection.
+async fn read_document(
+    mut stream: TcpStream,
+    read_limit: Duration,
+) -> Result<Vec<u8>, EditorError> {
+    within(read_limit, async {
+        let mut buf = Vec::new();
+        let mut chunk = vec![0u8; 64 * 1024];
+        loop {
+            let n = stream.read(&mut chunk).await?;
+            if n == 0 {
+                return Ok(Some(buf));
+            }
+            if buf.len() + n > MAX_MESSAGE_BYTES {
+                return Ok(None);
+            }
+            buf.extend_from_slice(&chunk[..n]);
+        }
+    })
+    .await?
+    .ok_or(EditorError::TooLarge)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn the_probe_sees_a_listener_and_a_free_port() {
+        let held = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = held.local_addr().unwrap();
+        assert!(someone_listens(addr).await);
+        drop(held);
+        let started = tokio::time::Instant::now();
+        assert!(!someone_listens(addr).await);
+        // A refused connection takes about 2 s on Windows; the probe must not wait for it.
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    async fn binding_a_port_that_someone_listens_on_is_port_in_use() {
+        let held = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = held.local_addr().unwrap();
+        let err = Listener::bind(addr).await.err().unwrap();
+        assert!(matches!(err, EditorError::PortInUse { .. }), "{err:?}");
     }
 }

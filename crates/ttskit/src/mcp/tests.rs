@@ -523,7 +523,7 @@ async fn get_console_collects_what_arrives_during_the_call() {
     let game = h.game.clone();
     let editor = h.ep.editor;
     tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        tokio::time::sleep(Duration::from_millis(400)).await;
         game.push_raw(editor, &json!({"messageID": 2, "message": "one"}))
             .await
             .unwrap();
@@ -541,7 +541,7 @@ async fn get_console_collects_what_arrives_during_the_call() {
     });
     let r = h
         .client
-        .call("get_console", json!({"quiet_ms": 400, "max_ms": 5000}))
+        .call("get_console", json!({"quiet_ms": 1000, "max_ms": 5000}))
         .await;
     assert!(!is_error(&r), "{r}");
     let events = body(&r)["events"].as_array().unwrap().clone();

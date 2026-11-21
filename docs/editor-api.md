@@ -12,6 +12,22 @@ observed against a running game (Windows, single-player, a large mod loaded).
 - A reply (for example to "get scripts") is never sent on the request's
   connection. The game accepted the request, sent nothing back on it, and
   opened a fresh connection to port 39998.
+- The game connects to `127.0.0.1:39998` (IPv4). A listener on `::1`, or an
+  IPv6-only one on `::`, receives nothing from it (observed).
+
+### Sharing port 39998 with other programs (observed on Windows)
+
+- Two listeners on `127.0.0.1:39998` are impossible: the second bind fails.
+- Binding `127.0.0.1:39998` **succeeds** while another program listens on the
+  wildcard address: `0.0.0.0`, or `::` with dual stack, which is what
+  Node.js's `server.listen(39998)` does. The game's connections then all go
+  to the `127.0.0.1` listener, and the other program silently receives
+  nothing. The same happens the other way round: a Node.js program that
+  starts listening later gets no error and no messages. Probing by binding
+  `0.0.0.0` or `::` does not detect this (both binds succeed).
+- An editor integration that listens on `localhost` with a current Node.js
+  gets `::1` and so receives nothing from the game, with or without
+  `ttskit`.
 
 ## Framing
 
@@ -34,7 +50,15 @@ observed against a running game (Windows, single-player, a large mod loaded).
   read timeout and a 64 MiB cap. A bad document is an error for that call only;
   the listener keeps working.
 - Binding a port that is already in use gives a dedicated error that mentions
-  other editor integrations.
+  other editor integrations. Before binding, `Listener::bind` connects to the
+  port: if anything accepts within 200 ms, the port counts as in use, which
+  catches the wildcard listeners described above. The probe is an empty
+  connection, closed at once; the other program sees a connection without
+  data. A port that nobody listens on is only reported as refused after
+  about 2 s on Windows, so the probe gives up after 200 ms instead, and every
+  command that listens starts about 200 ms later.
+- A connection that closes without sending anything (such as a probe from
+  another `ttskit`) is skipped silently.
 - Unknown fields are ignored; unknown message IDs are returned as
   `Incoming::Unknown` with the full object.
 

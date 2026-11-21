@@ -377,3 +377,25 @@ async fn custom_message_that_is_not_an_object_is_refused_before_sending() {
         assert!(matches!(err, EditorError::CustomNotObject), "{err:?}");
     }
 }
+
+#[tokio::test]
+async fn an_empty_connection_is_skipped() {
+    let (listener, addr) = editor().await;
+    // Like the probe of `Listener::bind` in another process: connect, send nothing, close.
+    drop(tokio::net::TcpStream::connect(addr).await.unwrap());
+    let game = FakeGame::start(addr, vec![]).await.unwrap();
+    game.push(
+        addr,
+        &Incoming::Print {
+            message: "after".into(),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        listener.next_message(T).await.unwrap(),
+        Incoming::Print {
+            message: "after".into()
+        }
+    );
+}
