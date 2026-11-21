@@ -104,3 +104,9 @@ Manual check (needs the game; it reloads the loaded game): fetch with
 `get-scripts`, unpack a save of that game, edit one script, run
 `save-and-play DIR --dry-run`, then with `--yes`, and confirm the change in the
 game's script editor.
+
+Verified once against a real game (Windows, 18 objects with scripts): a tree
+built from the live state gave "nothing to do"; appending a comment to one
+object's script changed only that object (594 to 623 bytes), and restoring it
+brought the game back to the original text. Save & Play reloaded the game
+within a few seconds.
