@@ -54,13 +54,36 @@ and error (ID 3) arrive exactly like ID 1: a new connection, pretty-printed JSON
 with CRLF, closed by the game after the document. The error message carries
 `error`, `guid` and `errorMessagePrefix`.
 
-## Not yet observed
+## Execute Lua and custom messages (observed)
 
-`return 42` in an Execute Lua script produced no return message (ID 5) in the
-test, so its trigger conditions are unknown (it may need a different call shape
-or newer game version). Custom (4), game saved (6) and object created (7) were
-not captured; their framing is assumed to be the same and is covered only by the
-fake server. Slice #23 (execute Lua) should investigate ID 5.
+Checked against a running game, both with a large mod and with a new empty
+single-player game (only the table, default Global script):
+
+- **No return message.** `return 42`, strings, tables, `nil`, `false`, `true`,
+  several values, and `return self.getGUID()` in an object all produced no
+  return message (ID 5), in Global and in an object with a script. The ID 5
+  decoding stays (it is covered by the fake server) but nothing depends on it.
+  Use `print(...)` to get output.
+- **`print` (ID 2)** from the executed code arrives as usual. The game's own
+  scripts may print at any time, and nothing ties a print to a request.
+- **Errors (ID 3)** arrive for a runtime error and for a syntax error, with the
+  game's text in `errorMessagePrefix` (for example
+  `[Global] Lua Error <executeScript>: ...`).
+- **Unknown GUID:** `error` holds the GUID and the prefix is
+  `Error finding guid for execute script: `. The `guid` field was `-1`.
+- **Object without a script:** an existing object that has no script gives
+  `Object reference not set to an instance of an object` (with the object's
+  GUID in the prefix), so code can only run in an object that already has a
+  script. The Global script always exists.
+- **Functions persist:** a function defined by an executed script in Global
+  stays defined, so `function onExternalMessage(t) ... end` can be defined with
+  `exec` and then driven with `send`.
+- **Custom message (ID 2 outgoing):** delivered to `onExternalMessage` only
+  when it is a JSON object. A number or string is ignored without any error or
+  reply. The game does not acknowledge a delivered message.
+
+Game saved (6) and object created (7) were not captured; their framing is
+assumed to be the same and is covered only by the fake server.
 
 ## Commands
 
@@ -117,6 +140,40 @@ Second check on a non-workshop save (68 objects): changing and restoring a
 script worked; adding a script to an object listed only for its UI kept the UI
 intact; removing it needed `--allow-delete`; a first script on an object that
 had neither script nor UI was accepted, and an unknown GUID was ignored.
+
+### `ttskit editor exec [--guid GUID] 'lua code'`
+
+Runs Lua in the context of an object (default `-1`, Global) and prints what the
+game reports. Because the game linked no answer to a request and did not send
+return values in any check, the command collects instead of waiting for one:
+
+- It sends the code, then reads messages until a return value or a Lua error
+  arrives, or until nothing arrives for `--wait` milliseconds (default 1000),
+  or `--timeout` seconds in total (default 5; also bounds connecting).
+- `print` output is shown in arrival order, then the return value if the game
+  sent one (strings as is, other values as JSON). Prints from the game's own
+  scripts during that time are included; there is no way to tell them apart.
+- No reply at all is success with no output. The game is not running: error.
+- A Lua error is printed to stderr and the command exits with status 1, after
+  any output. The error for a GUID that does not exist, or an object without a
+  script, carries a hint (see above).
+- `--json` prints `{guid, prints, errors, ok}` and, only when the game sent
+  one, `returnValue` (so no value differs from a returned `null`). Errors
+  still give status 1.
+
+### `ttskit editor send JSON`
+
+Sends a custom message to the game's `onExternalMessage` handler. The message
+must be a JSON object; anything else is refused locally, since the game would
+drop it silently. The game does not acknowledge the message, so success means
+only that it was sent. `--json` prints `{"sent":true}`.
+
+Manual check (needs the game): `ttskit editor exec "print(1+1)"`,
+`ttskit editor exec "error('x')"` (status 1), `ttskit editor exec --guid
+<object without script> "print(1)"` (status 1 with a hint), then
+`ttskit editor exec "function onExternalMessage(t) print(t.hello) end"`, then
+`ttskit editor send '{"hello":"hi"}'` and confirm that `hi` is printed in the
+game.
 
 ### Workshop mods
 
