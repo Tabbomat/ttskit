@@ -197,7 +197,7 @@ pub fn pack(
     dir: &Path,
     output: &Path,
     safety: Safety,
-    keep_eol: bool,
+    options: &ttskit_core::PackOptions,
     json: bool,
     out: &mut dyn Write,
     err: &mut dyn Write,
@@ -207,8 +207,7 @@ pub fn pack(
     if !safety.force && output.exists() {
         inspect_target(output, &[], false)?;
     }
-    let packed = ttskit_core::pack(dir, &ttskit_core::PackOptions::new(keep_eol))
-        .map_err(|e| e.to_string())?;
+    let packed = ttskit_core::pack(dir, options).map_err(|e| e.to_string())?;
     let target = inspect_target(output, &packed.bytes, safety.force)?;
     if !safety.dry_run {
         let replace = !matches!(target, Target::Create);

@@ -778,3 +778,55 @@ fn save_pack_help_documents_the_safety_flags() {
         assert!(text.contains(needle), "{needle} missing: {text}");
     }
 }
+
+#[test]
+fn save_pack_include_bundles_modules_and_names_missing_ones() {
+    let tmp = tempfile::tempdir().unwrap();
+    let tree = tmp.path().join("tree");
+    let lib = tmp.path().join("lib");
+    std::fs::create_dir_all(&tree).unwrap();
+    std::fs::create_dir_all(&lib).unwrap();
+    std::fs::write(
+        tree.join("save.json"),
+        r#"{"LuaScript": "file:script.lua"}"#,
+    )
+    .unwrap();
+    std::fs::write(tree.join("script.lua"), "require(\"shared\")").unwrap();
+    let out = tmp.path().join("out.json");
+    let args = |extra: &[&str]| {
+        let mut v = vec![
+            "save",
+            "pack",
+            tree.to_str().unwrap(),
+            "-o",
+            out.to_str().unwrap(),
+            "--force",
+        ];
+        v.extend_from_slice(extra);
+        v.into_iter().map(String::from).collect::<Vec<_>>()
+    };
+    let run = |extra: &[&str]| {
+        let owned = args(extra);
+        let refs: Vec<&str> = owned.iter().map(String::as_str).collect();
+        ttskit(&refs)
+    };
+
+    let missing = run(&["--include", lib.to_str().unwrap()]);
+    assert_eq!(missing.status.code(), Some(1));
+    assert!(
+        stderr(&missing).contains("\"shared\""),
+        "{}",
+        stderr(&missing)
+    );
+    assert!(
+        stderr(&missing).contains("script.lua"),
+        "{}",
+        stderr(&missing)
+    );
+
+    std::fs::write(lib.join("shared.lua"), "return 1").unwrap();
+    let ok = run(&["--include", lib.to_str().unwrap()]);
+    assert_eq!(ok.status.code(), Some(0), "{}", stderr(&ok));
+    let packed = std::fs::read_to_string(&out).unwrap();
+    assert!(packed.contains("__bundle_register"), "{packed}");
+}

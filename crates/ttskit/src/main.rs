@@ -73,6 +73,10 @@ enum SaveCommand {
         /// Keep the line endings recorded at unpack (default: LF everywhere)
         #[arg(long)]
         keep_eol: bool,
+        /// Inline `require("Name")` (Name.lua, Name.ttslua) and `<Include src="Name"/>`
+        /// (Name.xml) from this directory; repeatable, searched in order
+        #[arg(long, value_name = "LIB_DIR")]
+        include: Vec<PathBuf>,
         /// Print machine-readable JSON instead of text
         #[arg(long)]
         json: bool,
@@ -370,6 +374,7 @@ fn run_simple(command: Command) -> Result<(), String> {
                     force,
                     dry_run,
                     keep_eol,
+                    include,
                     json,
                 },
         } => {
@@ -380,7 +385,11 @@ fn run_simple(command: Command) -> Result<(), String> {
                 clean: false,
                 dry_run,
             };
-            save::pack(&dir, &output, safety, keep_eol, json, &mut out, &mut err)?;
+            let options = ttskit_core::PackOptions {
+                includes: include,
+                ..ttskit_core::PackOptions::new(keep_eol)
+            };
+            save::pack(&dir, &output, safety, &options, json, &mut out, &mut err)?;
             out.flush().map_err(|e| e.to_string())
         }
         Command::Cloud {

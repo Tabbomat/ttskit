@@ -4,6 +4,8 @@
 //! `dir:contents`, ...) and returns the bytes of the save. It never writes
 //! anything; all errors are found before the caller writes the result.
 
+mod bundle;
+
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -35,6 +37,14 @@ pub enum PackError {
         /// The cause.
         source: serde_json::Error,
     },
+    /// A module or include could not be inlined (`--include`).
+    #[error("{}: {message}", path.display())]
+    Bundle {
+        /// The file that requires the module.
+        path: PathBuf,
+        /// What is wrong.
+        message: String,
+    },
     /// A text file is not valid UTF-8.
     #[error("{}: not valid UTF-8", .0.display())]
     NotUtf8(PathBuf),
@@ -60,13 +70,17 @@ pub enum PackError {
 }
 
 /// Options for [`pack`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PackOptions {
     /// Keep the line endings recorded at unpack (`--keep-eol`) instead of
     /// writing LF everywhere.
     pub keep_eol: bool,
     /// The line ending used by `keep_eol` where nothing was recorded.
     pub native: Eol,
+    /// Directories searched in order for `require("Name")` (`Name.lua`,
+    /// `Name.ttslua`) and `<Include src="Name"/>` (`Name.xml`). When empty,
+    /// scripts and UI are packed as they are.
+    pub includes: Vec<PathBuf>,
 }
 
 impl PackOptions {
@@ -75,6 +89,7 @@ impl PackOptions {
         PackOptions {
             keep_eol,
             native: Eol::native(),
+            includes: Vec::new(),
         }
     }
 }
@@ -111,9 +126,12 @@ pub fn pack(dir: &Path, options: &PackOptions) -> Result<Packed, PackError> {
     if !dir.is_dir() {
         return Err(PackError::NotADirectory(dir.to_owned()));
     }
+    if let Some(bad) = options.includes.iter().find(|d| !d.is_dir()) {
+        return Err(PackError::NotADirectory(bad.clone()));
+    }
     let mut packer = Packer {
         root: dir.to_owned(),
-        options: *options,
+        options: options.clone(),
         meta: Meta::default(),
         warnings: Vec::new(),
         objects: 0,
@@ -226,9 +244,19 @@ impl Packer {
     /// Reads a UTF-8 file without a BOM, as a string with the line breaks
     /// this run writes: LF by default, the recorded style with `--keep-eol`.
     fn read_text(&self, rel: &str) -> Result<String, PackError> {
+        let text = self.read_utf8(rel)?;
+        Ok(self.to_style(rel, &text))
+    }
+
+    fn read_utf8(&self, rel: &str) -> Result<String, PackError> {
         let bytes = self.read_bytes(rel)?;
         let body = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&bytes);
         let text = std::str::from_utf8(body).map_err(|_| PackError::NotUtf8(self.disk(rel)))?;
+        Ok(text.to_owned())
+    }
+
+    /// Converts the line breaks of `text` to the style used for `rel`.
+    fn to_style(&self, rel: &str, text: &str) -> String {
         let style = if self.options.keep_eol {
             self.meta
                 .eol
@@ -238,8 +266,24 @@ impl Packer {
         } else {
             Eol::Lf
         };
-        Ok(String::from_utf8(eol::convert(text, style))
-            .expect("converting line breaks keeps UTF-8"))
+        String::from_utf8(eol::convert(text, style)).expect("converting line breaks keeps UTF-8")
+    }
+
+    /// Reads a script or UI file; with include directories, inlines the
+    /// modules it requires.
+    fn read_script(&self, rel: &str, xml: bool) -> Result<String, PackError> {
+        if self.options.includes.is_empty() {
+            return self.read_text(rel);
+        }
+        let text = self.read_utf8(rel)?;
+        let lf = String::from_utf8(eol::convert(&text, Eol::Lf)).expect("UTF-8");
+        let origin = self.disk(rel);
+        let bundled = if xml {
+            bundle::bundle_xml(&lf, &origin, &self.options.includes)?
+        } else {
+            bundle::bundle_lua(&lf, &origin, &self.options.includes)?
+        };
+        Ok(self.to_style(rel, &bundled))
     }
 
     fn read_meta(&mut self) -> Result<(), PackError> {
@@ -420,7 +464,10 @@ impl Packer {
         dir: &str,
         json: &str,
     ) -> Result<(), PackError> {
-        for (key, file) in [("LuaScript", "script.lua"), ("XmlUI", "ui.xml")] {
+        for (key, file, xml) in [
+            ("LuaScript", "script.lua", false),
+            ("XmlUI", "ui.xml", true),
+        ] {
             let existing = self.existing(dir, &[file], false)?;
             self.resolve_field(
                 map,
@@ -430,7 +477,7 @@ impl Packer {
                 existing,
                 empty_string,
                 json,
-                &mut |p, rel| p.read_text(rel).map(Value::String),
+                &mut |p, rel| p.read_script(rel, xml).map(Value::String),
             )?;
         }
         let existing = self.existing(dir, &["state.json", "state.txt"], false)?;
