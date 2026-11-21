@@ -292,6 +292,121 @@ pub async fn save_and_play_with(
     Ok(())
 }
 
+// ---- exec and send ------------------------------------------------------
+
+/// The text of a Lua error as the game would show it. The game's prefix
+/// already contains the message for Lua errors, but not for "unknown GUID".
+fn error_text(e: &ttskit_editor::LuaError) -> String {
+    let text = if e.prefix.contains(&e.error) {
+        e.prefix.clone()
+    } else {
+        format!("{}{}", e.prefix, e.error)
+    };
+    if e.prefix.starts_with("Error finding guid") {
+        format!("{text} (the object must exist and already have a script)")
+    } else if e.error == "Object reference not set to an instance of an object" {
+        // Observed for an existing object that has no script yet.
+        format!(
+            "{text} (the object most likely has no script; the game can only execute code in an object that already has one)"
+        )
+    } else {
+        text
+    }
+}
+
+fn value_text(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
+fn exec_json(guid: &str, outcome: &ttskit_editor::ExecOutcome) -> Value {
+    let mut doc = json!({
+        "guid": guid,
+        "prints": outcome.prints,
+        "errors": outcome.errors.iter().map(|e| json!({
+            "guid": e.guid,
+            "error": e.error,
+            "message": error_text(e),
+        })).collect::<Vec<_>>(),
+        "ok": outcome.errors.is_empty(),
+    });
+    // Absent when the game sent none, so "no value" differs from a returned null.
+    if let Some(v) = &outcome.return_value {
+        doc["returnValue"] = v.clone();
+    }
+    doc
+}
+
+/// `ttskit editor exec`: run Lua and print prints and the return value. A Lua
+/// error is returned as `Err` after the output (also with `json`).
+pub fn exec(
+    code: &str,
+    guid: &str,
+    wait: Duration,
+    json: bool,
+    ep: Endpoints,
+    out: &mut dyn Write,
+) -> Result<(), String> {
+    let rt = runtime()?;
+    rt.block_on(async {
+        let listener = Listener::bind(ep.editor).await.map_err(editor_err)?;
+        exec_with(&listener, code, guid, wait, json, ep, out).await
+    })
+}
+
+pub async fn exec_with(
+    listener: &Listener,
+    code: &str,
+    guid: &str,
+    wait: Duration,
+    json: bool,
+    ep: Endpoints,
+    out: &mut dyn Write,
+) -> Result<(), String> {
+    let io = |e: std::io::Error| e.to_string();
+    let outcome = ttskit_editor::execute_lua(listener, ep.game, guid, code, ep.timeout, wait)
+        .await
+        .map_err(editor_err)?;
+    if json {
+        let text =
+            serde_json::to_string_pretty(&exec_json(guid, &outcome)).map_err(|e| e.to_string())?;
+        writeln!(out, "{text}").map_err(io)?;
+    } else {
+        for p in &outcome.prints {
+            writeln!(out, "{p}").map_err(io)?;
+        }
+        if let Some(v) = &outcome.return_value {
+            writeln!(out, "{}", value_text(v)).map_err(io)?;
+        }
+    }
+    match outcome.errors.as_slice() {
+        [] => Ok(()),
+        errors => Err(errors.iter().map(error_text).collect::<Vec<_>>().join("\n")),
+    }
+}
+
+/// `ttskit editor send`: send a custom message (a JSON object) to the game.
+pub fn send_message(
+    message: &str,
+    json: bool,
+    ep: Endpoints,
+    out: &mut dyn Write,
+) -> Result<(), String> {
+    let value: Value =
+        serde_json::from_str(message).map_err(|e| format!("the message is not valid JSON: {e}"))?;
+    let rt = runtime()?;
+    rt.block_on(ttskit_editor::send_custom(ep.game, value, ep.timeout))
+        .map_err(editor_err)?;
+    if json {
+        writeln!(out, "{}", json!({ "sent": true })).map_err(|e| e.to_string())
+    } else {
+        writeln!(out, "Sent; the game does not acknowledge custom messages.")
+            .map_err(|e| e.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -508,5 +623,172 @@ mod tests {
         assert_eq!(guids, ["-1", "a", "b", "d", "c"]);
         assert_eq!(found[0].script.as_deref(), Some("g"));
         assert_eq!(found[2].ui.as_deref(), Some("<b/>"));
+    }
+
+    async fn exec_run(replies: Vec<Value>, json: bool) -> (Result<(), String>, String) {
+        let listener = Listener::bind("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+        let editor = listener.local_addr().unwrap();
+        let game = FakeGame::start_with(
+            editor,
+            vec![],
+            Box::new(move |m| {
+                if m["messageID"] == 3 {
+                    replies.clone()
+                } else {
+                    vec![]
+                }
+            }),
+        )
+        .await
+        .unwrap();
+        let ep = Endpoints {
+            game: game.addr(),
+            editor,
+            timeout: Duration::from_secs(5),
+        };
+        let mut out = Vec::new();
+        let wait = Duration::from_millis(150);
+        let r = exec_with(&listener, "x", "-1", wait, json, ep, &mut out).await;
+        (r, String::from_utf8(out).unwrap())
+    }
+
+    #[tokio::test]
+    async fn exec_prints_output_then_the_return_value() {
+        let (r, out) = exec_run(
+            vec![
+                json!({"messageID": 2, "message": "hi"}),
+                json!({"messageID": 5, "returnValue": "done"}),
+            ],
+            false,
+        )
+        .await;
+        r.unwrap();
+        assert_eq!(out, "hi\ndone\n");
+    }
+
+    #[tokio::test]
+    async fn exec_prints_non_string_values_as_json() {
+        let (_, out) = exec_run(
+            vec![json!({"messageID": 5, "returnValue": {"a": 1}})],
+            false,
+        )
+        .await;
+        assert_eq!(out, "{\"a\":1}\n");
+    }
+
+    #[tokio::test]
+    async fn exec_with_no_reply_succeeds_silently() {
+        let (r, out) = exec_run(vec![], false).await;
+        r.unwrap();
+        assert_eq!(out, "");
+    }
+
+    #[tokio::test]
+    async fn exec_lua_error_fails_after_printing_output() {
+        let (r, out) = exec_run(
+            vec![
+                json!({"messageID": 2, "message": "before"}),
+                json!({"messageID": 3, "guid": "-1", "error": "boom",
+                       "errorMessagePrefix": "[Global] Lua Error <executeScript>: boom"}),
+            ],
+            false,
+        )
+        .await;
+        assert!(r.unwrap_err().contains("Lua Error <executeScript>: boom"));
+        assert_eq!(out, "before\n");
+    }
+
+    #[tokio::test]
+    async fn exec_unknown_guid_error_explains_the_script_requirement() {
+        let (r, _) = exec_run(
+            vec![json!({"messageID": 3, "guid": "-1", "error": "zzz",
+                        "errorMessagePrefix": "Error finding guid for execute script: "})],
+            false,
+        )
+        .await;
+        let e = r.unwrap_err();
+        assert!(
+            e.contains("zzz") && e.contains("already have a script"),
+            "{e}"
+        );
+    }
+
+    #[tokio::test]
+    async fn exec_on_an_object_without_a_script_explains_the_cryptic_game_error() {
+        let (r, _) = exec_run(
+            vec![json!({"messageID": 3, "guid": "a53de1",
+                        "error": "Object reference not set to an instance of an object",
+                        "errorMessagePrefix": "[Hand Trigger - a53de1] Lua Error <executeScript>: Object reference not set to an instance of an object"})],
+            false,
+        )
+        .await;
+        assert!(r.unwrap_err().contains("has no script"));
+    }
+
+    #[tokio::test]
+    async fn exec_json_distinguishes_no_value_from_null_and_lists_errors() {
+        let (r, out) = exec_run(vec![json!({"messageID": 5, "returnValue": null})], true).await;
+        r.unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert!(v.as_object().unwrap().contains_key("returnValue"));
+        assert_eq!(v["ok"], true);
+
+        let (_, out) = exec_run(vec![], true).await;
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert!(!v.as_object().unwrap().contains_key("returnValue"));
+
+        let (r, out) = exec_run(
+            vec![json!({"messageID": 3, "guid": "-1", "error": "boom",
+                        "errorMessagePrefix": "P: boom"})],
+            true,
+        )
+        .await;
+        assert!(r.is_err());
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["ok"], false);
+        assert_eq!(v["errors"][0]["error"], "boom");
+    }
+
+    #[test]
+    fn send_message_rejects_invalid_json_and_non_objects_without_connecting() {
+        let ep = Endpoints::new(1, 2);
+        let mut out = Vec::new();
+        let e = send_message("{nope", false, ep, &mut out).unwrap_err();
+        assert!(e.contains("not valid JSON"), "{e}");
+        let e = send_message("[1]", false, ep, &mut out).unwrap_err();
+        assert!(e.contains("JSON object"), "{e}");
+        assert!(out.is_empty());
+    }
+
+    #[tokio::test]
+    async fn send_message_delivers_the_object() {
+        let listener = Listener::bind("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+        let editor = listener.local_addr().unwrap();
+        let game = FakeGame::start(editor, vec![]).await.unwrap();
+        let ep = Endpoints {
+            game: game.addr(),
+            editor,
+            timeout: Duration::from_secs(5),
+        };
+        // send_message owns a runtime, so run it off the async thread.
+        let out = std::thread::spawn(move || {
+            let mut out = Vec::new();
+            send_message("{\"a\":1}", true, ep, &mut out).map(|_| out)
+        })
+        .join()
+        .unwrap()
+        .unwrap();
+        assert_eq!(String::from_utf8(out).unwrap().trim(), "{\"sent\":true}");
+        for _ in 0..40 {
+            if !game.received().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert_eq!(game.received()[0]["customMessage"], json!({"a": 1}));
     }
 }

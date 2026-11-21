@@ -46,11 +46,16 @@ struct EditorPorts {
     /// Port this command listens on for the game's replies
     #[arg(long, default_value_t = ttskit_editor::EDITOR_PORT)]
     editor_port: u16,
+    /// Seconds to wait for connecting, sending and for the game's reply
+    #[arg(long, default_value_t = ttskit_editor::DEFAULT_TIMEOUT.as_secs(), value_name = "SECONDS")]
+    timeout: u64,
 }
 
 impl EditorPorts {
     fn endpoints(&self) -> editor::Endpoints {
-        editor::Endpoints::new(self.game_port, self.editor_port)
+        let mut ep = editor::Endpoints::new(self.game_port, self.editor_port);
+        ep.timeout = std::time::Duration::from_secs(self.timeout);
+        ep
     }
 }
 
@@ -85,6 +90,42 @@ enum EditorCommand {
         /// Allow scripts or UI that exist in the game but not in the source to be deleted
         #[arg(long)]
         allow_delete: bool,
+        /// Print machine-readable JSON instead of text
+        #[arg(long)]
+        json: bool,
+        #[command(flatten)]
+        ports: EditorPorts,
+    },
+    /// Run Lua in the game and print what it reports
+    ///
+    /// Runs in the context of an object (default: Global). The object must
+    /// already have a script, or the game reports an error. The game was not
+    /// observed to answer `return` statements, so use `print(...)` for output;
+    /// a returned value is shown if the game sends one. Output printed by the
+    /// game's own scripts in the meantime is included. A Lua error makes the
+    /// command fail.
+    Exec {
+        /// The Lua code to run
+        code: String,
+        /// GUID of the object to run in; the default `-1` is Global
+        #[arg(long, default_value = ttskit_editor::GLOBAL_GUID)]
+        guid: String,
+        /// Stop collecting output after this many milliseconds without a message
+        #[arg(long, default_value_t = 1000, value_name = "MILLISECONDS")]
+        wait: u64,
+        /// Print machine-readable JSON instead of text
+        #[arg(long)]
+        json: bool,
+        #[command(flatten)]
+        ports: EditorPorts,
+    },
+    /// Send a custom message to the game's `onExternalMessage` handler
+    ///
+    /// The message must be a JSON object; the game ignores anything else.
+    /// The game does not acknowledge it, so success only means it was sent.
+    Send {
+        /// A JSON object, for example '{"action":"ping"}'
+        message: String,
         /// Print machine-readable JSON instead of text
         #[arg(long)]
         json: bool,
@@ -437,6 +478,33 @@ fn run_simple(command: Command) -> Result<(), String> {
                 json,
             };
             editor::save_and_play(&desired, ports.endpoints(), options, &mut out)?;
+            out.flush().map_err(|e| e.to_string())
+        }
+        Command::Editor {
+            command:
+                EditorCommand::Exec {
+                    code,
+                    guid,
+                    wait,
+                    json,
+                    ports,
+                },
+        } => {
+            let mut out = std::io::stdout().lock();
+            let wait = std::time::Duration::from_millis(wait);
+            editor::exec(&code, &guid, wait, json, ports.endpoints(), &mut out)?;
+            out.flush().map_err(|e| e.to_string())
+        }
+        Command::Editor {
+            command:
+                EditorCommand::Send {
+                    message,
+                    json,
+                    ports,
+                },
+        } => {
+            let mut out = std::io::stdout().lock();
+            editor::send_message(&message, json, ports.endpoints(), &mut out)?;
             out.flush().map_err(|e| e.to_string())
         }
         Command::Save {
