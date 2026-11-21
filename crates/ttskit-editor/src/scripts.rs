@@ -128,26 +128,55 @@ pub struct ScriptPlan {
     pub untouched: usize,
 }
 
-fn text(s: &Option<String>) -> Option<&str> {
-    s.as_deref().filter(|s| !s.is_empty())
-}
-
 /// Line endings are not a change: the game stores CRLF scripts that a tree
 /// packed with LF would otherwise show as completely rewritten.
-fn same(a: &str, b: &str) -> bool {
-    a.replace("\r\n", "\n") == b.replace("\r\n", "\n")
+fn lf(s: &str) -> String {
+    s.replace("\r\n", "\n")
+}
+
+/// The text the game keeps of `sent`: it drops exactly one trailing newline
+/// (observed for scripts and UI, `"x\n\t\n"` is stored as `"x\n\t"`), so a
+/// source file that ends with a newline matches the game's copy without it.
+fn stored(sent: &str) -> String {
+    let s = lf(sent);
+    match s.strip_suffix('\n') {
+        Some(t) => t.to_owned(),
+        None => s,
+    }
 }
 
 fn field(live: &Option<String>, want: &Option<String>) -> FieldChange {
-    match (text(live), text(want)) {
+    let live = live.as_deref().filter(|s| !s.is_empty());
+    let want = want.as_deref().filter(|s| !stored(s).is_empty());
+    match (live, want) {
         (None, None) => FieldChange::Unchanged,
         (None, Some(new)) => FieldChange::Add { new: new.into() },
         (Some(old), None) => FieldChange::Delete { old: old.into() },
-        (Some(old), Some(new)) if same(old, new) => FieldChange::Unchanged,
+        // Equal as written, or equal to what the game keeps: sending would
+        // not change the game's text.
+        (Some(old), Some(new)) if lf(old) == lf(new) || lf(old) == stored(new) => {
+            FieldChange::Unchanged
+        }
         (Some(old), Some(new)) => FieldChange::Modify {
             old: old.into(),
             new: new.into(),
         },
+    }
+}
+
+/// Two source texts that the game would store the same way.
+fn same_wanted(a: &Option<String>, b: &Option<String>) -> bool {
+    let kept = |s: &Option<String>| s.as_deref().map(stored).unwrap_or_default();
+    kept(a) == kept(b)
+}
+
+/// Global cannot lose its script or UI: the game puts its default UI back
+/// for an empty one, and an empty Global script is not sent either. A
+/// missing Global field therefore leaves the game's text alone.
+fn keep_global(guid: &str, change: FieldChange) -> FieldChange {
+    match change {
+        FieldChange::Delete { .. } if guid == crate::exec::GLOBAL_GUID => FieldChange::Unchanged,
+        other => other,
     }
 }
 
@@ -167,9 +196,7 @@ pub fn plan(live: &[ScriptState], desired: &[Desired]) -> Result<ScriptPlan, Pla
     for d in desired {
         match wanted.get(d.guid.as_str()) {
             Some(prev) => {
-                let equal = !field(&prev.script, &d.script).is_change()
-                    && !field(&prev.ui, &d.ui).is_change();
-                if !equal {
+                if !same_wanted(&prev.script, &d.script) || !same_wanted(&prev.ui, &d.ui) {
                     return Err(PlanError::AmbiguousGuid(d.guid.clone()));
                 }
             }
@@ -184,8 +211,8 @@ pub fn plan(live: &[ScriptState], desired: &[Desired]) -> Result<ScriptPlan, Pla
             plan.untouched += 1;
             continue;
         };
-        let script = field(&l.script, &d.script);
-        let ui = field(&l.ui, &d.ui);
+        let script = keep_global(&l.guid, field(&l.script, &d.script));
+        let ui = keep_global(&l.guid, field(&l.ui, &d.ui));
         if !script.is_change() && !ui.is_change() {
             continue;
         }
@@ -295,6 +322,75 @@ mod tests {
         )
         .unwrap();
         assert!(p.is_empty());
+    }
+
+    #[test]
+    fn one_trailing_newline_the_game_drops_is_not_a_change() {
+        // The game stores "x\n" as "x"; a trailing CRLF counts as one newline.
+        for source in ["x\n", "x\r\n", "x"] {
+            let p = plan(
+                &[live("a", Some("x"), None)],
+                &[want("a", Some(source), None)],
+            )
+            .unwrap();
+            assert!(p.is_empty(), "{source:?}");
+        }
+        // Only one: the game keeps "x\n" of "x\n\n", so that is what matches.
+        let p = plan(
+            &[live("a", Some("x\n"), None)],
+            &[want("a", Some("x\n\n"), None)],
+        )
+        .unwrap();
+        assert!(p.is_empty());
+        let p = plan(
+            &[live("a", Some("x"), None)],
+            &[want("a", Some("x\n\n"), None)],
+        )
+        .unwrap();
+        assert_eq!(p.changes.len(), 1);
+        // The text is sent as written; the game trims it.
+        assert_eq!(p.changes[0].state.script.as_deref(), Some("x\n\n"));
+    }
+
+    #[test]
+    fn a_source_that_is_only_a_newline_is_empty() {
+        let p = plan(&[], &[want("a", Some("\n"), None)]).unwrap();
+        assert!(p.is_empty());
+        let p = plan(
+            &[live("a", Some("s"), Some("<ui/>"))],
+            &[want("a", Some("s"), Some("\n"))],
+        )
+        .unwrap();
+        assert!(matches!(p.changes[0].ui, FieldChange::Delete { .. }));
+    }
+
+    #[test]
+    fn duplicates_that_differ_only_in_the_trailing_newline_are_not_ambiguous() {
+        plan(
+            &[live("a", Some("s"), None)],
+            &[want("a", Some("1\n"), None), want("a", Some("1"), None)],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn global_script_and_ui_missing_in_the_source_are_left_alone() {
+        let g = crate::exec::GLOBAL_GUID;
+        let p = plan(&[live(g, Some("s"), Some("<ui/>"))], &[want(g, None, None)]).unwrap();
+        assert!(p.is_empty());
+        assert!(!p.deletes());
+        // A changed Global script still sends the live UI in full.
+        let p = plan(
+            &[live(g, Some("s"), Some("<ui/>"))],
+            &[want(g, Some("t"), None)],
+        )
+        .unwrap();
+        assert!(!p.deletes());
+        assert_eq!(p.changes[0].ui, FieldChange::Unchanged);
+        assert_eq!(p.changes[0].state.ui.as_deref(), Some("<ui/>"));
+        // Objects other than Global are still deleted.
+        let p = plan(&[live("a", Some("s"), None)], &[want("a", None, None)]).unwrap();
+        assert!(p.deletes());
     }
 
     #[test]
