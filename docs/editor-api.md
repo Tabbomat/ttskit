@@ -47,8 +47,17 @@ holding ports 39998/39999:
 cargo test -p ttskit-editor --test real_game -- --ignored --nocapture
 ```
 
+## Other incoming messages
+
+Observed with Execute Lua (`print` and a deliberate syntax error): print (ID 2)
+and error (ID 3) arrive exactly like ID 1: a new connection, pretty-printed JSON
+with CRLF, closed by the game after the document. The error message carries
+`error`, `guid` and `errorMessagePrefix`.
+
 ## Not yet observed
 
-Only the reply to "get scripts" (ID 1) has been captured from a real game.
-Framing of the other incoming IDs (print, error, custom, return, saved, object
-created) is assumed to be the same and is covered only by the fake server.
+`return 42` in an Execute Lua script produced no return message (ID 5) in the
+test, so its trigger conditions are unknown (it may need a different call shape
+or newer game version). Custom (4), game saved (6) and object created (7) were
+not captured; their framing is assumed to be the same and is covered only by the
+fake server. Slice #23 (execute Lua) should investigate ID 5.
