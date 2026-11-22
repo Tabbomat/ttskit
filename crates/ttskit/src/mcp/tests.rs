@@ -210,6 +210,8 @@ async fn tools_list_has_the_editor_and_save_tools() {
     let r = h.client.request("tools/list", json!({})).await;
     let tools = r["result"]["tools"].as_array().unwrap();
     let mut names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+    // The cloud tools exist only in builds with Steam support.
+    names.retain(|n| !n.starts_with("cloud_"));
     names.sort_unstable();
     assert_eq!(
         names,
@@ -1744,4 +1746,234 @@ async fn every_save_tool_refuses_paths_outside_the_root() {
             );
         }
     }
+}
+
+// ---- Cloud tools ----
+
+fn cloud_entry(name: &str, data: &[u8], folder: &str) -> ttskit_cloud::IndexEntry {
+    let key = format!("{}_{name}", ttskit_cloud::sha1_hex(data));
+    ttskit_cloud::IndexEntry::new(&key, name, None, Some(data.len() as u64), None, folder)
+}
+
+/// A factory that builds an in-memory cloud with a few synthetic files:
+/// `a.png` in the root and `b.png` in the folder `Decks`.
+fn memory_backend() -> cloud_tools::BackendFactory {
+    Arc::new(|| {
+        let a = cloud_entry("a.png", b"aaa", "");
+        let b = cloud_entry("b.png", b"bbbb", "Decks");
+        let mut index = ttskit_cloud::CloudIndex::empty();
+        index.folders = vec!["Decks".into()];
+        index.entries = vec![a.clone(), b.clone()];
+        let cloud = ttskit_cloud::MemoryCloud::new()
+            .with_file(ttskit_cloud::CLOUD_INFO_FILE, index.encode_info().unwrap())
+            .with_file(
+                ttskit_cloud::CLOUD_FOLDER_FILE,
+                index.encode_folders().unwrap(),
+            )
+            .with_file(&a.key, b"aaa".to_vec())
+            .with_file(&b.key, b"bbbb".to_vec());
+        Ok(Box::new(cloud) as Box<dyn ttskit_cloud::CloudBackend>)
+    })
+}
+
+async fn with_cloud(backend: cloud_tools::BackendFactory) -> (Client, tempfile::TempDir) {
+    let root = tempfile::tempdir().unwrap();
+    let ep = Endpoints::new(1, free_port());
+    let held = Listener::bind(ep.editor).await.unwrap();
+    std::mem::forget(held);
+    let server = EditorServer::start(ep, resolve_root(Some(root.path())).unwrap(), 10)
+        .await
+        .with_backend(backend);
+    let mut client = attach(server).await;
+    client.initialize().await;
+    (client, root)
+}
+
+fn local_project(root: &tempfile::TempDir) {
+    std::fs::create_dir_all(root.path().join("proj")).unwrap();
+    std::fs::write(root.path().join("proj/a.png"), b"aaa").unwrap();
+}
+
+#[tokio::test]
+async fn cloud_list_shows_all_files_or_one_folder() {
+    let (mut client, _root) = with_cloud(memory_backend()).await;
+    let r = client.call("cloud_list", json!({})).await;
+    assert!(!is_error(&r), "{r}");
+    let text = body(&r).to_string();
+    assert!(text.contains("a.png") && text.contains("b.png"), "{text}");
+
+    let r = client.call("cloud_list", json!({"folder": "Decks"})).await;
+    assert!(!is_error(&r), "{r}");
+    let text = body(&r).to_string();
+    assert!(text.contains("b.png") && !text.contains("a.png"), "{text}");
+
+    let r = client.call("cloud_list", json!({"folder": "Nope"})).await;
+    assert!(error_text(&r).contains("Nope"));
+}
+
+#[tokio::test]
+async fn cloud_status_in_sync_and_out_of_sync_are_normal_results() {
+    let (mut client, root) = with_cloud(memory_backend()).await;
+    // The cloud folder Decks holds b.png ("bbbb").
+    std::fs::create_dir_all(root.path().join("decks")).unwrap();
+    std::fs::write(root.path().join("decks/b.png"), b"bbbb").unwrap();
+    let args = json!({"dir": "decks", "folder": "Decks"});
+    let r = client.call("cloud_status", args.clone()).await;
+    assert!(!is_error(&r), "{r}");
+    let doc = body(&r);
+    assert_eq!(doc["in_sync"], true, "{doc}");
+    assert_eq!(doc["dir"], "decks");
+
+    // An extra local file: not in sync, still not an error.
+    std::fs::write(root.path().join("decks/extra.txt"), b"x").unwrap();
+    let r = client.call("cloud_status", args.clone()).await;
+    assert!(!is_error(&r), "{r}");
+    let doc = body(&r);
+    assert_eq!(doc["in_sync"], false, "{doc}");
+    assert!(doc.to_string().contains("extra.txt"), "{doc}");
+
+    // Ignore patterns from the project config in the root (the default).
+    write(
+        &root,
+        "ttskit.toml",
+        "[cloud]
+folder = \"Decks\"
+
+[local]
+dir = \"decks\"
+ignore = [\"*.txt\"]
+",
+    );
+    let r = client.call("cloud_status", args.clone()).await;
+    let doc = body(&r);
+    assert_eq!(doc["in_sync"], true, "{doc}");
+    assert_eq!(doc["ignored"]["local"], 1, "{doc}");
+
+    // An explicit config wins over the default; a bad one is an error.
+    write(
+        &root,
+        "other.toml",
+        "[cloud]
+folder = \"Decks\"
+
+[local]
+dir = \"decks\"
+",
+    );
+    let mut with_config = args.clone();
+    with_config["config"] = json!("other.toml");
+    let r = client.call("cloud_status", with_config).await;
+    assert_eq!(body(&r)["in_sync"], false);
+    write(
+        &root, "bad.toml", "[local
+",
+    );
+    let r = client
+        .call(
+            "cloud_status",
+            json!({"dir": "decks", "folder": "Decks", "config": "bad.toml"}),
+        )
+        .await;
+    assert!(is_error(&r));
+    let r = client
+        .call("cloud_status", json!({"dir": "missing-dir"}))
+        .await;
+    assert!(is_error(&r));
+}
+
+#[tokio::test]
+async fn cloud_status_refuses_paths_outside_the_root() {
+    let (mut client, root) = with_cloud(memory_backend()).await;
+    local_project(&root);
+    let outside = tempfile::tempdir().unwrap();
+    let outside_text = outside.path().to_str().unwrap();
+    for path in ["..", outside_text] {
+        for args in [json!({"dir": path}), json!({"dir": "proj", "config": path})] {
+            let r = client.call("cloud_status", args.clone()).await;
+            let error = error_text(&r);
+            assert!(
+                error.contains("`..`") || error.contains("outside the project root"),
+                "{args}: {error}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_failing_backend_factory_is_a_tool_error() {
+    let failing: cloud_tools::BackendFactory = Arc::new(|| Err("Steam is not running".to_owned()));
+    let (mut client, root) = with_cloud(failing).await;
+    local_project(&root);
+    let r = client.call("cloud_list", json!({})).await;
+    assert_eq!(error_text(&r), "Steam is not running");
+    let r = client.call("cloud_status", json!({"dir": "proj"})).await;
+    assert_eq!(error_text(&r), "Steam is not running");
+    // The server keeps working.
+    let r = client.call("get_status", json!({})).await;
+    assert!(!is_error(&r), "{r}");
+}
+
+#[tokio::test]
+async fn cloud_calls_do_not_overlap() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let active = Arc::new(AtomicUsize::new(0));
+    let overlapped = Arc::new(AtomicUsize::new(0));
+    let (a, o) = (active.clone(), overlapped.clone());
+    let slow: cloud_tools::BackendFactory = Arc::new(move || {
+        if a.fetch_add(1, Ordering::SeqCst) > 0 {
+            o.fetch_add(1, Ordering::SeqCst);
+        }
+        std::thread::sleep(Duration::from_millis(150));
+        let result = memory_backend()();
+        a.fetch_sub(1, Ordering::SeqCst);
+        result
+    });
+    let (mut client, _root) = with_cloud(slow).await;
+    let first = client.send_call("cloud_list", json!({})).await;
+    let second = client.send_call("cloud_list", json!({})).await;
+    for id in [first, second] {
+        let r = client.response(id).await;
+        assert!(r["result"]["isError"] != true, "{r}");
+    }
+    assert_eq!(overlapped.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn the_cloud_tools_are_dropped_without_a_backend() {
+    let cloud = ["cloud_list", "cloud_status"];
+    let with = cloud_tools::with_cloud_tools(EditorServer::tool_router(), true);
+    let without = cloud_tools::with_cloud_tools(EditorServer::tool_router(), false);
+    for name in cloud {
+        assert!(with.has_route(name), "{name}");
+        assert!(!without.has_route(name), "{name}");
+    }
+    // Everything else stays.
+    assert!(without.has_route("save_scan") && without.has_route("get_status"));
+    assert_eq!(with.list_all().len(), without.list_all().len() + 2);
+}
+
+#[tokio::test]
+async fn the_production_server_lists_cloud_tools_only_with_steam_support() {
+    let (mut client, _root) = without_editor(None).await;
+    let r = client.request("tools/list", json!({})).await;
+    let listed = r["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|t| t["name"] == "cloud_list");
+    assert_eq!(listed, cfg!(feature = "steam"));
+}
+
+#[tokio::test]
+async fn the_cloud_tools_are_listed_with_a_backend() {
+    let (mut client, _root) = with_cloud(memory_backend()).await;
+    let r = client.request("tools/list", json!({})).await;
+    let names: Vec<&str> = r["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"cloud_list") && names.contains(&"cloud_status"));
+    assert_eq!(names.len(), 13);
 }

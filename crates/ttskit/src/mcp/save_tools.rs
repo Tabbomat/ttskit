@@ -109,14 +109,16 @@ where
 }
 
 /// Run a CLI command that writes JSON to `out` and parse what it wrote.
-fn json_of(command: impl FnOnce(&mut Vec<u8>) -> Result<(), String>) -> Result<Value, String> {
+pub(super) fn json_of(
+    command: impl FnOnce(&mut Vec<u8>) -> Result<(), String>,
+) -> Result<Value, String> {
     let mut out = Vec::new();
     command(&mut out)?;
     serde_json::from_slice(&out).map_err(|e| format!("the command wrote invalid JSON: {e}"))
 }
 
 /// `name` inside the root (checked) if that file exists there, else `None`.
-fn existing_default(root: &Path, name: &str) -> Result<Option<PathBuf>, String> {
+pub(super) fn existing_default(root: &Path, name: &str) -> Result<Option<PathBuf>, String> {
     if root.join(name).exists() {
         resolve_in_root(root, Path::new(name)).map(Some)
     } else {

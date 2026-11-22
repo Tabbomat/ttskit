@@ -38,6 +38,24 @@ fn quota_json(quota: Option<Quota>) -> serde_json::Value {
     }
 }
 
+/// Opens the Steam Cloud backend: connects to the running Steam client.
+/// Shared by the CLI and the MCP server.
+#[cfg(feature = "steam")]
+pub fn connect() -> Result<Box<dyn CloudBackend>, String> {
+    ttskit_cloud::SteamCloud::connect()
+        .map(|cloud| Box::new(cloud) as Box<dyn CloudBackend>)
+        .map_err(|e| e.to_string())
+}
+
+/// Without the `steam` feature there is no backend.
+#[cfg(not(feature = "steam"))]
+pub fn connect() -> Result<Box<dyn CloudBackend>, String> {
+    Err(
+        "this ttskit build has no Steam support; rebuild with `cargo build --features steam`"
+            .to_owned(),
+    )
+}
+
 /// Errors of the `cloud` subcommands.
 #[derive(Debug, thiserror::Error)]
 pub enum CommandError {

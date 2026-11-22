@@ -1032,7 +1032,10 @@ fn mcp_serves_on_stdio_and_exits_zero_when_stdin_closes() {
     assert_eq!(response(1)["result"]["serverInfo"]["name"], "ttskit");
     send(serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
     send(serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}));
-    assert_eq!(response(2)["result"]["tools"].as_array().unwrap().len(), 11);
+    assert_eq!(
+        response(2)["result"]["tools"].as_array().unwrap().len(),
+        if cfg!(feature = "steam") { 13 } else { 11 }
+    );
     send(serde_json::json!({
         "jsonrpc": "2.0", "id": 3, "method": "tools/call",
         "params": {"name": "get_status", "arguments": {}}

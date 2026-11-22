@@ -22,7 +22,8 @@ use std::time::SystemTime;
 
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
-use ttskit_cloud::{BackupStore, CloudBackend};
+use cloud::connect;
+use ttskit_cloud::BackupStore;
 
 /// Unofficial command line toolkit for Tabletop Simulator mod development.
 #[derive(Parser)]
@@ -1478,21 +1479,6 @@ fn ask_on_terminal(prompt: &str) -> Result<bool, cloud::CommandError> {
     stdin.read_line(&mut line)?;
     let answer = line.trim();
     Ok(answer.eq_ignore_ascii_case("y") || answer.eq_ignore_ascii_case("yes"))
-}
-
-#[cfg(feature = "steam")]
-fn connect() -> Result<Box<dyn CloudBackend>, String> {
-    ttskit_cloud::SteamCloud::connect()
-        .map(|cloud| Box::new(cloud) as Box<dyn CloudBackend>)
-        .map_err(|e| e.to_string())
-}
-
-#[cfg(not(feature = "steam"))]
-fn connect() -> Result<Box<dyn CloudBackend>, String> {
-    Err(
-        "this ttskit build has no Steam support; rebuild with `cargo build --features steam`"
-            .to_owned(),
-    )
 }
 
 /// The directory holding the project config.

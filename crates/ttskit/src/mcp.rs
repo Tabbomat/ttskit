@@ -23,6 +23,7 @@ use sha2::{Digest, Sha256};
 use ttskit_editor::{EditorError, FieldChange, MessageSource, ScriptPlan};
 
 use self::buffer::{EventKind, Query};
+use self::cloud_tools::{CloudListArgs, CloudStatusArgs};
 use self::hub::{Hub, Replies};
 use self::save_tools::{
     ManifestShowArgs, SaveCheckUrlsArgs, SaveDiffArgs, SaveLintArgs, SaveScanArgs,
@@ -50,7 +51,7 @@ nextSince as `since` next time to get only newer events. execute_lua and save_an
 lastSeq for the same purpose. The save_scan, save_lint, save_diff, save_check_urls and \
 manifest_show tools are read-only, work on files inside the server's root and need no game \
 (only save_check_urls uses the network); their results are the JSON of the matching ttskit \
-commands.";
+commands. The cloud_list and cloud_status tools (only in builds with Steam support) are read-only and open Steam for each call, so Steam must be running and logged in; if it is not, they fail with the reason.";
 
 #[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
@@ -153,6 +154,11 @@ struct EditorServer {
     hub: Result<Arc<Hub>, String>,
     /// Makes the HTTP client of `save_check_urls`.
     fetcher: save_tools::FetcherFactory,
+    /// Opens the cloud backend per tool call; `None` in builds without Steam
+    /// support, which then do not list the cloud tools.
+    backend: Option<cloud_tools::BackendFactory>,
+    /// Serializes all use of the cloud backend, held across a whole call.
+    cloud_lock: Arc<tokio::sync::Mutex<()>>,
     /// Serializes the tool calls that send requests: the game ties no reply
     /// to its request, so two of them must not wait at the same time.
     lock: Arc<tokio::sync::Mutex<()>>,
@@ -171,9 +177,42 @@ impl EditorServer {
             root,
             hub,
             fetcher: save_tools::http_fetcher(),
+            backend: cloud_tools::production_backend(),
+            cloud_lock: Arc::default(),
+            tool_router: cloud_tools::with_cloud_tools(
+                Self::tool_router(),
+                cloud_tools::production_backend().is_some(),
+            ),
             lock: Arc::default(),
-            tool_router: Self::tool_router(),
         }
+    }
+
+    /// Use another cloud backend factory (tests); this lists the cloud tools.
+    #[cfg(test)]
+    fn with_backend(mut self, backend: cloud_tools::BackendFactory) -> Self {
+        self.backend = Some(backend);
+        self.tool_router = cloud_tools::with_cloud_tools(Self::tool_router(), true);
+        self
+    }
+
+    /// Run `work` with the backend factory on a blocking thread, holding the
+    /// cloud lock for the whole call. `work` opens the backend itself (so it
+    /// can validate its arguments before connecting) and must do all its
+    /// backend work inside, since the Steam backend is not `Send`. Failures
+    /// are normal tool errors.
+    async fn with_cloud<F>(&self, work: F) -> CallToolResult
+    where
+        F: FnOnce(&cloud_tools::BackendFactory) -> Result<Value, String> + Send + 'static,
+    {
+        let Some(factory) = self.backend.clone() else {
+            return failure(&json!({ "error": "this build has no Steam support" }));
+        };
+        let guard = self.cloud_lock.clone().lock_owned().await;
+        save_tools::run(move || {
+            let _guard = guard;
+            work(&factory)
+        })
+        .await
     }
 
     /// Use another HTTP client factory for `save_check_urls` (tests).
@@ -679,6 +718,23 @@ impl EditorServer {
         let root = self.root.clone();
         save_tools::run(move || save_tools::manifest_show(&root, args)).await
     }
+
+    #[tool(
+        description = "List the files in the Steam Cloud of the running Steam account, grouped by folder, with sizes and the quota (same JSON as `ttskit cloud list --json`). Read-only. Opens Steam for this call: Steam must be running and logged in, otherwise the call fails with the reason. Optional `folder` limits the listing."
+    )]
+    async fn cloud_list(&self, Parameters(args): Parameters<CloudListArgs>) -> CallToolResult {
+        self.with_cloud(move |factory| cloud_tools::list(factory, args))
+            .await
+    }
+
+    #[tool(
+        description = "Compare a local directory with a Steam Cloud folder (same JSON as `ttskit cloud status --json`): which files are in sync, changed, only local or only in the cloud. Not being in sync is a normal result, see the JSON. Read-only. The directory and config must be inside the server's root; ignore patterns come from the project config (default ttskit.toml in the root). Opens Steam for this call; it fails with the reason if Steam is unavailable."
+    )]
+    async fn cloud_status(&self, Parameters(args): Parameters<CloudStatusArgs>) -> CallToolResult {
+        let root = self.root.clone();
+        self.with_cloud(move |factory| cloud_tools::status(&root, factory, args))
+            .await
+    }
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -727,5 +783,6 @@ pub fn run(root: Option<&Path>, ep: Endpoints, max_events: usize) -> Result<(), 
 mod tests;
 
 mod buffer;
+mod cloud_tools;
 mod hub;
 mod save_tools;
