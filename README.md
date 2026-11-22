@@ -14,6 +14,8 @@ mods. Not affiliated with or endorsed by Berserk Games.
 - **Steam Cloud management:** one cloud folder per game, sync with a local
   directory, a committed manifest of asset URLs (done), and a scan of the
   asset URLs a save uses (done).
+- **Asset backup (done):** `save fetch-assets` downloads the asset URLs of a save into a
+  local directory with a stable `index.json`; reruns fetch only what is missing.
 - **Dead-link check (done):** `save check-urls` tells which asset URLs of a save no
   longer load.
 - **External Editor API client (done):** talk to a running game to read and write
@@ -69,6 +71,61 @@ ttskit save check-urls save.json --skip-host imgur.com
 - `--verify-content` fetches the first 1 KiB of each file and counts a `2xx` answer as `dead` when it is an HTML page (by `Content-Type` or by its first bytes), since some hosts answer 200 with a placeholder page. It does not check that the file is a valid image or model.
 - The text output lists each dead or unreachable URL with the JSON path, nickname and GUID of every use, then redirects and a summary line. `--json` lists all URLs sorted, with `result`, `status`/`target`/`reason`, `labels` and `occurrences`.
 - Exit status: 0 when nothing is dead or unreachable, 2 when something is, 1 on errors.
+
+## Asset backup
+
+`ttskit save fetch-assets SAVE.json --out DIR` downloads every asset URL of a save (images, models, sounds, ...) into a local directory, so a mod survives the day a host deletes its files. It needs the network but neither Steam nor the game, and it never modifies the save.
+
+```
+ttskit save fetch-assets save.json --out backup            # download what is missing
+ttskit save fetch-assets save.json --out backup --dry-run  # print the plan, create nothing
+ttskit save fetch-assets save.json --out backup --verify   # also rehash the files already there
+ttskit save fetch-assets save.json --out backup --max-size 64m --skip-host example.com
+ttskit save fetch-assets save.json --out backup --json     # machine-readable result
+```
+
+Layout of the output directory:
+
+```
+backup/index.json                  which URL is stored in which file
+backup/files/<sha256>.<type>       the downloaded files
+backup/.partial/                   downloads in progress; removed at the end
+```
+
+File names come only from the SHA-256 of the content and a fixed list of extensions, so no URL text reaches the file system, and identical content from several URLs is stored once.
+
+`index.json` is pretty printed with LF line endings and has no timestamps, so it is stable and can be committed:
+
+```json
+{
+  "version": 1,
+  "files": [
+    {
+      "url": "https://example.com/a.png",
+      "file": "files/3b4c...e1.png",
+      "size": 18342,
+      "sha256": "3b4c...e1",
+      "type": "png"
+    }
+  ]
+}
+```
+
+- `version` is `1`; a different version is an error. `files` is sorted by `url` (byte order) and has one entry per URL: `url` as written in the save, `file` the path relative to the directory (forward slashes), `size` in bytes, `sha256` lowercase hex of the content, `type` the file extension.
+- Entries of other saves are kept: use one directory for several saves, each run adds its URLs. Entries are never removed.
+- The type is detected in this order: the first bytes of the file (magic numbers of PNG, JPEG, GIF, WebP, WAV, PDF, Ogg, MP3, MP4 and Unity asset bundles), then the `Content-Type` header, then the extension of the URL path, else `bin`. Only a fixed list of types is used.
+
+Behavior:
+
+- The plan is printed first: `N URLs: P already present, D to download, S skipped`, plus `K invalid (will be downloaded again)` with the reasons, and with `--verify` the number of `verified` files. `--dry-run` stops there and creates nothing, not even the directory.
+- Resume: a URL that is in the index and whose file exists with the recorded size counts as present and is not requested again, so an interrupted run or a rerun downloads only what is missing. `--verify` also rehashes those files; one that does not match its recorded SHA-256 is invalid and downloaded again. An index entry whose file is missing or has the wrong size is invalid as well.
+- Files are written as `.partial` files and moved into `files/` only when complete, and `index.json` is replaced atomically, so an aborted run leaves no half-written file under its final name. An `index.json` that cannot be parsed is an error (exit 1) and is never overwritten.
+- Only `http` and `https` URLs are downloaded. Redirects are followed (up to 5). An answer that is an HTML page (by `Content-Type` or by its first bytes) is rejected as a failure, since some hosts answer 200 with an error page.
+- Timeouts, network errors, `429` and `5xx` are retried (`--retries`, default 3, with a growing pause).
+- `--host HOST` (only that host and its subdomains) and `--skip-host HOST` are repeatable and work as in `check-urls`.
+- Limits and defaults: `--max-size` 512m (bytes with an optional `k`, `m` or `g` suffix, binary multiples; a larger file fails, and download stops as soon as the limit is exceeded), `--concurrency` 16, `--per-host` 4, `--timeout` 30 (seconds to connect; a whole download may take up to an hour, so large files that make progress are not cut off). Requests identify as `ttskit/<version>`.
+- Output: the plan, one `failed: <url>: <reason>` line per failed URL with the JSON path, nickname and GUID of every use, then `downloaded X, failed Y` with the locations of the files and the index. There is no per-file progress. With `--json` the output is one object: `save`, `out`, `plan` (`total`, `present`, `to_download`, `skipped`, `invalid`, `verified`), `downloaded` (`url`, `file`, `size`, `sha256`, `type`), `failed` (`url`, `reason`, `occurrences`) and `index_error` (`null` or a message); with `--dry-run` only `plan` is filled in.
+- Exit status: 0 when everything is downloaded or present, 2 when a URL failed (the others are still downloaded and indexed) or the index could not be written, 1 on errors (unreadable save, invalid `index.json`, unusable directory) and for invalid arguments such as a bad `--max-size`.
 
 ## MCP server
 
