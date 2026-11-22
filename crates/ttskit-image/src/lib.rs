@@ -5,6 +5,12 @@
 //! loading generated test images in the game; they are recorded in
 //! `docs/image-formats.md`.
 
+mod convert;
+
+pub use convert::{
+    ConvertOptions, Converted, DEFAULT_JPEG_QUALITY, OutputFormat, convert, parse_color,
+};
+
 use std::fs::File;
 use std::io::{BufReader, Read, Seek};
 use std::path::{Path, PathBuf};
@@ -45,6 +51,22 @@ pub enum ImageError {
         path: PathBuf,
         source: image::ImageError,
     },
+    #[error("{}: could not encode the result: {source}", path.display())]
+    Encode {
+        path: PathBuf,
+        source: image::ImageError,
+    },
+    #[error(
+        "{}: {pixels} of {total} pixels are transparent or translucent and JPEG has no alpha channel; pass --background COLOR to flatten them onto a colour, or convert to png",
+        path.display()
+    )]
+    AlphaLost {
+        path: PathBuf,
+        pixels: u64,
+        total: u64,
+    },
+    #[error("{0}")]
+    Options(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -592,13 +614,13 @@ mod tests {
 }
 
 #[cfg(test)]
-mod compatibility_tests {
+pub(crate) mod compatibility_tests {
     use super::*;
     use image::codecs::png::PngEncoder;
     use image::{ImageBuffer, ImageEncoder, Rgb, Rgba};
 
     /// A 2x2, two-frame lossless animated WebP (generated, 140 bytes).
-    const ANIMATED_WEBP: &[u8] = &[
+    pub(crate) const ANIMATED_WEBP: &[u8] = &[
         0x52, 0x49, 0x46, 0x46, 0x84, 0x0, 0x0, 0x0, 0x57, 0x45, 0x42, 0x50, 0x56, 0x50, 0x38,
         0x58, 0xa, 0x0, 0x0, 0x0, 0x2, 0x0, 0x0, 0x0, 0x1, 0x0, 0x0, 0x1, 0x0, 0x0, 0x41, 0x4e,
         0x49, 0x4d, 0x6, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x41, 0x4e, 0x4d, 0x46, 0x28,
