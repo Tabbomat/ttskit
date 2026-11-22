@@ -13,6 +13,9 @@ default = []
 # Steamworks SDK. An executable built with it needs steam_api64.dll next to it
 # at runtime (`cargo run` and `cargo test` find it without that).
 steam = ["ttskit-cloud/steam"]
+# Image tools (`ttskit image ...`). Off by default so that builds without it
+# never pull in the image decoders.
+image = ["dep:ttskit-image"]
 
 [dependencies]
 clap = { version = "4", features = ["derive", "env"] }
@@ -29,6 +32,7 @@ tokio = { version = "1", features = ["rt", "net", "time", "io-util", "macros", "
 ttskit-cloud = { path = "../ttskit-cloud" }
 ttskit-core = { path = "../ttskit-core" }
 ttskit-editor = { path = "../ttskit-editor" }
+ttskit-image = { path = "../ttskit-image", optional = true }
 
 [dev-dependencies]
 tempfile = "3"
