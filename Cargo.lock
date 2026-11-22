@@ -2835,6 +2835,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ttskit-diff"
+version = "0.1.1"
+dependencies = [
+ "serde_json",
+ "similar",
+ "ttskit-core",
+ "ttskit-testutil",
+]
+
+[[package]]
 name = "ttskit-editor"
 version = "0.1.1"
 dependencies = [

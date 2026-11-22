@@ -1,0 +1,18 @@
+[package]
+name = "ttskit-diff"
+description = "Semantic diff of Tabletop Simulator saves"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde_json = { version = "1", features = ["preserve_order", "arbitrary_precision"] }
+similar = "2"
+ttskit-core = { path = "../ttskit-core" }
+
+[dev-dependencies]
+ttskit-testutil = { path = "../ttskit-testutil" }
