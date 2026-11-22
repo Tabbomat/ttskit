@@ -98,7 +98,7 @@ fn walk_map<'a>(
             path.push('.');
         }
         path.push_str(key);
-        if ctx.url_rules_active
+        if ctx.field_rules_active
             && let Value::String(value) = child
         {
             let field = Field {

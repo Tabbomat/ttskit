@@ -761,3 +761,140 @@ fn verifycache_only_counts_at_the_start() {
     ));
     assert_eq!(rules_of(&f), ["invalid-url"]);
 }
+
+// --- script syntax rules ---
+
+fn script_save(fields: Value) -> Value {
+    url_save(fields)
+}
+
+#[test]
+fn lua_syntax_positive() {
+    let f = run(script_save(
+        json!({ "LuaScript": "local a = 1\nlocal b = = 2\n" }),
+    ));
+    assert_eq!(rules_of(&f), ["lua-syntax"]);
+    assert!(f[0].message.contains("at 2:"), "{}", f[0].message);
+    assert_eq!(f[0].path, "ObjectStates[0].LuaScript");
+    assert_eq!(f[0].guid.as_deref(), Some("g1"));
+    assert_eq!(f[0].severity, Severity::Warning);
+    let f = run(script_save(json!({ "LuaScript": "x += 1" })));
+    assert_eq!(rules_of(&f), ["lua-syntax"]);
+    let f = run(script_save(json!({ "LuaScript": "local x = 7 // 2" })));
+    assert_eq!(rules_of(&f), ["lua-syntax"]);
+}
+
+#[test]
+fn lua_syntax_negative() {
+    for src in [
+        "",
+        "  \n",
+        "function onLoad()\n  print('hi')\nend\n",
+        "for i = 1, 3 do\n  if i == 2 then goto continue end\n  print(i)\n  ::continue::\nend",
+        "#include Util\nlocal x = 1\n",
+        "-- comment\r\n#include <Util>\r\nprint(1)",
+        "local s = [[long\nstring]]",
+    ] {
+        let f = run(script_save(json!({ "LuaScript": src })));
+        assert!(f.is_empty(), "{src:?}: {f:?}");
+    }
+}
+
+#[test]
+fn lua_include_lines_keep_line_numbers() {
+    let f = run(script_save(
+        json!({ "LuaScript": "#include A\n#include B\nlocal x = = 1" }),
+    ));
+    assert!(f[0].message.contains("at 3:"), "{}", f[0].message);
+}
+
+#[test]
+fn xml_malformed_positive() {
+    let f = run(script_save(
+        json!({ "XmlUI": "<Panel>\n  <Text>hi</Text>\n" }),
+    ));
+    assert_eq!(rules_of(&f), ["xml-malformed"]);
+    assert!(f[0].message.contains("at "), "{}", f[0].message);
+    let f = run(script_save(
+        json!({ "XmlUI": "<Defaults>\n<Text>a</Panel>\n</Defaults>" }),
+    ));
+    assert_eq!(rules_of(&f), ["xml-malformed"]);
+    assert!(f[0].message.contains("at 2:"), "{}", f[0].message);
+}
+
+#[test]
+fn xml_malformed_negative() {
+    for src in [
+        "",
+        " ",
+        "<Panel><Text>a &amp; b</Text></Panel>",
+        "<Defaults><Text color=\"#fff\"/></Defaults>\n<Panel id=\"p\">\n<Button onClick=\"f\">x</Button></Panel>",
+        "\u{feff}<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<Panel/>\n<Panel/>",
+        "<!-- c --><Panel/>",
+    ] {
+        let f = run(script_save(json!({ "XmlUI": src })));
+        assert!(f.is_empty(), "{src:?}: {f:?}");
+    }
+}
+
+#[test]
+fn xml_error_line_is_relative_to_the_original_text() {
+    let f = run(script_save(
+        json!({ "XmlUI": "<?xml version=\"1.0\"?>\n<A/>\n<B>\n</C>" }),
+    ));
+    assert!(f[0].message.contains("at 4:"), "{}", f[0].message);
+}
+
+#[test]
+fn nested_scripts_are_reported_once_and_cached_results_agree() {
+    let bad = "local = 1";
+    let f = run(json!({
+        "LuaScript": bad,
+        "XmlUI": "<a>",
+        "ObjectStates": [ {
+            "GUID": "a", "LuaScript": bad, "XmlUI": "<a>",
+            "ContainedObjects": [ { "GUID": "b", "LuaScript": bad } ],
+            "States": { "2": { "GUID": "c", "LuaScript": "x = 1", "XmlUI": "<a/>" } }
+        }, { "GUID": "d", "LuaScript": bad } ]
+    }));
+    let got: Vec<_> = f.iter().map(|f| (f.rule, f.path.as_str())).collect();
+    assert_eq!(
+        got,
+        [
+            ("lua-syntax", "LuaScript"),
+            ("xml-malformed", "XmlUI"),
+            ("lua-syntax", "ObjectStates[0].LuaScript"),
+            ("xml-malformed", "ObjectStates[0].XmlUI"),
+            (
+                "lua-syntax",
+                "ObjectStates[0].ContainedObjects[0].LuaScript"
+            ),
+            ("lua-syntax", "ObjectStates[1].LuaScript"),
+        ]
+    );
+    let tail = |m: &str| m.split(" at ").nth(1).unwrap().to_owned();
+    assert_eq!(tail(&f[0].message), tail(&f[2].message));
+    assert_eq!(tail(&f[0].message), tail(&f[5].message));
+}
+
+#[test]
+fn script_rules_are_independent_and_can_be_off() {
+    let v = script_save(json!({ "LuaScript": "x = = 1", "XmlUI": "<a>" }));
+    for (off, left) in [
+        ("lua-syntax", "xml-malformed"),
+        ("xml-malformed", "lua-syntax"),
+    ] {
+        let mut c = LintConfig::default();
+        c.set(off, Setting::Off).unwrap();
+        let f = lint(&save(v.clone()), &c);
+        assert_eq!(rules_of(&f), [left]);
+    }
+    let mut c = LintConfig::default();
+    c.set("lua-syntax", Setting::Off).unwrap();
+    c.set("xml-malformed", Setting::Off).unwrap();
+    assert!(
+        lint(&save(v), &c)
+            .iter()
+            .all(|f| f.rule != "lua-syntax" && f.rule != "xml-malformed")
+    );
+}

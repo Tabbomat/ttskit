@@ -55,9 +55,13 @@ pub(crate) struct Field<'a, 'p> {
 pub(crate) struct Ctx<'a> {
     config: &'a LintConfig,
     pub root: &'a Value,
-    /// Whether any rule that looks at URL fields is on.
-    pub url_rules_active: bool,
+    /// Whether any rule that looks at string fields is on.
+    pub field_rules_active: bool,
     findings: Vec<Finding>,
+    /// Syntax-check results per distinct script text: `None` when it is fine,
+    /// else the error message. Same scripts repeat on many objects.
+    pub lua_cache: HashMap<&'a str, Option<String>>,
+    pub xml_cache: HashMap<&'a str, Option<String>>,
     /// First scene object seen per non-empty GUID, at any level.
     pub seen_guids: HashMap<&'a str, &'a Map<String, Value>>,
     /// First top-level object seen per non-empty GUID.
@@ -73,8 +77,10 @@ impl<'a> Ctx<'a> {
         Ctx {
             config,
             root,
-            url_rules_active: crate::rules::url_rules().any(|id| config.severity(id).is_some()),
+            field_rules_active: crate::rules::field_rules().any(|id| config.severity(id).is_some()),
             findings: Vec::new(),
+            lua_cache: HashMap::new(),
+            xml_cache: HashMap::new(),
             seen_guids: HashMap::new(),
             seen_top_guids: HashMap::new(),
             pending_first_paths: Vec::new(),

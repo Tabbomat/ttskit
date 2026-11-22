@@ -11,6 +11,8 @@ workspace = true
 
 [dependencies]
 serde_json = { version = "1", features = ["preserve_order", "arbitrary_precision"] }
+full_moon = { version = "3", default-features = false, features = ["lua52"] }
+roxmltree = "0.21"
 thiserror = "2"
 toml = "1"
 ttskit-core = { path = "../ttskit-core" }

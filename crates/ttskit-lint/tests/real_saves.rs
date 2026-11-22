@@ -3,11 +3,11 @@
 //! Set `TTSKIT_REAL_SAVES` to a directory (the test panics if it is set but not
 //! an existing directory); every `*.json` file below it is linted (read only).
 //! The test only asserts that linting does not panic and prints per-rule
-//! finding counts. Without the variable it returns early, so it is skipped in
-//! CI.
+//! finding counts, a few example messages per rule and timings. Without the
+//! variable it returns early, so it is skipped in CI.
 
 use std::collections::BTreeMap;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use ttskit_core::Save;
 use ttskit_lint::{LintConfig, lint};
@@ -23,7 +23,8 @@ fn real_saves_lint_without_panic() {
     let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
     let mut examples: BTreeMap<&str, Vec<String>> = BTreeMap::new();
     let mut linted = 0usize;
-    let mut elapsed = std::time::Duration::ZERO;
+    let mut elapsed = Duration::ZERO;
+    let mut largest = (0usize, Duration::ZERO);
     for path in collect_json(&dir) {
         let Ok(bytes) = std::fs::read(&path) else {
             continue;
@@ -33,7 +34,9 @@ fn real_saves_lint_without_panic() {
         };
         let start = Instant::now();
         let findings = lint(&save, &config);
-        elapsed += start.elapsed();
+        let took = start.elapsed();
+        elapsed += took;
+        largest = largest.max((bytes.len(), took));
         linted += 1;
         for f in findings {
             *counts.entry(f.rule).or_default() += 1;
@@ -43,6 +46,10 @@ fn real_saves_lint_without_panic() {
             }
         }
     }
+    eprintln!(
+        "largest save: {} bytes linted in {:?}",
+        largest.0, largest.1
+    );
     eprintln!("linted {linted} saves in {elapsed:?} (lint time only)");
     for (rule, n) in &counts {
         eprintln!("  {rule}: {n}");
