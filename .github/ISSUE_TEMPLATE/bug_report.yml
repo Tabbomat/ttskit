@@ -1,0 +1,36 @@
+name: Bug report
+description: Something in ttskit does not work as documented
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ttskit is unofficial and not affiliated with Berserk Games.
+        Please do not paste your Steam ID (the Steam library prints it to stderr
+        during `cloud` commands) or content of mods you may not share.
+  - type: input
+    id: version
+    attributes:
+      label: ttskit version
+      description: Output of `ttskit --version`, and whether it is the plain or the Steam build.
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Command and what you expected
+      description: The exact command line, and what you expected to happen.
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened instead
+      description: Output and exit status. Remove your Steam ID from any stderr output.
+    validations:
+      required: true
+  - type: textarea
+    id: env
+    attributes:
+      label: Environment
+      description: Windows version; whether the game and Steam were running; anything else that may matter.

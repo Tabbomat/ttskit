@@ -1,0 +1,20 @@
+name: Feature request
+description: Suggest a new command or an improvement
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: Describe the mod-development task, not only the feature you have in mind.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: Idea
+      description: How could ttskit help? A sketch of the command line is welcome.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What do you do today?
