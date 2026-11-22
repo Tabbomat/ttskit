@@ -92,6 +92,10 @@ struct WatchCli {
     /// and watch it too; repeatable, searched in order
     #[arg(long, value_name = "LIB_DIR")]
     include: Vec<PathBuf>,
+    /// The project config whose manifest resolves `asset:{PATH}` placeholders
+    /// [default: ttskit.toml in the current directory if it exists]
+    #[arg(long, value_name = "FILE")]
+    config: Option<PathBuf>,
     /// Push once and exit (for editor tasks), then show the game's console
     /// output until --quiet-ms pass without a message
     #[arg(long)]
@@ -193,6 +197,10 @@ struct EditorSaveAndPlayCli {
     /// directory, as `save pack --include` does; repeatable
     #[arg(long, value_name = "LIB_DIR")]
     include: Vec<PathBuf>,
+    /// The project config whose manifest resolves `asset:{PATH}` placeholders
+    /// [default: ttskit.toml in the current directory if it exists]
+    #[arg(long, value_name = "FILE")]
+    config: Option<PathBuf>,
     /// Show the changes and send nothing
     #[arg(long)]
     dry_run: bool,
@@ -1458,6 +1466,7 @@ fn run_simple(command: Command) -> Result<(), CliError> {
         Command::Watch(WatchCli {
             dir,
             include,
+            config,
             once,
             pack_to,
             debounce_ms,
@@ -1467,6 +1476,7 @@ fn run_simple(command: Command) -> Result<(), CliError> {
             let options = watch::WatchOptions {
                 dir,
                 includes: include,
+                config,
                 once,
                 pack_to,
                 quiet: std::time::Duration::from_millis(quiet.quiet_ms),
@@ -1490,6 +1500,7 @@ fn run_simple(command: Command) -> Result<(), CliError> {
                 EditorCommand::SaveAndPlay(EditorSaveAndPlayCli {
                     dir,
                     include,
+                    config,
                     dry_run,
                     yes,
                     allow_delete,
@@ -1498,7 +1509,7 @@ fn run_simple(command: Command) -> Result<(), CliError> {
                 }),
         } => {
             // Read and pack the tree before touching the game.
-            let desired = editor::desired_from_tree(&dir, include)?;
+            let desired = editor::desired_from_tree(&dir, include, config.as_deref())?;
             let mut out = std::io::stdout().lock();
             let options = editor::SaveAndPlayOptions {
                 dry_run,

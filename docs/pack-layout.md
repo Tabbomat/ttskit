@@ -507,6 +507,12 @@ differently (`http` instead of `https`, another case or a different query) stays
 a URL. It is an error when no config or no manifest entry with a local path is
 found. Without `--assets`, unpack leaves URLs alone.
 
+`ttskit watch` and `ttskit editor save-and-play` (and the MCP `save_and_play`
+tool) pack the tree in memory the same way, so they resolve placeholders too
+(`--config FILE`, else `ttskit.toml` in the current directory; the MCP server
+uses the one in its project root). A stale asset is not an error there: the
+edit loop uses its pushed URL and `watch` prints the warning.
+
 ## Reserved for later features
 
 - **Bundling (#9):** implemented, see [Bundling](#bundling). The layout above

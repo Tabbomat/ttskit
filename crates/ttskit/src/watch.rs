@@ -321,6 +321,8 @@ impl Events for NotifyEvents {
 pub struct WatchOptions {
     pub dir: PathBuf,
     pub includes: Vec<PathBuf>,
+    /// The project config for `asset:{PATH}` placeholders.
+    pub config: Option<PathBuf>,
     pub once: bool,
     /// Also write the packed save here on every change.
     pub pack_to: Option<PathBuf>,
@@ -335,13 +337,15 @@ pub struct WatchOptions {
 pub fn build_tree(
     root: &Path,
     includes: &[PathBuf],
+    config: Option<&Path>,
     pack_to: Option<&Path>,
 ) -> Result<Built, String> {
     let options = ttskit_core::PackOptions {
         includes: includes.to_vec(),
+        allow_stale: true,
         ..ttskit_core::PackOptions::new(false)
     };
-    let packed = ttskit_core::pack(root, &options).map_err(|e| e.to_string())?;
+    let packed = crate::assets::pack_resolving(root, &options, config)?;
     let desired = crate::editor::desired_from_packed(&packed.bytes)?;
     let mut notes: Vec<String> = packed
         .warnings
@@ -388,9 +392,10 @@ pub fn run(
         .map(|p| absolute(p))
         .collect::<Result<Vec<_>, _>>()?;
     let pack_to = options.pack_to.as_deref().map(absolute).transpose()?;
+    let config = options.config.as_deref().map(absolute).transpose()?;
     let mut build = {
         let (root, includes) = (root.clone(), includes.clone());
-        move || build_tree(&root, &includes, pack_to.as_deref())
+        move || build_tree(&root, &includes, config.as_deref(), pack_to.as_deref())
     };
     let rt = crate::editor::runtime()?;
     rt.block_on(async {
@@ -918,18 +923,100 @@ mod tests {
         (dir, tree)
     }
 
+    /// A project (config, manifest, local `a.png`) and a tree whose global
+    /// script names `a.png` by a placeholder.
+    fn asset_project(local: &str) -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("ttskit.toml");
+        std::fs::write(
+            &config,
+            "[cloud]
+folder = \"Game\"
+
+[local]
+dir = \"src\"
+",
+        )
+        .unwrap();
+        let sha1 = ttskit_cloud::sha1_hex(b"alpha");
+        std::fs::write(
+            dir.path().join("ttskit.manifest.json"),
+            format!(
+                "{{\"version\": 1, \"entries\": [{{\"path\": \"a.png\", \"cloud_path\": \"Game/a.png\", \"sha1\": \"{sha1}\", \"size\": 5, \"url\": \"http://example.invalid/a\"}}]}}
+"
+            ),
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/a.png"), local).unwrap();
+        let tree = dir.path().join("tree");
+        std::fs::create_dir_all(&tree).unwrap();
+        std::fs::write(
+            tree.join("save.json"),
+            "{\"SaveName\": \"T\", \"LuaScript\": \"file:script.lua\"}",
+        )
+        .unwrap();
+        std::fs::write(
+            tree.join("script.lua"),
+            "img = 'asset:{a.png}'
+",
+        )
+        .unwrap();
+        (dir, tree, config)
+    }
+
+    #[test]
+    fn build_tree_resolves_asset_placeholders_from_the_config() {
+        let (_dir, tree, config) = asset_project("alpha");
+        let built = build_tree(&tree, &[], Some(&config), None).unwrap();
+        let script = built.desired[0].script.clone().unwrap();
+        assert!(
+            script.contains("img = 'http://example.invalid/a'"),
+            "{script}"
+        );
+        assert!(built.notes.is_empty(), "{:?}", built.notes);
+    }
+
+    #[test]
+    fn build_tree_uses_the_old_url_of_a_stale_asset_with_a_warning() {
+        let (_dir, tree, config) = asset_project("changed");
+        let built = build_tree(&tree, &[], Some(&config), None).unwrap();
+        let script = built.desired[0].script.clone().unwrap();
+        assert!(script.contains("http://example.invalid/a"), "{script}");
+        assert_eq!(built.notes.len(), 1, "{:?}", built.notes);
+        assert!(
+            built.notes[0].contains("a.png is stale"),
+            "{:?}",
+            built.notes
+        );
+    }
+
+    #[test]
+    fn build_tree_reports_a_placeholder_without_an_entry() {
+        let (dir, tree, config) = asset_project("alpha");
+        std::fs::write(
+            tree.join("script.lua"),
+            "img = 'asset:{missing.png}'
+",
+        )
+        .unwrap();
+        let e = build_tree(&tree, &[], Some(&config), None).unwrap_err();
+        assert!(e.contains("no entry for: missing.png"), "{e}");
+        drop(dir);
+    }
+
     #[test]
     fn build_tree_writes_the_packed_save_only_when_it_changes() {
         let (dir, tree) = unpacked_tree();
         let output = dir.path().join("out").join("save.json");
-        let first = build_tree(&tree, &[], Some(&output)).unwrap();
+        let first = build_tree(&tree, &[], None, Some(&output)).unwrap();
         assert_eq!(first.notes.len(), 1, "{:?}", first.notes);
         assert!(first.notes[0].starts_with("Wrote packed save"));
         let packed = ttskit_core::pack(&tree, &ttskit_core::PackOptions::new(false)).unwrap();
         assert_eq!(std::fs::read(&output).unwrap(), packed.bytes);
         assert!(!first.desired.is_empty());
 
-        let again = build_tree(&tree, &[], Some(&output)).unwrap();
+        let again = build_tree(&tree, &[], None, Some(&output)).unwrap();
         assert!(again.notes.is_empty(), "{:?}", again.notes);
 
         let script = std::fs::read_dir(&tree)
@@ -939,7 +1026,7 @@ mod tests {
             .find(|p| p.file_name().is_some_and(|n| n == "script.lua"))
             .expect("the fixture has a global script");
         std::fs::write(&script, "-- edited\n").unwrap();
-        let third = build_tree(&tree, &[], Some(&output)).unwrap();
+        let third = build_tree(&tree, &[], None, Some(&output)).unwrap();
         assert_eq!(third.notes.len(), 1);
         assert!(
             std::fs::read_to_string(&output)
@@ -955,7 +1042,7 @@ mod tests {
         // The output path is an existing directory: it cannot be replaced.
         let output = dir.path().join("blocked");
         std::fs::create_dir(&output).unwrap();
-        let built = build_tree(&tree, &[], Some(&output)).unwrap();
+        let built = build_tree(&tree, &[], None, Some(&output)).unwrap();
         assert!(!built.desired.is_empty());
         assert!(
             built.notes.iter().any(|n| n.starts_with("warning:")),
@@ -967,9 +1054,9 @@ mod tests {
     #[test]
     fn build_tree_without_pack_to_writes_nothing_and_a_bad_tree_is_an_error() {
         let (dir, tree) = unpacked_tree();
-        let built = build_tree(&tree, &[], None).unwrap();
+        let built = build_tree(&tree, &[], None, None).unwrap();
         assert!(built.notes.is_empty());
-        let e = build_tree(&dir.path().join("missing"), &[], None).unwrap_err();
+        let e = build_tree(&dir.path().join("missing"), &[], None, None).unwrap_err();
         assert!(e.contains("not a directory"), "{e}");
     }
 }

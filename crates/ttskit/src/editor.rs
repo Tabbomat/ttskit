@@ -114,16 +114,20 @@ fn write_scripts(scripts: &[ScriptState], json: bool, out: &mut dyn Write) -> st
 
 /// Script and UI of every object in the unpacked tree at `dir`, by GUID. The
 /// tree is packed in memory first, so markers, `--include` bundling and all
-/// pack errors behave exactly as in `save pack`. The global script is GUID `-1`.
+/// pack errors behave exactly as in `save pack`. `asset:{PATH}` placeholders
+/// are resolved from the project (`config`, else `ttskit.toml` in the current
+/// directory); stale assets resolve to their pushed URL. The global script is GUID `-1`.
 pub fn desired_from_tree(
     dir: &Path,
     includes: Vec<std::path::PathBuf>,
+    config: Option<&Path>,
 ) -> Result<Vec<Desired>, String> {
     let options = ttskit_core::PackOptions {
         includes,
+        allow_stale: true,
         ..ttskit_core::PackOptions::new(false)
     };
-    let packed = ttskit_core::pack(dir, &options).map_err(|e| e.to_string())?;
+    let packed = crate::assets::pack_resolving(dir, &options, config)?;
     desired_from_packed(&packed.bytes)
 }
 

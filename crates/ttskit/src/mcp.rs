@@ -318,7 +318,9 @@ impl EditorServer {
             .iter()
             .map(|p| resolve_in_root(&self.root, Path::new(p)))
             .collect::<Result<Vec<_>, _>>()?;
-        let desired = desired_from_tree(&dir, includes)?;
+        // The project config in the root, if any; else the default lookup.
+        let config = Some(self.root.join("ttskit.toml")).filter(|p| p.exists());
+        let desired = desired_from_tree(&dir, includes, config.as_deref())?;
         // Replies for the whole call, so that the reload is noticed.
         let replies = self.replies()?;
         replies.expect_scripts_reply();
