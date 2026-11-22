@@ -9,10 +9,12 @@ URLs were not tested separately.
 
 | Input | Result |
 |---|---|
-| PNG: RGB, RGBA, gray, gray+alpha, palette, 8-bit | Loads |
+| PNG: RGB, RGBA, gray, gray+alpha, palette, 8-bit, interlaced (Adam7) | Loads |
 | PNG: 16-bit RGB, RGBA, gray | Loads |
-| JPEG: RGB, gray (baseline) | Loads |
-| WebP (lossless) | Loads |
+| JPEG: RGB, gray; baseline, progressive, 4:2:0 and 4:4:4 | Loads |
+| JPEG: CMYK | Rejected ("Async loading images: JPEG decoding failed") |
+| WebP, lossless and lossy, still | Loads |
+| WebP, animated (lossless or lossy) | Rejected ("Async loading images: WEBP decoding failed") |
 | BMP, TIFF | Rejected ("unsupported format: UNKNOWN") |
 | GIF, static or animated | Rejected ("unsupported format: GIF") |
 | Animated PNG | Loads, shows a single still image |
@@ -36,15 +38,17 @@ token. Consequences:
 
 ### Not tested
 
-Progressive JPEG, interlaced PNG, animated WebP, CMYK JPEG, lossy WebP.
+Nothing outstanding from the first rounds. Other JPEG or WebP variants (arithmetic coding, 12-bit, extended WebP features such as EXIF) were not tried.
 
 ## Policy for ttskit image commands
 
 - Read PNG, JPEG and WebP; write PNG and JPEG. Other formats are an error that
   names the format.
-- Animated input (APNG, animated WebP): use the first frame and print a
-  warning, since the game shows a still frame anyway.
+- Animated input (APNG, animated WebP, GIF): use the first frame and print a
+  warning. The game shows an animated PNG as a still frame and rejects
+  animated WebP and GIF, and ttskit never writes animated output.
 - 16-bit channels are kept.
+- CMYK JPEG input is converted to RGB (the game rejects CMYK), with a note.
 - ICC profiles are dropped with a note, since the game ignores them.
 - Partial alpha is reported, and commands warn when an image has no fully
   opaque pixel, because a token made from it would fail.
