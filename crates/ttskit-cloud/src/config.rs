@@ -11,6 +11,10 @@
 //!
 //! With this config, `assets/Boards/a.png` belongs to the cloud folder
 //! `MyGame/Boards`.
+//!
+//! The file may also hold an `[image]` section (`[[image.pipeline]]` rules).
+//! It belongs to the `ttskit-image` pipeline; this module only accepts it and
+//! does not look inside, so cloud commands keep working on such a config.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -49,6 +53,10 @@ pub enum ConfigError {
 struct RawConfig {
     cloud: RawCloud,
     local: RawLocal,
+    /// Read by the image pipeline (`ttskit-image`), not here.
+    #[serde(default)]
+    #[allow(dead_code)]
+    image: Option<toml::Value>,
 }
 
 #[derive(Deserialize)]
@@ -228,6 +236,27 @@ mod tests {
         let t = format!("{}prune = true\n", cfg("G", "x"));
         let e = ProjectConfig::parse(&t).unwrap_err();
         assert!(e.to_string().contains("prune"), "{e}");
+    }
+
+    #[test]
+    fn image_section_is_accepted_and_other_keys_are_not() {
+        let t = format!(
+            "{}[[image.pipeline]]
+src = \"a/*.png\"
+out = \"b\"
+anything = 1
+",
+            cfg("G", "x")
+        );
+        assert_eq!(ProjectConfig::parse(&t).unwrap().cloud_folder, "G");
+        let t = format!(
+            "{}[imagee]
+x = 1
+",
+            cfg("G", "x")
+        );
+        let e = ProjectConfig::parse(&t).unwrap_err();
+        assert!(e.to_string().contains("imagee"), "{e}");
     }
 
     #[test]

@@ -16,6 +16,8 @@ exoquant = { version = "0.2.0", default-features = false }
 png = "0.18"
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
+toml = "1"
+globset = "0.4"
 
 [dev-dependencies]
 tempfile = "3"

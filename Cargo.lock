@@ -1938,12 +1938,14 @@ name = "ttskit-image"
 version = "0.1.1"
 dependencies = [
  "exoquant",
+ "globset",
  "image",
  "oxipng",
  "png",
  "serde",
  "tempfile",
  "thiserror",
+ "toml",
 ]
 
 [[package]]

@@ -9,6 +9,7 @@ mod check;
 mod convert;
 mod deck;
 mod optimize;
+pub mod pipeline;
 mod quantize;
 mod resize;
 
@@ -27,6 +28,7 @@ pub use optimize::{
     DEFAULT_LEVEL, MAX_LEVEL, OptimizeOptions, Optimized, Outcome, Skipped, StripMode, optimize,
     optimize_bytes,
 };
+pub use pipeline::{parse_card_size, parse_dither, parse_quality, parse_scale};
 pub use quantize::{
     DEFAULT_COLORS, Engine, MAX_COLORS, MIN_COLORS, QuantizeOptions, QuantizeOutcome, Quantized,
     pngquant_version, quantize, quantize_bytes,

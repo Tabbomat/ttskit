@@ -374,3 +374,33 @@ pub use deck::{
     DeckBuildArgs, DeckObjectArgs, DeckSplitArgs, FitKind, deck_build, deck_object, deck_split,
     parse_card_size,
 };
+
+/// The CLI keeps its own copies of the value parsers (they are needed without
+/// the `image` feature); they must agree with the library's, which the
+/// pipeline config uses.
+#[cfg(all(test, feature = "image"))]
+mod parser_parity_tests {
+    #[test]
+    fn cli_parsers_match_the_library() {
+        for t in ["60-90", "90-60", "0-101", "x", "5", " 1 - 2 "] {
+            assert_eq!(
+                super::parse_quality(t),
+                ttskit_image::parse_quality(t),
+                "{t}"
+            );
+        }
+        for t in ["0", "1", "0.5", "1.1", "-1", "nan", "x"] {
+            assert_eq!(super::parse_dither(t), ttskit_image::parse_dither(t), "{t}");
+        }
+        for t in ["0.5", " 2 ", "0", "-1", "inf", "x"] {
+            assert_eq!(super::parse_scale(t), ttskit_image::parse_scale(t), "{t}");
+        }
+        for t in ["300x420", " 3 X 4 ", "0x5", "5", "axb"] {
+            assert_eq!(
+                super::parse_card_size(t),
+                ttskit_image::parse_card_size(t),
+                "{t}"
+            );
+        }
+    }
+}
