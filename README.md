@@ -14,6 +14,8 @@ mods. Not affiliated with or endorsed by Berserk Games.
 - **Steam Cloud management:** one cloud folder per game, sync with a local
   directory, a committed manifest of asset URLs (done), and a scan of the
   asset URLs a save uses (done).
+- **Dead-link check (done):** `save check-urls` tells which asset URLs of a save no
+  longer load.
 - **External Editor API client (done):** talk to a running game to read and write
   scripts, run Lua and capture console output; `watch` pushes edits on save.
 - **MCP server (done):** expose the editor API to AI assistants.
@@ -49,6 +51,24 @@ ttskit watch mymod --include lib
 All subcommands share `--game-port`, `--editor-port`, `--timeout` and `--json`, and exit with 0 (success), 1 (failure), 2 (usage error) or 3 (the game is not reachable). Messages the game sends while no `ttskit` listener is running are lost. Details, observed behaviour and limits: [docs/editor-api.md](docs/editor-api.md).
 
 Shell completions are not generated yet (tracked in the issue tracker); until then `ttskit editor --help` and `ttskit editor <command> --help` list every flag.
+
+## Checking asset URLs
+
+`ttskit save check-urls SAVE.json` finds the asset URLs of a save that no longer load and the objects that use them. It needs the network but neither Steam nor the game.
+
+```
+ttskit save check-urls save.json                  # list dead and unreachable URLs
+ttskit save check-urls save.json --json           # every URL with its result
+ttskit save check-urls save.json --verify-content # also reject HTML error pages
+ttskit save check-urls save.json --skip-host imgur.com
+```
+
+- Each distinct URL is requested once with `HEAD`; a host that refuses `HEAD` (400, 403, 405, 501) is asked with a ranged `GET` instead. Redirects are followed (up to 5) and the final answer decides.
+- Results: `ok`; `redirect` (the target loads; not a problem); `dead` (HTTP error status); `unreachable` (network error, timeout, redirect loop); `skipped` (excluded with `--host HOST`, which checks only that host and its subdomains, or `--skip-host HOST`).
+- Timeouts, network errors, `429` and `5xx` are retried (`--retries`, default 3, with a growing pause). `--timeout` (default 10 s per request), `--concurrency` (default 16) and `--per-host` (default 4) tune the load; requests identify as `ttskit/<version>`.
+- `--verify-content` fetches the first 1 KiB of each file and counts a `2xx` answer as `dead` when it is an HTML page (by `Content-Type` or by its first bytes), since some hosts answer 200 with a placeholder page. It does not check that the file is a valid image or model.
+- The text output lists each dead or unreachable URL with the JSON path, nickname and GUID of every use, then redirects and a summary line. `--json` lists all URLs sorted, with `result`, `status`/`target`/`reason`, `labels` and `occurrences`.
+- Exit status: 0 when nothing is dead or unreachable, 2 when something is, 1 on errors.
 
 ## MCP server
 
