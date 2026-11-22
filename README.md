@@ -581,11 +581,22 @@ ttskit image info card.png deck/
 ttskit image info --json deck/
 ```
 
-`image info` is read-only. It takes files and directories (scanned
-recursively for png, jpg, webp, gif, bmp and tiff, sorted by path) and prints
-format, size, colour layout, bit depth, frame count and the size of an embedded
-ICC profile for each, plus a summary. It exits with status 1 if a file could
-not be read. `--json` prints one JSON object with `images` and `errors`.
+`image info` is read-only and tells you whether the game can use each image,
+and why not. It takes files and directories (scanned recursively for png, jpg,
+webp, gif, bmp and tiff, sorted by path) and prints format, size, colour
+layout, bit depth and frame count, then the problems it found:
+
+- `error`: the game rejects the file (gif, bmp, tiff, CMYK JPEG, animated
+  WebP);
+- `warning`: it loads, but not as the file suggests (an embedded colour
+  profile the game ignores, an animated PNG shown as a still, a size of 8192
+  px or more that loads slowly, no fully opaque pixel so no token can be made);
+- `note`: translucent pixels, which a token outline ignores.
+
+It exits with status 1 if a file could not be read or has errors; warnings and
+notes do not change the exit status. `--json` prints one JSON object with
+`images` (each with `compatible` and `problems`, whose `code` values are
+stable) and `errors`.
 
 Which formats, animated images, 16-bit channels and colour profiles the future
 conversion and optimization commands will accept or produce follows what the

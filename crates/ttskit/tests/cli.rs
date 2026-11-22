@@ -1117,7 +1117,7 @@ mod image_info {
         let a = text.find("a.png: png 3x3").expect(&text);
         let b = text.find("b.png: png 4x2").expect(&text);
         assert!(a < b, "sorted by path: {text}");
-        assert!(text.contains("2 inspected, 0 failed"));
+        assert!(text.contains("2 inspected, 0 not usable in the game, 0 unreadable"));
     }
 
     #[test]
@@ -1139,6 +1139,43 @@ mod image_info {
         assert_eq!(value["images"].as_array().unwrap().len(), 1);
         assert_eq!(value["images"][0]["width"], 2);
         assert_eq!(value["errors"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn unusable_image_is_explained_and_sets_exit_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let bmp = dir.path().join("a.bmp");
+        image::RgbImage::from_pixel(2, 2, image::Rgb([1, 2, 3]))
+            .save(&bmp)
+            .unwrap();
+        let output = ttskit(&["image", "info", bmp.to_str().unwrap()]);
+        assert_eq!(output.status.code(), Some(1));
+        let text = stdout(&output);
+        assert!(
+            text.contains("  error: the game does not load bmp"),
+            "{text}"
+        );
+        assert!(text.contains("1 inspected, 1 not usable in the game, 0 unreadable"));
+
+        let json = ttskit(&["image", "info", "--json", bmp.to_str().unwrap()]);
+        assert_eq!(json.status.code(), Some(1));
+        let value: serde_json::Value = serde_json::from_str(&stdout(&json)).unwrap();
+        assert_eq!(value["images"][0]["compatible"], false);
+        assert_eq!(value["images"][0]["problems"][0]["code"], "format-rejected");
+        assert_eq!(value["images"][0]["problems"][0]["severity"], "error");
+    }
+
+    #[test]
+    fn warnings_do_not_set_exit_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let png = dir.path().join("a.png");
+        // Translucent everywhere: no token can be made, but the image loads.
+        image::RgbaImage::from_pixel(2, 2, image::Rgba([1, 2, 3, 128]))
+            .save(&png)
+            .unwrap();
+        let output = ttskit(&["image", "info", png.to_str().unwrap()]);
+        assert_eq!(output.status.code(), Some(0));
+        assert!(stdout(&output).contains("  warning: no fully opaque pixel"));
     }
 
     #[test]

@@ -32,8 +32,11 @@ token. Consequences:
 
 - Hard-edged transparency works, including holes. Soft edges shrink the token
   to the fully opaque core.
-- An image without any fully opaque region (uniform alpha below 255, or a
-  gradient) fails with `Failed to create Token from Image` and the token
+- An image whose fully opaque pixels are fewer than 2 px wide or tall also
+  fails: a 1 px column, a single opaque pixel and a gradient whose only opaque
+  pixels are its last column failed; 2 px columns and 4 px squares worked.
+- An image without any fully opaque pixel (for example uniform alpha below
+  255) fails with `Failed to create Token from Image` and the token
   falls back to a red square.
 
 ### Not tested
@@ -56,3 +59,23 @@ Nothing outstanding from the first rounds. Other JPEG or WebP variants (arithmet
 
 `ttskit image info` reports the facts these rules depend on: format, colour
 layout, bit depth, frame count and ICC profile size.
+
+## How `ttskit image info` reports this
+
+Each finding has a stable code, a severity and a message.
+
+| Code | Severity | Meaning |
+|---|---|---|
+| `format-rejected` | error | gif, bmp or tiff |
+| `jpeg-cmyk` | error | CMYK JPEG |
+| `webp-animated` | error | animated WebP |
+| `png-animated` | warning | the game shows only a still image |
+| `icc-ignored` | warning | embedded colour profile is ignored |
+| `very-large` | warning | 8192 px or more on a side loads slowly |
+| `token-no-opaque-pixel` | warning | no pixel with alpha 255: no token can be made |
+| `token-opaque-too-small` | warning | the alpha-255 pixels span less than 2 px in width or height: no token can be made |
+| `token-translucent-pixels` | note | a token outline ignores translucent pixels |
+| `alpha-unchecked` | warning | the alpha channel could not be decoded |
+
+A file is `compatible` unless it has an error. Other formats the image library
+knows (for example ICO) are reported as unreadable with the reason.

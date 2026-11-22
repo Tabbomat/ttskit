@@ -224,11 +224,15 @@ enum EditorCommand {
 
 #[derive(Subcommand)]
 enum ImageCommand {
-    /// Show format, size, colour layout, bit depth, frames and ICC profile of images (read-only)
+    /// Show what images contain and whether Tabletop Simulator can use them (read-only)
     ///
-    /// Takes files and directories (scanned recursively for png, jpg, webp,
-    /// gif, bmp and tiff); output is sorted by path. Exits with status 1 if any
-    /// file could not be read.
+    /// Reports format, size, colour layout, bit depth, frames and ICC profile,
+    /// then problems: errors (the game rejects the file, e.g. gif, bmp, tiff,
+    /// CMYK JPEG, animated WebP), warnings (it loads but not as expected, e.g.
+    /// no fully opaque pixel so no token can be made) and notes. Takes files
+    /// and directories (scanned recursively for png, jpg, webp, gif, bmp and
+    /// tiff); output is sorted by path. Exits with status 1 if a file could not
+    /// be read or has errors; warnings and notes do not change the exit status.
     Info {
         /// Image files or directories
         #[arg(required = true, value_name = "PATH")]

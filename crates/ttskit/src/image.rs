@@ -20,7 +20,7 @@ pub fn info(inputs: &[PathBuf], json: bool, out: &mut dyn Write) -> Result<bool,
         }
     }
     report.write(json, out).map_err(|e| e.to_string())?;
-    Ok(report.errors.is_empty())
+    Ok(report.errors.is_empty() && report.images.iter().all(|i| i.compatible))
 }
 
 #[cfg(not(feature = "image"))]
@@ -60,15 +60,29 @@ impl Report {
                 "{}: {} {}x{}, {} {}-bit{anim}{icc}, {} bytes",
                 i.path, i.format, i.width, i.height, i.color, i.bit_depth, i.file_bytes
             )?;
+            for p in &i.problems {
+                writeln!(out, "  {}: {}", severity_label(p.severity), p.message)?;
+            }
         }
         for e in &self.errors {
             writeln!(out, "error: {e}")?;
         }
+        let incompatible = self.images.iter().filter(|i| !i.compatible).count();
         writeln!(
             out,
-            "{} inspected, {} failed",
+            "{} inspected, {} not usable in the game, {} unreadable",
             self.images.len(),
+            incompatible,
             self.errors.len()
         )
+    }
+}
+
+#[cfg(feature = "image")]
+fn severity_label(severity: ttskit_image::Severity) -> &'static str {
+    match severity {
+        ttskit_image::Severity::Error => "error",
+        ttskit_image::Severity::Warning => "warning",
+        ttskit_image::Severity::Note => "note",
     }
 }
