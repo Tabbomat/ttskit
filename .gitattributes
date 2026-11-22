@@ -1,3 +1,7 @@
+# Normalize line endings to LF in the repository and in checkouts, so Windows
+# checkouts do not produce CRLF warnings.
+* text=auto eol=lf
+
 # The fixtures use CRLF line endings exactly like Tabletop Simulator writes them;
 # disable text conversion so git (e.g. with core.autocrlf) never rewrites them.
 tests/fixtures/** -text
