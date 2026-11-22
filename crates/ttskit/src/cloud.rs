@@ -4047,7 +4047,7 @@ mod tests {
                 "Push to cloud folder Game:\n\
                  \x20 upload     a.png  (new)\n\
                  \x20 upload     b.png  (new)\n\
-                 2 upload\n\
+                 2 upload (2 B)\n\
                  Dry run: nothing was changed.\n"
             );
             assert!(run.prompts.is_empty());
@@ -4857,7 +4857,7 @@ mod tests {
             assert!(run.text.contains("  download   b.png  (new)\n"));
             assert!(
                 run.text
-                    .ends_with("2 download\nDry run: nothing was changed.\n")
+                    .ends_with("2 download (2 B)\nDry run: nothing was changed.\n")
             );
             assert!(run.prompts.is_empty());
             assert!(dir.log.is_empty());

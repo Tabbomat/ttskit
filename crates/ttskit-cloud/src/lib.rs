@@ -16,6 +16,7 @@ mod ignore_set;
 mod index;
 mod manifest;
 mod memory;
+mod size;
 mod status;
 #[cfg(feature = "steam")]
 mod steam;
@@ -40,6 +41,7 @@ pub use index::{
 };
 pub use manifest::{Manifest, ManifestEntry, ManifestError, TsvError, TsvProblem};
 pub use memory::{Call, MemoryCloud};
+pub use size::format_size;
 pub use status::{
     FileState, LocalFile, LocalScan, StatusError, StatusReport, StatusRow, compare, scan_local,
     scan_local_ignoring,

@@ -236,6 +236,20 @@ impl SyncPlan {
             .all(|s| matches!(s.reason, Reason::Identical | Reason::CaseOnly))
     }
 
+    /// The bytes that would be transferred: for a push the files uploaded
+    /// (also those renamed, which are uploaded again), for a pull the files
+    /// downloaded.
+    pub fn transfer_bytes(&self) -> u64 {
+        self.steps
+            .iter()
+            .filter(|s| match self.direction {
+                Direction::Push => matches!(s.action, Action::Upload | Action::Rename),
+                Direction::Pull => s.action == Action::Download,
+            })
+            .map(|s| s.size.unwrap_or(0))
+            .fold(0, u64::saturating_add)
+    }
+
     /// Human-readable text. Steps that are plain `identical` skips are only
     /// counted.
     pub fn render_text(&self) -> String {
@@ -278,7 +292,23 @@ impl SyncPlan {
                         .count(),
                     _ => self.count(a),
                 };
-                (n > 0).then(|| format!("{n} {}", a.as_str()))
+                let transfers = match self.direction {
+                    Direction::Push => a == Action::Upload,
+                    Direction::Pull => a == Action::Download,
+                };
+                (n > 0).then(|| {
+                    if transfers {
+                        let bytes = self
+                            .steps
+                            .iter()
+                            .filter(|s| s.action == a)
+                            .map(|s| s.size.unwrap_or(0))
+                            .fold(0, u64::saturating_add);
+                        format!("{n} {} ({})", a.as_str(), crate::format_size(bytes))
+                    } else {
+                        format!("{n} {}", a.as_str())
+                    }
+                })
             })
             .collect();
         let identical = self
@@ -332,6 +362,7 @@ impl SyncPlan {
             "cloud_folder": self.cloud_folder,
             "prune": self.options.prune,
             "has_conflicts": self.has_conflicts(),
+            "transfer_bytes": self.transfer_bytes(),
             "counts": counts,
             "ignored": {"local": self.ignored_local, "cloud": self.ignored_cloud},
             "steps": steps,
@@ -1188,6 +1219,31 @@ mod tests {
     }
 
     #[test]
+    fn summary_shows_the_size_of_uploads_and_downloads() {
+        let w = world(vec![entry("old", "a.png", "G")]);
+        let locals = [local("a.png", "newer"), local("b.png", "bb")];
+        let p = run(Direction::Push, &w, &locals, "G", true);
+        assert!(p.render_text().ends_with("2 upload (7 B)\n"));
+        assert_eq!(p.transfer_bytes(), 7);
+        assert_eq!(p.to_json()["transfer_bytes"], 7);
+
+        let w = world(vec![entry("abc", "a.png", "G")]);
+        let p = run(Direction::Pull, &w, &[], "G", false);
+        assert!(p.render_text().ends_with("1 download (3 B)\n"));
+        assert_eq!(p.transfer_bytes(), 3);
+    }
+
+    #[test]
+    fn renamed_files_count_as_upload_bytes_on_push() {
+        let w = world(vec![entry("data", "old.png", "G")]);
+        let locals = [local("new.png", "data")];
+        let push = run(Direction::Push, &w, &locals, "G", true);
+        assert_eq!(push.count(Action::Rename), 1);
+        assert_eq!(push.transfer_bytes(), 4);
+        assert!(!push.render_text().contains("(4 B)"));
+    }
+
+    #[test]
     fn text_output() {
         let w = world(vec![
             entry("same", "same.png", "G"),
@@ -1211,7 +1267,7 @@ mod tests {
              \x20 rename     new.png <- old.png  (renamed)\n\
              \x20 conflict   X.png  (local files differ only by case: x.png)\n\
              \x20 conflict   x.png  (local files differ only by case: X.png)\n\
-             2 conflict, 1 upload, 1 rename, 1 delete, 1 identical\n"
+             2 conflict, 1 upload (3 B), 1 rename, 1 delete, 1 identical\n"
         );
     }
 
