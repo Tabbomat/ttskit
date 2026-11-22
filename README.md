@@ -990,6 +990,203 @@ Which formats, animated images, 16-bit channels and colour profiles the image
 commands accept or produce follows what the game itself accepts; see
 [docs/image-formats.md](docs/image-formats.md).
 
+### Image pipeline (image build)
+
+```
+ttskit image build --dry-run     # show what would be built, write nothing
+ttskit image build               # build what changed
+ttskit cloud sync push           # upload the changed outputs
+```
+
+`image build` turns the source art of a project into the files that go to the
+cloud, as the rules in `ttskit.toml` say, so the whole flow is one command and
+the outputs can be rebuilt at any time. A project could look like this:
+
+```
+my-game/
+  ttskit.toml
+  ttskit-image.lock.json    written by image build
+  art/                      sources, never modified
+    boards/
+      main.png
+      side/extra.png
+    cards/
+      ace.png
+      king.png
+      hidden.png
+    icons/
+      logo.png
+  assets/                   outputs, what `cloud sync push` uploads
+    Boards/
+      main.png
+      side/extra.png
+    Cards/
+      base.png
+      base.json
+    Icons/
+      logo.jpg
+```
+
+with this `ttskit.toml`:
+
+```toml
+[cloud]
+folder = "MyGame"
+
+[local]
+dir = "assets"
+ignore = ["*.json"]          # keep the deck descriptions out of the upload
+
+[[image.pipeline]]           # boards: at most 4096 px, then smaller files
+src = "art/boards/**/*.png"
+out = "assets/Boards"
+steps = [
+  { op = "resize", max-side = 4096 },
+  { op = "optimize", level = 4 },
+]
+
+[[image.pipeline]]           # the cards of the folder become one deck
+src = "art/cards/[!h]*.png"
+out = "assets/Cards"
+steps = [{ op = "optimize" }]
+deck = { name = "base", hidden = "art/cards/hidden.png", columns = 5, rows = 2 }
+
+[[image.pipeline]]           # icons as JPEG, flattened onto white
+src = "art/icons/*.png"
+out = "assets/Icons"
+steps = [{ op = "convert", to = "jpg", quality = 90, background = "#ffffff" }]
+```
+
+`[cloud]` and `[local]` are the sections of the cloud commands; `image build`
+reads only `[[image.pipeline]]` and ignores the others. A rule has:
+
+| key     | meaning |
+|---------|---------|
+| `src`   | A file or a glob (`*`, `**`, `?`, `[...]`, `{a,b}`) relative to the directory of `ttskit.toml`; matched ignoring case, `*` does not cross `/`. Required. |
+| `out`   | The output directory, relative to the same directory; created as needed. Required. |
+| `steps` | A list of steps, run in order on each source (on each sheet for a deck). Default: none, which copies the source unchanged. |
+| `deck`  | Optional; makes all files of `src` one deck (see below). |
+
+All keys are lower case with `-` (`max-side`). Unknown keys, a missing `src` or
+`out`, and invalid values are refused with the key and its position, for
+example `image.pipeline[2].steps[1].level`.
+
+#### Steps
+
+Every step is a table with an `op` and the options of the command of the same
+name. Defaults are those of the command.
+
+| `op`       | option | default | meaning |
+|------------|--------|---------|---------|
+| `resize`   | `max-side`, `width`, `height` or `scale` | none | Exactly one of them is required, as `--max-side`, `--width`, `--height`, `--scale` of `image resize`. |
+|            | `allow-enlarge` | `false` | Allow making the image larger. |
+|            | `filter` | `"lanczos3"` | `"lanczos3"`, `"catmull-rom"`, `"triangle"` or `"nearest"`. |
+|            | `quality` | `85` | JPEG quality, 1 to 100, when the image is a JPEG. |
+| `optimize` | `level` | `2` | 0 to 6; higher is smaller and slower. |
+|            | `strip` | `"safe"` | `"safe"`, `"all"` or `"none"`. |
+| `quantize` | `colors` | `256` | 2 to 256. Lossy. |
+|            | `quality` | none | A range such as `"60-90"`, as `--quality` of `image quantize`. |
+|            | `dither` | `1.0` | 0 to 1. |
+|            | `level`, `strip` | `2`, `"safe"` | As in `optimize`. |
+|            | `engine` | `"builtin"` | `"builtin"` or `"pngquant"`. |
+|            | `program` | `pngquant` | The pngquant program; implies `engine = "pngquant"`. A path with a directory is relative to `ttskit.toml`, a bare name is looked up on `PATH`. |
+| `convert`  | `to` | none | `"png"` or `"jpg"`. Required. |
+|            | `quality` | `85` | JPEG quality, 1 to 100; only with `to = "jpg"`. |
+|            | `background` | none | `#RRGGBB`, `#RGB`, `white` or `black`; transparency is flattened onto it. Without it, an image with transparent pixels cannot become a JPEG. Only with `to = "jpg"`. |
+|            | `keep-metadata` | `false` | Keep the colour profile and EXIF data. |
+
+The steps behave exactly like the commands (same notes, same limits); see
+their sections above. A step that has nothing to do, such as `optimize` on a
+JPEG, leaves the file as it is and adds a note.
+
+#### Decks
+
+`deck = { name = "base", ... }` makes the files matched by `src` (in natural
+order of their path) the cards of one deck, as `image deck build` does, instead
+of one output per source. The steps then run on each sheet. A `convert` step is
+not allowed in such a rule, because the deck description names the sheet files;
+use `to` of the deck instead.
+
+| key              | default | meaning |
+|------------------|---------|---------|
+| `name`           | required | Stem of the output files; a plain name without a path. |
+| `hidden`         | none | The hidden-card image, relative to `ttskit.toml`. It is not a card, so keep it out of `src`. |
+| `columns`, `rows` | smallest roughly square grid | 1 to 10 and 1 to 7. |
+| `card-size`      | size of the first card | `"WxH"`. |
+| `fit`            | none | `"contain"`, `"cover"` or `"stretch"` for cards of another size. |
+| `hidden-slot`    | `true` | `false` makes the last slot a card too. |
+| `fill`           | `"808080"` | Colour of the empty hidden slot and of `contain` borders. |
+| `max-sheet-side` | none | Scale cards down until no sheet side is longer. |
+| `to`, `quality`  | `"png"`, `85` | Sheet format; `quality` only for `"jpg"`. |
+
+#### Where outputs go
+
+A source maps to `out` plus its path relative to the fixed part of `src`, the
+leading directories without glob characters. `art/boards/side/extra.png` under
+`src = "art/boards/**/*.png"` becomes `assets/Boards/side/extra.png`; for a
+`src` that names one file, the file name is used. A `convert` step changes the
+extension (`logo.png` becomes `logo.jpg`). A deck writes `NAME.png`, or
+`NAME_1.png`, `NAME_2.png`, ... for several sheets (`.jpg` with `to = "jpg"`),
+and the description `NAME.json` of `image deck build`, which `image deck object`
+takes.
+
+If two sources would write one output, or an output is a source or the config
+or lock file, the build stops before anything is written and lists every
+conflict. So does a rule that cannot be planned, such as a bad deck grid or a
+missing pngquant. Outputs that already exist are overwritten without asking;
+sources are never changed.
+
+#### Incremental builds
+
+`ttskit-image.lock.json`, next to `ttskit.toml`, records for each output the
+hash of its inputs, the options, the version of ttskit, and the hash of the file
+that was written. An output is rebuilt when:
+
+- it is new, or its file is missing (deleted by hand);
+- the file differs from what was built (edited by hand);
+- an input file changed, or the list of cards of a deck;
+- a step or deck option of its rule changed;
+- the ttskit version changed, since a newer ttskit may compress differently;
+- for a `pngquant` step, the pngquant version changed.
+
+Everything else is reported as up to date and not touched, so unchanged
+outputs keep identical bytes and `cloud sync push` does not upload them again.
+Commit the lock file if you commit the outputs, so a fresh checkout does not
+rebuild everything. The file is plain, sorted JSON; deleting it just rebuilds
+everything. It is also written after a partly failed build, so what did succeed
+is recorded.
+
+#### Stale outputs and `--prune`
+
+An output that an earlier build made and no rule makes any more (a rule was
+changed or deleted, a source was removed) is stale. `image build` lists it and
+leaves it alone. `--prune --yes` deletes the stale outputs that are still
+exactly what ttskit wrote; one that was changed by hand since is kept and
+forgotten, one that is already gone is just forgotten, and no directory is
+removed. Files that ttskit did not write are never touched. `--prune` without
+`--yes` is refused before anything is built; with `--dry-run` it only shows the
+plan, which already lists the stale files.
+
+#### Options
+
+- `--config PATH`: the project config (default `ttskit.toml`); its directory
+  is the base of all paths in it.
+- `--dry-run`: print the plan and write nothing, not even the lock file.
+- `--prune --yes`: also delete stale outputs, as above.
+- `--json`: print one object with `dry_run`, `plan` (`jobs`, `stale`, `notes`),
+  `build` (per job its result and the outputs written with their sizes and
+  notes; `null` for a dry run) and `prune` (`null` unless pruned).
+
+The plan has one line per job that will be built with the reason (`new`,
+`output missing`, `output changed`, `version changed`, `inputs changed`,
+`options changed`), a count of the up-to-date ones, and the stale outputs. The
+exit status is 1 if a job failed or a file could not be deleted; a job that
+fails does not stop the others.
+
+The description of a deck lands in `out` next to its sheets, so `cloud sync
+push` would upload it. Add a pattern such as `*.json` to `[local] ignore`, as
+in the example, if you do not want that; the file is still built.
+
 ## License
 
 [MIT](LICENSE)

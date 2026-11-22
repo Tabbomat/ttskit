@@ -365,6 +365,8 @@ mod check;
 pub use check::{CheckArgs, CheckStatus, check, parse_bytes};
 mod resize;
 pub use resize::{FilterKind, ResizeArgs, parse_scale, resize};
+mod build;
+pub use build::{BuildArgs, build};
 mod deck;
 #[cfg(feature = "image")]
 mod deck_grid;

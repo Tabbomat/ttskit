@@ -1194,3 +1194,15 @@ mod image_info {
         assert_eq!(ttskit(&args).stdout, ttskit(&args).stdout);
     }
 }
+
+#[cfg(not(feature = "image"))]
+#[test]
+fn image_build_without_the_feature_says_so() {
+    let output = ttskit(&["image", "build"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("no image support"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

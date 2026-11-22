@@ -497,6 +497,42 @@ enum ImageCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Build the images of the project config's `[[image.pipeline]]` rules
+    ///
+    /// Reads the rules from `[[image.pipeline]]` in ttskit.toml (source glob,
+    /// output directory, steps such as resize, optimize, quantize and convert,
+    /// and an optional deck). Only outputs whose inputs, options, ttskit
+    /// version or file changed are rebuilt; what was built is recorded in
+    /// ttskit-image.lock.json next to ttskit.toml. Existing outputs are
+    /// overwritten. Sources are never modified. Outputs that no rule makes any
+    /// more are listed as stale and only deleted with --prune --yes, and only
+    /// files that ttskit wrote and that are unchanged. Conflicting outputs
+    /// (two sources to one file, or an output that is a source) block the
+    /// whole build before anything is written. --dry-run prints the plan and
+    /// writes nothing, not even the lock file. Exits with status 1 if a job
+    /// failed. The usual flow is `ttskit image build`, then
+    /// `ttskit cloud sync push`.
+    Build {
+        /// The project config; its directory is the base of all paths in it
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = ttskit_cloud::ProjectConfig::FILE_NAME
+        )]
+        config: PathBuf,
+        /// Print the plan and write nothing
+        #[arg(long)]
+        dry_run: bool,
+        /// Also delete stale outputs (needs --yes)
+        #[arg(long)]
+        prune: bool,
+        /// Confirm --prune
+        #[arg(long)]
+        yes: bool,
+        /// Print one JSON object with the plan and the results
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1937,8 +1973,38 @@ fn run(cli: Cli) -> Result<ExitCode, CliError> {
                 ExitCode::FAILURE
             })
         }
+        Command::Image {
+            command:
+                ImageCommand::Build {
+                    config,
+                    dry_run,
+                    prune,
+                    yes,
+                    json,
+                },
+        } => run_image_build(image::BuildArgs {
+            config,
+            dry_run,
+            prune,
+            yes,
+            json,
+        }),
         command => run_simple(command).map(|()| ExitCode::SUCCESS),
     }
+}
+
+/// Kept out of `run`, whose stack frame in a debug build is already close to
+/// the 1 MiB main-thread stack of Windows.
+#[inline(never)]
+fn run_image_build(args: image::BuildArgs) -> Result<ExitCode, CliError> {
+    let mut stdout = std::io::stdout().lock();
+    let ok = image::build(&args, &mut stdout)?;
+    stdout.flush().map_err(|e| e.to_string())?;
+    Ok(if ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    })
 }
 
 fn main() -> ExitCode {
@@ -2164,5 +2230,52 @@ mod tests {
     fn status_exit_codes() {
         assert_eq!(status_exit_code(true), ExitCode::SUCCESS);
         assert_eq!(status_exit_code(false), ExitCode::from(2));
+    }
+
+    fn parse_build(args: &[&str]) -> Result<(PathBuf, bool, bool, bool, bool), clap::Error> {
+        let cli = Cli::try_parse_from(
+            ["ttskit", "image", "build"]
+                .into_iter()
+                .chain(args.iter().copied()),
+        )?;
+        match cli.command {
+            Command::Image {
+                command:
+                    ImageCommand::Build {
+                        config,
+                        dry_run,
+                        prune,
+                        yes,
+                        json,
+                    },
+            } => Ok((config, dry_run, prune, yes, json)),
+            _ => unreachable!("parsed image build"),
+        }
+    }
+
+    #[test]
+    fn image_build_defaults() {
+        let (config, dry_run, prune, yes, json) = parse_build(&[]).unwrap();
+        assert_eq!(
+            config,
+            PathBuf::from(ttskit_cloud::ProjectConfig::FILE_NAME)
+        );
+        assert!(!dry_run && !prune && !yes && !json);
+    }
+
+    #[test]
+    fn image_build_flags() {
+        let (config, dry_run, prune, yes, json) = parse_build(&[
+            "--config",
+            "proj/my.toml",
+            "--dry-run",
+            "--prune",
+            "--yes",
+            "--json",
+        ])
+        .unwrap();
+        assert_eq!(config, PathBuf::from("proj/my.toml"));
+        assert!(dry_run && prune && yes && json);
+        assert!(parse_build(&["--bogus"]).is_err());
     }
 }
