@@ -18,6 +18,8 @@ mods. Not affiliated with or endorsed by Berserk Games.
   local directory with a stable `index.json`; reruns fetch only what is missing.
 - **URL rewrite (done):** `save rewrite-urls` replaces asset URLs in a save from a
   mapping, losslessly.
+- **Rehost (done):** `save rehost` moves assets from other hosts into the project's Steam
+  Cloud folder and rewrites a copy of the save.
 - **Dead-link check (done):** `save check-urls` tells which asset URLs of a save no
   longer load.
 - **External Editor API client (done):** talk to a running game to read and write
@@ -188,6 +190,74 @@ are rewritten in the game's layout and the plan says so).
 - Exit status: 0 on success, also when mapping lines match nothing; 1 on
   errors (unreadable files, bad mapping, conflicts, missing `--out`).
 - Rewriting A to B and then B to A gives back the original bytes.
+
+## Rehosting assets to Steam Cloud
+
+```
+ttskit save rehost save.json --dry-run                 # print the plan, change nothing
+ttskit save rehost save.json                           # ask, then move and write save.rehosted.json
+ttskit save rehost save.json --host imgur --yes        # only imgur, no question
+ttskit save rehost save.json --folder Imported --out new.json
+ttskit save rehost save.json --in-place --yes
+```
+
+Moves the assets of a save that live on other hosts (for example imgur) into
+the project's Steam Cloud folder and points a copy of the save at the new URLs,
+in one command. Run it inside a project (`ttskit.toml`, see `cloud sync`); it
+needs the network, a ttskit built with the `steam` feature and a running Steam.
+Only rehost assets you may redistribute: other people's images and models are
+not yours to publish.
+
+The steps reuse the other commands:
+
+1. **Select.** Every http(s) URL of the save except Steam Cloud URLs that point
+   into your own cloud. `--host HOST` (only that host and its subdomains) and
+   `--skip-host HOST` narrow it and are repeatable; `imgur` is short for
+   `imgur.com`. URLs of other people's Steam Cloud files are selected like any
+   other host.
+2. **Plan.** Each URL with its size and target, the total download size and the
+   free cloud quota. Sizes come from `HEAD` requests (`Content-Length`), so a
+   host that does not answer shows `size unknown`. The target is
+   `<cloud folder>/<folder>/files/<sha256>.<type>`; the name is only known after
+   the download, so a URL that is not downloaded yet shows the pattern. The plan
+   is printed before anything is downloaded. `--dry-run` stops here and
+   downloads nothing. Otherwise you are asked once; `--yes` skips the question.
+3. **Download** (as `save fetch-assets`) into `<local dir>/<folder>/files`, with
+   `index.json` next to it. Add `<folder>/index.json` to `[local] ignore` in
+   `ttskit.toml`, or `cloud sync push` will upload the download index too.
+4. **Upload and share** the files (as `cloud sync push`, but only these files, never
+   deleting anything) into `<cloud folder>/<folder>/files`. Identical content has
+   one name, so it is uploaded once and all its URLs get the same new URL. The
+   quota is checked before the first upload.
+5. **Manifest.** The files are added to `ttskit.manifest.json`, with the local
+   path `<folder>/files/<name>`.
+6. **Rewrite** (as `save rewrite-urls`): the result goes to `SAVE.rehosted.json`
+   next to the input (an existing file needs `--yes`), to `--out FILE`, or over the
+   input with `--in-place --yes`. Everything but the replaced URLs stays as it
+   was. URLs inside scripts are replaced only with `--in-scripts`.
+
+Interrupting is safe. The save is written only after every upload succeeded. Run
+the same command again: files already downloaded are not fetched again, files
+already in the cloud are not written again, and the original save is never
+modified unless you asked for `--in-place`.
+
+- `--folder SUB` (default `rehosted`) is the sub folder of the project's cloud
+  folder and local directory; it must not contain `.` or `..` levels.
+- Limits and retries as in `save fetch-assets`: `--max-size`, `--concurrency`,
+  `--per-host`, `--retries`, `--timeout`. `--backup-dir` is as in `cloud`.
+- A URL that cannot be downloaded (dead link, timeout, too large, an HTML page)
+  is listed as `failed: <url>: <reason>` and stays unchanged in the save; the
+  rest is still moved. Exit status 0 when everything selected was moved or there
+  was nothing to do, 2 when a download failed, 1 on errors (including a failed
+  upload; the previous index is then in the backup the message names).
+- There is no `--json` output.
+
+Manual check (needs the real Steam Cloud, not part of the test suite): in a
+throwaway project with a small save that uses two or three imgur images, run
+`ttskit save rehost save.json --dry-run`, then the real run, open the new save in
+the game and check that the images load, run `ttskit cloud status` and look at
+`ttskit.manifest.json`; then run the command again on the new save, which must say
+`Nothing to rehost`.
 
 ## MCP server
 
