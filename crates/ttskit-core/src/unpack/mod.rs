@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value, json};
 
+use crate::asset_ref::{AssetMap, placeholder};
 use crate::save::write::{Eol, to_vec_with};
 use crate::save::{Save, SaveError};
 use names::Siblings;
@@ -77,6 +78,8 @@ pub struct UnpackReport {
     pub files: usize,
     /// Text files whose field had mixed line endings.
     pub mixed_eol: Vec<String>,
+    /// URLs replaced by asset placeholders (see [`unpack_with_assets`]).
+    pub assets_mapped: usize,
 }
 
 /// The result of [`unpack`]: the files to write, in write order, and a report.
@@ -283,9 +286,27 @@ impl Unpacked {
 /// Unpacks a save. `eol` is the line ending of every file written (the native
 /// one in the command line tool).
 pub fn unpack(save_bytes: &[u8], eol: Eol) -> Result<Unpacked, UnpackError> {
+    unpack_with_assets(save_bytes, eol, &AssetMap::new())
+}
+
+/// Like [`unpack`], but first replaces every URL of `assets` in the string
+/// values of the save (not in keys) by its `asset:{PATH}` placeholder.
+///
+/// URLs match exactly and case-sensitively, as spelled in the map. Entries
+/// with an empty URL are ignored, the stale flag is not looked at. If several
+/// paths share a URL, the smallest path wins. Longer URLs are replaced first,
+/// so a URL that is a prefix of another does not break the longer one. The
+/// number of replaced occurrences is `report.assets_mapped`.
+pub fn unpack_with_assets(
+    save_bytes: &[u8],
+    eol: Eol,
+    assets: &AssetMap,
+) -> Result<Unpacked, UnpackError> {
     let save = Save::from_slice(save_bytes)?;
     let layout_eol = eol::detect_layout(save_bytes);
-    let Value::Object(root) = save.into_value() else {
+    let mut value = save.into_value();
+    let assets_mapped = map_urls(&mut value, assets);
+    let Value::Object(root) = value else {
         unreachable!("Save invariant: top level is an object");
     };
     let mut ctx = Ctx {
@@ -297,7 +318,46 @@ pub fn unpack(save_bytes: &[u8], eol: Eol) -> Result<Unpacked, UnpackError> {
         pretty_state: Vec::new(),
     };
     ctx.unpack_root(root);
-    Ok(ctx.finish(layout_eol))
+    let mut unpacked = ctx.finish(layout_eol);
+    unpacked.report.assets_mapped = assets_mapped;
+    Ok(unpacked)
+}
+
+/// Replaces the URLs of `assets` in all string values of `value`; returns the
+/// number of replaced occurrences.
+fn map_urls(value: &mut Value, assets: &AssetMap) -> usize {
+    // (url, placeholder), longest URL first. `iter` is ordered by path, so the
+    // first entry seen for a URL has the smallest path.
+    let mut seen = std::collections::HashSet::new();
+    let mut urls: Vec<(&str, String)> = Vec::new();
+    for (path, entry) in assets.iter() {
+        if !entry.url.is_empty() && seen.insert(entry.url.as_str()) {
+            urls.push((entry.url.as_str(), placeholder(path)));
+        }
+    }
+    if urls.is_empty() {
+        return 0;
+    }
+    urls.sort_by_key(|(url, _)| std::cmp::Reverse(url.len()));
+    fn walk(value: &mut Value, urls: &[(&str, String)]) -> usize {
+        match value {
+            Value::String(text) => {
+                let mut count = 0;
+                for (url, replacement) in urls {
+                    let found = text.matches(url).count();
+                    if found > 0 {
+                        *text = text.replace(url, replacement);
+                        count += found;
+                    }
+                }
+                count
+            }
+            Value::Array(items) => items.iter_mut().map(|v| walk(v, urls)).sum(),
+            Value::Object(map) => map.values_mut().map(|v| walk(v, urls)).sum(),
+            _ => 0,
+        }
+    }
+    walk(value, &urls)
 }
 
 struct Ctx {
@@ -515,6 +575,7 @@ impl Ctx {
             objects: self.objects,
             files: self.files.len(),
             mixed_eol: self.mixed_eol,
+            assets_mapped: 0,
         };
         Unpacked {
             files: self.files,

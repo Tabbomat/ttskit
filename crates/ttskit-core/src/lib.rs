@@ -36,4 +36,5 @@ pub use save::{
 };
 pub use unpack::{
     OutputFile, UnpackError, UnpackReport, Unpacked, WriteOptions, WritePlan, unpack,
+    unpack_with_assets,
 };

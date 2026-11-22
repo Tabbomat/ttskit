@@ -51,6 +51,11 @@ impl AssetMap {
         self.entries.get(path)
     }
 
+    /// All entries as `(path, entry)`, ordered by path.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &AssetEntry)> {
+        self.entries.iter().map(|(p, e)| (p.as_str(), e))
+    }
+
     /// True when the map has no entries.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
