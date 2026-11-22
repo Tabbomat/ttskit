@@ -30,7 +30,7 @@ enum Command {
         #[command(subcommand)]
         command: CloudCommand,
     },
-    /// Inspect image files (local only; needs a build with the `image` feature; unofficial)
+    /// Inspect and convert image files (local only; needs a build with the `image` feature; unofficial)
     Image {
         #[command(subcommand)]
         command: ImageCommand,
@@ -237,6 +237,53 @@ enum ImageCommand {
         /// Image files or directories
         #[arg(required = true, value_name = "PATH")]
         inputs: Vec<PathBuf>,
+        /// Print one JSON object with all results
+        #[arg(long)]
+        json: bool,
+    },
+    /// Convert images to PNG or JPEG, the formats Tabletop Simulator loads
+    ///
+    /// Reads png, jpg, webp, bmp, tiff and gif (decided by content, not by
+    /// extension) and writes PNG or JPEG. An animated input converts its first
+    /// frame, with a warning. PNG output keeps alpha and 16-bit channels; JPEG
+    /// output is 8-bit and refuses an image with transparent or translucent
+    /// pixels unless --background says what to flatten it onto. A CMYK JPEG
+    /// becomes RGB. The colour profile and EXIF data are dropped (the game
+    /// ignores them; an EXIF orientation is applied to the pixels first)
+    /// unless --keep-metadata is given. Without --out or --out-dir the output
+    /// goes next to each input with the new extension. Existing files are
+    /// never overwritten without --yes, and the whole run is refused up front
+    /// if two inputs would write the same file. Each file is converted
+    /// independently: a failure is reported and the other files still convert.
+    /// Output is deterministic. Exits with status 1 if any file failed.
+    Convert {
+        /// Image files or directories (scanned recursively)
+        #[arg(required = true, value_name = "INPUT")]
+        inputs: Vec<PathBuf>,
+        /// Output format
+        #[arg(long, value_enum)]
+        to: image::Target,
+        /// JPEG quality, 1 to 100 [default: 85]
+        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u8).range(1..=100))]
+        quality: Option<u8>,
+        /// Colour to flatten transparency onto for JPEG output: #RRGGBB, #RGB, white or black
+        #[arg(long, value_name = "COLOR")]
+        background: Option<String>,
+        /// Keep the colour profile and EXIF data
+        #[arg(long)]
+        keep_metadata: bool,
+        /// Output file (for exactly one input)
+        #[arg(long, value_name = "FILE", conflicts_with = "out_dir")]
+        out: Option<PathBuf>,
+        /// Output directory (created if missing); files are named like their input
+        #[arg(long, value_name = "DIR")]
+        out_dir: Option<PathBuf>,
+        /// Overwrite existing output files
+        #[arg(long)]
+        yes: bool,
+        /// Show what would be written, but write nothing
+        #[arg(long)]
+        dry_run: bool,
         /// Print one JSON object with all results
         #[arg(long)]
         json: bool,
@@ -1109,6 +1156,44 @@ fn run(cli: Cli) -> Result<ExitCode, CliError> {
             let mut out = std::io::stdout().lock();
             let ok = image::info(&inputs, json, &mut out)?;
             out.flush().map_err(|e| e.to_string())?;
+            Ok(if ok {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            })
+        }
+        Command::Image {
+            command:
+                ImageCommand::Convert {
+                    inputs,
+                    to,
+                    quality,
+                    background,
+                    keep_metadata,
+                    out,
+                    out_dir,
+                    yes,
+                    dry_run,
+                    json,
+                },
+        } => {
+            let mut stdout = std::io::stdout().lock();
+            let ok = image::convert(
+                &image::ConvertArgs {
+                    inputs,
+                    to,
+                    quality,
+                    background,
+                    keep_metadata,
+                    out,
+                    out_dir,
+                    yes,
+                    dry_run,
+                    json,
+                },
+                &mut stdout,
+            )?;
+            stdout.flush().map_err(|e| e.to_string())?;
             Ok(if ok {
                 ExitCode::SUCCESS
             } else {

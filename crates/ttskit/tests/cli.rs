@@ -1096,6 +1096,14 @@ fn image_info_without_image_feature_fails() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("--features image"));
 }
 
+#[cfg(not(feature = "image"))]
+#[test]
+fn image_convert_without_image_feature_fails() {
+    let output = ttskit(&["image", "convert", "a.png", "--to", "png"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--features image"));
+}
+
 #[cfg(feature = "image")]
 mod image_info {
     use super::*;
