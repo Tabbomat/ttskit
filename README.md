@@ -936,6 +936,56 @@ any error. `--json` prints one object with `dry_run`, `sheet`, `columns`,
 `save`), `files` (`path`, `slot`, `column`, `row`, `hidden`, `width`, `height`,
 `bytes`, `overwrote`, `written`), `notes` and `errors`.
 
+### Deck objects
+
+```
+ttskit image deck build cards/ --out-dir assets
+ttskit cloud sync push                       # upload the sheets, fills the manifest
+ttskit image deck object assets/deck.json --back-url https://example.invalid/back/ --out deck_object.json
+ttskit image deck object assets/deck.json --face-url URL --back-url URL --meta meta.json --out deck_object.json
+ttskit image deck object assets/deck.json --unique-backs --back-url B1 --back-url B2 --out deck_object.json
+```
+
+`image deck object DESCRIPTION --out FILE` turns the `NAME.json` of `image deck
+build` into a saved-object file (`{"ObjectStates": [...]}`, written like the
+game writes JSON), so a deck does not have to be set up in the custom deck
+dialog. Two or more cards give a `DeckCustom` with one `CustomDeck` entry per
+sheet (keys `1`, `2`, ...), `DeckIDs` and one `Card` per card in
+`ContainedObjects`; a card id is the sheet's key times 100 plus the slot. A deck
+with one card gives a single `CardCustom`, as the game does.
+
+- **URLs.** `--face-url` (once per sheet, in order) and `--back-url` are URLs, or
+  the local path of an uploaded file. Paths, and the face sheets when
+  `--face-url` is left out (the sheet files named in the description, relative
+  to its folder), are looked up in the project manifest of `--config` (default
+  `ttskit.toml` in the current directory). A file that changed after its upload
+  is refused, so the object never points at an outdated sheet.
+- **Backs.** One `--back-url` is shared by all sheets. `--unique-backs` sets
+  `UniqueBack` and takes one back sheet per face sheet, in order.
+  `BackIsHidden` follows the description (`image deck build --no-hidden-slot`
+  gives `true`).
+- **Text.** Nicknames are empty by default. `--meta FILE` sets `Nickname`,
+  `Description` and `GMNotes` of the deck and of each card:
+
+  ```json
+  {
+    "deck": { "nickname": "My deck", "description": "...", "gm_notes": "..." },
+    "cards": [ { "nickname": "Ace" }, null, { "gm_notes": "..." } ]
+  }
+  ```
+
+  `cards` is a list in deck order (`null` for none) or an object keyed by a
+  card's `source` in the description or by its file name (`"ace.png": {...}`; an
+  ambiguous or unknown name is an error). All keys are optional.
+  `--nicknames-from-files` names the cards without a nickname after their source
+  file.
+- GUIDs are derived from the content, so the output is identical between runs.
+  An existing `--out` file needs `--yes`, `--dry-run` writes nothing, `--json`
+  prints one object, exit status 1 on any error.
+
+The field set was compared with a deck made in the game; see
+[docs/deck-sheets.md](docs/deck-sheets.md).
+
 Which formats, animated images, 16-bit channels and colour profiles the image
 commands accept or produce follows what the game itself accepts; see
 [docs/image-formats.md](docs/image-formats.md).

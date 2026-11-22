@@ -64,3 +64,37 @@ decks (cards spawned from JSON with `UniqueBack: false`).
   sheet showed their own images; the hidden-card slot of both sheets showed the
   plain fill colour. A card of the first sheet in a hand showed its face to its
   owner and the plain hidden-card image to another player.
+
+## Deck objects (`image deck object`)
+
+The field set of `image deck object` was compared with a 60 card deck made in
+the game's custom deck dialog (one 10x7 sheet, `UniqueBack`, `Sideways` and
+`BackIsHidden` all off). Observed there:
+
+- The object is a `DeckCustom` with `DeckIDs` 100 to 159 and a `CustomDeck`
+  with the single key `1`; each card is a `Card` with `CardID` 100 to 159 and no
+  `CustomDeck` of its own. Card id = key times 100 plus the slot.
+- A card has `Hands: true`, a deck has `Hands: false` and
+  `HideWhenFaceDown: true`. The game gave every nickname, description and GM
+  note as an empty string.
+
+The test fixture `tests/fixtures/game_deck.json` is that deck cut down to three
+cards with placeholder URLs; a test checks that the generated object has the
+same keys in the same order.
+
+Not observed in the game: the key order of a single `CardCustom` and a deck
+with more than one sheet are built by the same rules, not copied from a game
+made object. `UniqueBack: true` (one back sheet per face sheet) is likewise not
+verified against the game's own output.
+
+## Manual check of `image deck object`
+
+2026-11-22, against a running game via the External Editor API
+(`ttskit editor exec`, `spawnObjectData` with the generated object):
+
+- A deck of 5 cards (sheet URLs of the deck above, `--nicknames-from-files`)
+  spawned as a deck of type `Deck` with 5 cards; the nicknames were the file
+  names and every card had its own GUID.
+- A one-card object spawned as a `Card` with the nickname of its file.
+- Whether the cards show the right images, and the hand view with
+  `BackIsHidden` on and off, still needs to be looked at in the game.
