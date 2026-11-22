@@ -372,7 +372,13 @@ ttskit cloud sync push --prune     # also delete what the local directory lacks
 - If a step fails, the push stops, names the backup and says so. Run the same
   command again: files that already made it into the cloud are not written
   again, and the run continues where it stopped.
-- `--json` prints the plan and the result as one JSON object. Exit code 1 on
+- The summary shows how many bytes are uploaded, e.g. `94 upload (124.0 MB)`,
+  and a line `cloud: 59.7 MB used, 99.9 GB free` shows the Steam Cloud quota
+  (left out if Steam cannot report it; `cloud list` and `cloud status` print
+  the same line). A push whose new files do not fit into the free space is
+  refused before anything is written, also with `--dry-run`.
+- `--json` prints the plan and the result as one JSON object (with `quota`:
+  `total`, `used`, `available` in bytes, or `null`, and `plan.transfer_bytes`). Exit code 1 on
   errors.
 - A push that completes (also when there was nothing to do) refreshes the
   project manifest, see "Manifest and TSV" below. Dry runs and failed pushes

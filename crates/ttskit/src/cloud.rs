@@ -9,11 +9,34 @@ use serde_json::json;
 use ttskit_cloud::{
     Action, Backup, BackupError, BackupStore, CloudBackend, CloudError, CloudIndex, DeleteError,
     DeletePlan, DeleteTarget, FileState, IgnoreSet, IndexEntry, IndexError, LocalDir, LocalFile,
-    Manifest, ManifestEntry, PullError, PushError, Reason, RestoreAction, StatusError, TsvError,
-    UgcUrl, UploadError, UploadPlan, compare, delete, find_entries, is_game_internal,
-    normalize_folder, plan_delete, plan_pull, plan_push, plan_restore, plan_upload, pull, push,
-    restore, upload,
+    Manifest, ManifestEntry, PullError, PushError, Quota, Reason, RestoreAction, StatusError,
+    TsvError, UgcUrl, UploadError, UploadPlan, compare, delete, find_entries, format_size,
+    is_game_internal, normalize_folder, plan_delete, plan_pull, plan_push, plan_restore,
+    plan_upload, pull, push, restore, upload,
 };
+
+/// The cloud quota, or `None` when Steam cannot report it. The quota is extra
+/// information, so a failure to read it never fails a command.
+fn read_quota(backend: &dyn CloudBackend) -> Option<Quota> {
+    backend.quota().ok()
+}
+
+/// `cloud: 59.7 MB used, 99.9 GB free`
+fn quota_line(quota: Quota) -> String {
+    format!(
+        "cloud: {} used, {} free",
+        format_size(quota.used()),
+        format_size(quota.available)
+    )
+}
+
+/// The quota for `--json` output: bytes, or `null` if unknown.
+fn quota_json(quota: Option<Quota>) -> serde_json::Value {
+    match quota {
+        Some(q) => json!({"total": q.total, "used": q.used(), "available": q.available}),
+        None => serde_json::Value::Null,
+    }
+}
 
 /// Errors of the `cloud` subcommands.
 #[derive(Debug, thiserror::Error)]
@@ -605,8 +628,12 @@ pub fn sync_push(
         .filter(|s| s.reason == Reason::NeedsPrune)
         .count();
 
+    let quota = read_quota(backend);
     if !mode.json {
         out.write_all(plan.sync.render_text().as_bytes())?;
+        if let Some(q) = quota {
+            writeln!(out, "{}", quota_line(q))?;
+        }
         out.flush()?;
     }
 
@@ -617,6 +644,7 @@ pub fn sync_push(
                      manifest: &Option<String>| {
         json!({
             "plan": plan.sync.to_json(),
+            "quota": quota_json(quota),
             "dry_run": mode.dry_run,
             "done": done,
             "uploaded": uploaded,
@@ -967,6 +995,7 @@ pub fn status(
 ) -> Result<bool, CommandError> {
     let index = CloudIndex::load(backend)?;
     let cloud_files = backend.list()?;
+    let quota = read_quota(backend);
     let mut report = compare(&index, &cloud_files, folder, local, ignore);
     report.ignored_local = ignored_local;
     let in_sync = report.is_in_sync();
@@ -1001,6 +1030,7 @@ pub fn status(
                 "local": report.ignored_local,
                 "cloud": report.ignored_cloud,
             },
+            "quota": quota_json(quota),
             "files": files,
         }))
         .map_err(io::Error::from)?;
@@ -1050,6 +1080,9 @@ pub fn status(
                 "ignored: {} local, {} cloud",
                 report.ignored_local, report.ignored_cloud
             )?;
+        }
+        if let Some(q) = quota {
+            writeln!(buf, "{}", quota_line(q))?;
         }
     }
     out.write_all(&buf)?;
@@ -1237,6 +1270,7 @@ pub fn list(
     let steam_files = backend.list()?;
     let index = CloudIndex::load(backend)?;
     let all_folders = index.all_folders();
+    let quota = read_quota(backend);
 
     // Lowercase filter path; `None` shows everything.
     let filter = match folder.map(normalize_folder) {
@@ -1325,9 +1359,12 @@ pub fn list(
     // Build everything first so that nothing is written on an error.
     let mut buf: Vec<u8> = Vec::new();
     if json {
-        write_json(&folders, &files, &mut buf)?;
+        write_json(&folders, &files, quota, &mut buf)?;
     } else {
         write_tree(&folders, &files, filter.as_deref(), &mut buf)?;
+        if let Some(q) = quota {
+            writeln!(buf, "{}", quota_line(q))?;
+        }
     }
     out.write_all(&buf)?;
     Ok(())
@@ -1336,6 +1373,7 @@ pub fn list(
 fn write_json(
     folders: &[String],
     files: &[FileRow],
+    quota: Option<Quota>,
     out: &mut Vec<u8>,
 ) -> Result<(), CommandError> {
     let rows: Vec<_> = files
@@ -1356,6 +1394,7 @@ fn write_json(
         "folders": folders,
         "files": rows,
         "total_size": total_size(files),
+        "quota": quota_json(quota),
     });
     let text = serde_json::to_string_pretty(&value).map_err(io::Error::from)?;
     out.extend_from_slice(text.as_bytes());
@@ -1954,6 +1993,13 @@ mod tests {
         )
     }
 
+    /// Removes the `cloud: ... free` quota line, which most tests are not about.
+    fn strip_quota(text: String) -> String {
+        text.split_inclusive('\n')
+            .filter(|l| !(l.starts_with("cloud: ") && l.ends_with(" free\n")))
+            .collect()
+    }
+
     fn try_run(
         cloud: &MemoryCloud,
         folder: Option<&str>,
@@ -1961,7 +2007,9 @@ mod tests {
     ) -> (Result<(), CommandError>, String) {
         let mut out = Vec::new();
         let result = list(cloud, folder, json, &mut out);
-        (result, String::from_utf8(out).unwrap())
+        let text = String::from_utf8(out).unwrap();
+        // The JSON keeps its quota key; tests that care look at it.
+        (result, if json { text } else { strip_quota(text) })
     }
 
     fn run(cloud: &MemoryCloud, folder: Option<&str>, json: bool) -> String {
@@ -2242,8 +2290,10 @@ mod tests {
                 .with_file("Alpha.txt", vec![0; 1]),
             &index,
         );
+        let mut value = json_of(&cloud, None);
+        assert!(value.as_object_mut().unwrap().remove("quota").is_some());
         assert_eq!(
-            json_of(&cloud, None),
+            value,
             json!({
                 "folders": ["Decks", "Decks/Old"],
                 "files": [
@@ -2281,8 +2331,36 @@ mod tests {
     fn empty_cloud_json() {
         assert_eq!(
             json_of(&MemoryCloud::new(), None),
-            json!({"folders": [], "files": [], "total_size": 0})
+            json!({
+                "folders": [], "files": [], "total_size": 0,
+                "quota": {"total": 1u64 << 30, "used": 0, "available": 1u64 << 30},
+            })
         );
+    }
+
+    #[test]
+    fn quota_line_follows_the_footer_in_text() {
+        let cloud = MemoryCloud::new().with_quota(2_000_000);
+        let mut out = Vec::new();
+        list(&cloud, None, false, &mut out).unwrap();
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "0 files in 0 folders, 0 bytes
+cloud: 0 B used, 2.0 MB free
+"
+        );
+    }
+
+    #[test]
+    fn unreadable_quota_is_omitted_from_text_and_null_in_json() {
+        let cloud = MemoryCloud::new();
+        cloud.fail(Op::Quota, None, CloudError::Backend("no quota".into()));
+        assert_eq!(
+            run(&cloud, None, false),
+            "0 files in 0 folders, 0 bytes
+"
+        );
+        assert_eq!(json_of(&cloud, None)["quota"], serde_json::Value::Null);
     }
 
     #[test]
@@ -3697,7 +3775,8 @@ mod tests {
                 &mut out,
             )
             .unwrap();
-            (in_sync, String::from_utf8(out).unwrap())
+            let text = String::from_utf8(out).unwrap();
+            (in_sync, if json { text } else { super::strip_quota(text) })
         }
 
         fn run_ignoring(
@@ -3721,7 +3800,14 @@ mod tests {
                 &mut out,
             )
             .unwrap();
-            (in_sync, String::from_utf8(out).unwrap())
+            (
+                in_sync,
+                if json {
+                    String::from_utf8(out).unwrap()
+                } else {
+                    super::strip_quota(String::from_utf8(out).unwrap())
+                },
+            )
         }
 
         #[test]
@@ -3796,6 +3882,34 @@ mod tests {
                  \x20 broken     sub/b.png  (cloud file is gone)\n\
                  \x20 new        sub/x.png\n\
                  2 new, 1 changed, 1 missing, 1 broken, 1 identical\n"
+            );
+        }
+
+        #[test]
+        fn quota_is_shown_in_text_and_json() {
+            let cloud = MemoryCloud::new().with_quota(2_000_000);
+            let mut out = Vec::new();
+            status(
+                &cloud,
+                &[],
+                "Decks",
+                &IgnoreSet::default(),
+                0,
+                "assets",
+                false,
+                &mut out,
+            )
+            .unwrap();
+            assert!(String::from_utf8(out).unwrap().ends_with(
+                "
+cloud: 0 B used, 2.0 MB free
+"
+            ));
+            let (_, text) = run(&cloud, &[], "Decks", true);
+            let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(
+                value["quota"],
+                json!({"total": 2_000_000, "used": 0, "available": 2_000_000})
             );
         }
 
@@ -3902,6 +4016,8 @@ mod tests {
         struct Out {
             result: Result<(), CommandError>,
             text: String,
+            /// `text` including the quota line.
+            raw: String,
             prompts: Vec<String>,
         }
 
@@ -4013,9 +4129,11 @@ mod tests {
                 &mut confirm,
                 &mut out,
             );
+            let raw = String::from_utf8(out).unwrap();
             Out {
                 result,
-                text: String::from_utf8(out).unwrap(),
+                text: super::strip_quota(raw.clone()),
+                raw,
                 prompts,
             }
         }
@@ -4035,6 +4153,70 @@ mod tests {
         }
 
         const NEW: [(&str, &str); 2] = [("a.png", "A"), ("b.png", "B")];
+
+        #[test]
+        fn plan_shows_the_quota_after_the_summary() {
+            let (_dir, store) = setup();
+            let mut cloud = MemoryCloud::new().with_quota(2_000_000);
+            let run = push_run(&mut cloud, &store, &NEW, false, DRY, false);
+            run.result.unwrap();
+            assert!(
+                run.raw.ends_with(
+                    "2 upload (2 B)
+cloud: 0 B used, 2.0 MB free
+Dry run: nothing was changed.
+"
+                ),
+                "{}",
+                run.raw
+            );
+        }
+
+        #[test]
+        fn json_plan_has_the_quota_and_transfer_bytes() {
+            let (_dir, store) = setup();
+            let mut cloud = MemoryCloud::new().with_quota(2_000_000);
+            let run = push_run(&mut cloud, &store, &NEW, false, json_mode(true), false);
+            run.result.unwrap();
+            let value: serde_json::Value = serde_json::from_str(&run.raw).unwrap();
+            assert_eq!(
+                value["quota"],
+                json!({"total": 2_000_000, "used": 0, "available": 2_000_000})
+            );
+            assert_eq!(value["plan"]["transfer_bytes"], 2);
+        }
+
+        #[test]
+        fn unreadable_quota_is_omitted_and_does_not_block_a_noop() {
+            let (_dir, store) = setup();
+            let mut cloud = MemoryCloud::new();
+            push_run(&mut cloud, &store, &NEW, false, YES, false)
+                .result
+                .unwrap();
+            cloud.fail(Op::Quota, None, CloudError::Backend("no quota".into()));
+            let run = push_run(&mut cloud, &store, &NEW, false, DRY, false);
+            run.result.unwrap();
+            assert_eq!(run.raw, run.text);
+            let json = push_run(&mut cloud, &store, &NEW, false, json_mode(true), false);
+            json.result.unwrap();
+            let value: serde_json::Value = serde_json::from_str(&json.raw).unwrap();
+            assert_eq!(value["quota"], serde_json::Value::Null);
+        }
+
+        #[test]
+        fn upload_larger_than_the_free_quota_is_refused_before_anything_is_written() {
+            let (_dir, store) = setup();
+            let mut cloud = MemoryCloud::new().with_quota(1);
+            for mode in [YES, DRY, json_mode(false)] {
+                let run = push_run(&mut cloud, &store, &NEW, false, mode, false);
+                assert!(matches!(
+                    run.result,
+                    Err(CommandError::Cloud(CloudError::QuotaExceeded { .. }))
+                ));
+                assert_eq!(run.raw, "");
+            }
+            assert!(cloud.mutating_calls().is_empty());
+        }
 
         #[test]
         fn dry_run_prints_the_plan_and_changes_nothing() {
