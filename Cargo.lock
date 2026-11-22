@@ -2791,7 +2791,7 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "ttskit"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "clap",
  "clap_complete",
@@ -2819,7 +2819,7 @@ dependencies = [
 
 [[package]]
 name = "ttskit-cloud"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "bson",
  "ignore",
@@ -2836,7 +2836,7 @@ dependencies = [
 
 [[package]]
 name = "ttskit-core"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "serde_json",
  "sha2",
@@ -2847,7 +2847,7 @@ dependencies = [
 
 [[package]]
 name = "ttskit-diff"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "serde_json",
  "similar",
@@ -2857,7 +2857,7 @@ dependencies = [
 
 [[package]]
 name = "ttskit-editor"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2867,7 +2867,7 @@ dependencies = [
 
 [[package]]
 name = "ttskit-image"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "exoquant",
  "globset",
@@ -2884,7 +2884,7 @@ dependencies = [
 
 [[package]]
 name = "ttskit-lint"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "full_moon",
  "roxmltree",
@@ -2898,7 +2898,7 @@ dependencies = [
 
 [[package]]
 name = "ttskit-testutil"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "serde_json",
 ]
