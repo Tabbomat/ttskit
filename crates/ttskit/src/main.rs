@@ -5,6 +5,7 @@ mod fetch_assets;
 mod http;
 mod image;
 mod mcp;
+mod rehost;
 mod rewrite_urls;
 mod save;
 mod watch;
@@ -856,6 +857,26 @@ enum SaveCommand {
     /// (an existing file needs --yes); replacing the input needs --in-place
     /// --yes. Everything except the replaced strings stays as it was.
     RewriteUrls(SaveRewriteUrlsCli),
+    /// Move assets from other hosts into the project's Steam Cloud and rewrite the save
+    ///
+    /// Run inside a project (ttskit.toml). Selects every http(s) asset URL of
+    /// the save except those already in your own cloud (--host and --skip-host
+    /// narrow that; `imgur` stands for imgur.com), downloads the files into
+    /// <local dir>/<folder>/files (like fetch-assets), uploads and shares
+    /// them in the cloud folder <cloud folder>/<folder>/files, records them in
+    /// the project manifest, and writes a copy of the save that uses the new
+    /// URLs. The plan comes first: every URL with its size (looked up with
+    /// HEAD, so some may be unknown) and the free cloud quota; --dry-run stops
+    /// there and downloads nothing, otherwise you are asked (--yes skips the
+    /// question). Identical content is uploaded once. A run that stopped can
+    /// be repeated: files already downloaded or already in the cloud are not
+    /// fetched or uploaded again. The save is written only after all uploads
+    /// succeeded, to SAVE.rehosted.json unless --out is given; replacing the
+    /// input needs --in-place --yes. URLs that fail to download stay as they
+    /// are (exit status 2). Only rehost assets you may redistribute. Add
+    /// <folder>/index.json to [local] ignore so `cloud sync push` does not
+    /// upload the download index.
+    Rehost(SaveRehostCli),
 }
 
 #[derive(clap::Args)]
@@ -892,6 +913,60 @@ struct SaveRewriteUrlsCli {
     json: bool,
 }
 
+#[derive(clap::Args)]
+struct SaveRehostCli {
+    /// The save file (JSON)
+    save: PathBuf,
+    /// The project config
+    #[arg(
+        long,
+        value_name = "PATH",
+        default_value = ttskit_cloud::ProjectConfig::FILE_NAME
+    )]
+    config: PathBuf,
+    /// Sub folder of the project's cloud folder and local directory for the rehosted files
+    #[arg(long, value_name = "SUB", default_value = rehost::DEFAULT_FOLDER)]
+    folder: String,
+    /// Only rehost URLs on this host or its subdomains; repeatable (`imgur` means imgur.com)
+    #[arg(long, value_name = "HOST")]
+    host: Vec<String>,
+    /// Leave URLs on this host or its subdomains alone; repeatable
+    #[arg(long, value_name = "HOST")]
+    skip_host: Vec<String>,
+    /// Write the new save here [default: SAVE.rehosted.json next to the input]
+    #[arg(long, value_name = "FILE", conflicts_with = "in_place")]
+    out: Option<PathBuf>,
+    /// Replace the input file (needs --yes)
+    #[arg(long)]
+    in_place: bool,
+    /// Also replace URLs inside LuaScript, LuaScriptState and XmlUI strings
+    #[arg(long)]
+    in_scripts: bool,
+    /// Do not ask for confirmation; also confirms --in-place and overwriting --out
+    #[arg(long)]
+    yes: bool,
+    /// Print the plan and change nothing (nothing is downloaded either)
+    #[arg(long, conflicts_with = "yes")]
+    dry_run: bool,
+    /// Largest accepted file: bytes, optionally with a k, m or g suffix (binary multiples)
+    #[arg(long, value_name = "SIZE", default_value = "512m", value_parser = |s: &str| fetch_assets::parse_size(s))]
+    max_size: u64,
+    /// Most requests in flight at once
+    #[arg(long, value_name = "N", default_value_t = 16, value_parser = clap::value_parser!(u32).range(1..=256))]
+    concurrency: u32,
+    /// Most requests in flight at once to one host
+    #[arg(long, value_name = "N", default_value_t = 4, value_parser = clap::value_parser!(u32).range(1..=64))]
+    per_host: u32,
+    /// Extra attempts after a timeout, network error, 429 or 5xx
+    #[arg(long, value_name = "N", default_value_t = 3, value_parser = clap::value_parser!(u32).range(0..=10))]
+    retries: u32,
+    /// Timeout for connecting, in seconds (a whole download may take up to an hour)
+    #[arg(long, value_name = "SECONDS", default_value_t = 30, value_parser = clap::value_parser!(u32).range(1..=600))]
+    timeout: u32,
+    /// Directory for the index backups [default: <local app data>/ttskit/cloud-backups]
+    #[arg(long, env = "TTSKIT_BACKUP_DIR", value_name = "DIR")]
+    backup_dir: Option<PathBuf>,
+}
 #[derive(clap::Args)]
 struct SaveFetchAssetsCli {
     /// The save file (JSON)
@@ -1803,7 +1878,10 @@ fn run_simple(command: Command) -> Result<(), CliError> {
         | Command::Image { .. }
         | Command::Save {
             command:
-                SaveCommand::CheckUrls(_) | SaveCommand::FetchAssets(_) | SaveCommand::RewriteUrls(_),
+                SaveCommand::CheckUrls(_)
+                | SaveCommand::FetchAssets(_)
+                | SaveCommand::RewriteUrls(_)
+                | SaveCommand::Rehost(_),
         } => unreachable!("handled by run"),
     }
 }
@@ -2275,6 +2353,9 @@ fn run(cli: Cli) -> Result<ExitCode, CliError> {
         Command::Save {
             command: SaveCommand::RewriteUrls(args),
         } => run_rewrite_urls(args),
+        Command::Save {
+            command: SaveCommand::Rehost(args),
+        } => run_rehost(args),
         command => run_simple(command).map(|()| ExitCode::SUCCESS),
     }
 }
@@ -2297,6 +2378,50 @@ fn run_rewrite_urls(args: SaveRewriteUrlsCli) -> Result<ExitCode, CliError> {
     rewrite_urls::rewrite_urls(&options, &mut out)?;
     out.flush().map_err(|e| e.to_string())?;
     Ok(ExitCode::SUCCESS)
+}
+
+#[inline(never)]
+fn run_rehost(args: SaveRehostCli) -> Result<ExitCode, CliError> {
+    let client =
+        http::HttpClient::for_downloads(std::time::Duration::from_secs(u64::from(args.timeout)))?;
+    let prepared = rehost::prepare(rehost::Options {
+        save: args.save,
+        config: args.config,
+        folder: args.folder,
+        hosts: args.host,
+        skip_hosts: args.skip_host,
+        out: args.out,
+        in_place: args.in_place,
+        in_scripts: args.in_scripts,
+        yes: args.yes,
+        dry_run: args.dry_run,
+        fetch: ttskit_core::FetchConfig {
+            concurrency: args.concurrency as usize,
+            per_host: args.per_host as usize,
+            retries: args.retries,
+            max_size: args.max_size,
+            ..ttskit_core::FetchConfig::default()
+        },
+    })?;
+    let store = BackupStore::new(cloud::backup_dir(args.backup_dir).map_err(|e| e.to_string())?);
+    let mut backend = connect()?;
+    let mut out = std::io::stdout().lock();
+    let status = rehost::run(
+        &prepared,
+        backend.as_mut(),
+        &client,
+        &client,
+        &store,
+        SystemTime::now(),
+        &cloud::format_date(&jiff::Zoned::now()),
+        &mut ask_on_terminal,
+        &mut out,
+    )?;
+    out.flush().map_err(|e| e.to_string())?;
+    Ok(match status {
+        rehost::Status::Clean => ExitCode::SUCCESS,
+        rehost::Status::Problems => ExitCode::from(2),
+    })
 }
 
 #[inline(never)]

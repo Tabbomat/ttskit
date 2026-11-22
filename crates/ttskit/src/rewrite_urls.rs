@@ -96,33 +96,42 @@ fn manifest_rules(path: &Path, save: &Save) -> Result<Vec<UrlRule>, String> {
     Ok(rules)
 }
 
+/// The output-related arguments of a command that rewrites a save.
+pub(crate) struct Output<'a> {
+    pub save: &'a Path,
+    pub out: Option<&'a Path>,
+    pub in_place: bool,
+    pub yes: bool,
+    pub dry_run: bool,
+}
+
 /// Checks the output arguments before anything is read or written.
-fn check_destination(options: &Options<'_>) -> Result<Option<PathBuf>, String> {
-    if options.in_place && options.out.is_some() {
+pub(crate) fn check_destination(o: &Output<'_>) -> Result<Option<PathBuf>, String> {
+    if o.in_place && o.out.is_some() {
         return Err("use either --out or --in-place, not both".into());
     }
-    if options.in_place {
-        if !options.dry_run && !options.yes {
+    if o.in_place {
+        if !o.dry_run && !o.yes {
             return Err(format!(
                 "--in-place replaces {}; add --yes to confirm, or --dry-run to preview",
-                options.save.display()
+                o.save.display()
             ));
         }
-        return Ok(Some(options.save.to_owned()));
+        return Ok(Some(o.save.to_owned()));
     }
-    match options.out {
+    match o.out {
         Some(out) => {
             if out.exists() {
                 if !out.is_file() {
                     return Err(format!("{} exists and is not a file", out.display()));
                 }
-                if same_file(out, options.save) {
+                if same_file(out, o.save) {
                     return Err(format!(
                         "{} is the input; use --in-place --yes to replace it",
                         out.display()
                     ));
                 }
-                if !options.dry_run && !options.yes {
+                if !o.dry_run && !o.yes {
                     return Err(format!(
                         "{} already exists; add --yes to overwrite it, or --dry-run to preview",
                         out.display()
@@ -131,7 +140,7 @@ fn check_destination(options: &Options<'_>) -> Result<Option<PathBuf>, String> {
             }
             Ok(Some(out.to_owned()))
         }
-        None if options.dry_run => Ok(None),
+        None if o.dry_run => Ok(None),
         None => Err("give --out FILE for the new save, or --in-place --yes, or --dry-run".into()),
     }
 }
@@ -145,7 +154,7 @@ fn same_file(a: &Path, b: &Path) -> bool {
 
 /// Writes through a temporary file next to the target, so a failure leaves
 /// the old file intact.
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -167,7 +176,13 @@ pub fn rewrite_urls(options: &Options<'_>, out: &mut dyn Write) -> Result<(), St
                 .into(),
         );
     }
-    let destination = check_destination(options)?;
+    let destination = check_destination(&Output {
+        save: options.save,
+        out: options.out,
+        in_place: options.in_place,
+        yes: options.yes,
+        dry_run: options.dry_run,
+    })?;
     let data = std::fs::read(options.save)
         .map_err(|e| format!("cannot read {}: {e}", options.save.display()))?;
     let save = Save::from_slice(&data).map_err(|e| format!("{}: {e}", options.save.display()))?;

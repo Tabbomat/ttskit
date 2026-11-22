@@ -17,12 +17,12 @@ use ttskit_cloud::{
 
 /// The cloud quota, or `None` when Steam cannot report it. The quota is extra
 /// information, so a failure to read it never fails a command.
-fn read_quota(backend: &dyn CloudBackend) -> Option<Quota> {
+pub(crate) fn read_quota(backend: &dyn CloudBackend) -> Option<Quota> {
     backend.quota().ok()
 }
 
 /// `cloud: 113.3 MiB used, 93.0 GiB free`
-fn quota_line(quota: Quota) -> String {
+pub(crate) fn quota_line(quota: Quota) -> String {
     format!(
         "cloud: {} used, {} free",
         format_size(quota.used()),
@@ -382,7 +382,7 @@ fn write_pretty_json(
 
 /// Loads the manifest at `path`, lets `update` change it and saves it. Every
 /// failure becomes [`CommandError::ManifestUpdate`] for the finished `what`.
-fn update_manifest(
+pub(crate) fn update_manifest(
     path: &Path,
     what: &'static str,
     update: impl FnOnce(&mut Manifest) -> Result<(), String>,
