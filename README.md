@@ -691,6 +691,72 @@ refused.
   change the bytes, because a newer oxipng may compress differently; the files
   then count as changed once.
 
+### Quantizing PNG files (lossy)
+
+```
+ttskit image quantize deck/ --dry-run
+ttskit image quantize card.png --out card.small.png --colors 64
+ttskit image quantize deck/ --out-dir small --quality 60-90
+ttskit image quantize deck/ --out-dir small --engine pngquant
+ttskit image quantize deck/ --in-place --yes
+```
+
+`image quantize INPUT...` turns PNG files into indexed PNGs with a palette of at
+most 256 colours (alpha included), which is often 70 to 90 percent smaller for
+art and photos. **It is lossy**: pixels change, and every report starts with a
+note saying so. The result is then run through the same lossless optimizer as
+`image optimize`, and the smaller file wins.
+
+- Destinations, `--dry-run`, `--yes`, atomic writes and the refusal rules are
+  the same as for `image optimize`: you must give `--out FILE` (exactly one
+  input), `--out-dir DIR` or `--in-place --yes`, or use `--dry-run` on its own.
+  Existing outputs are never overwritten without `--yes`. A file is only
+  replaced when the result is smaller; otherwise it is left alone in place, or
+  copied unchanged with `--out` / `--out-dir`.
+- `--colors N` (2 to 256, default 256): largest palette size. An image that
+  already has at most N distinct colours keeps them exactly.
+- `--quality MIN-MAX` (each 0 to 100): a file whose result scores below MIN is
+  skipped and left unchanged; a skipped file gets no output, even with `--out`
+  or `--out-dir`. With the built-in engine, colours are also halved as long as
+  the score stays at or above MAX, so a high MAX keeps more colours.
+- `--dither F` (0.0 to 1.0, default 1.0): strength of the error diffusion that
+  hides banding. `0` turns it off, which is smaller but more visible on
+  gradients.
+- `--level 0` to `6` (default 2) and `--strip safe|all|none` (default `safe`)
+  control the final lossless pass as for `image optimize`.
+- The file is re-encoded, so the colour profile, pixel density, text and other
+  chunks are dropped whatever `--strip` says, and 16-bit channels become 8-bit.
+  Animated PNGs and files that are not PNG are skipped with a note.
+- The quality score is a number from 0 to 100. With the built-in engine it is
+  derived from the PSNR between the original and the result, computed on
+  alpha-premultiplied pixels: 20 dB or less is 0, 50 dB or more is 100. With
+  pngquant, `--quality` is passed to it and uses its own scale; the score shown
+  is still the built-in one, measured against the original.
+
+Engines:
+
+- `builtin` (default): the median cut and k-means quantizer inside ttskit.
+  Nothing else is needed and the output is deterministic: the same input and
+  options give the same bytes.
+- `pngquant`: runs your own [pngquant](https://pngquant.org/) executable
+  (`--engine pngquant` finds it on `PATH`; `--pngquant PATH` names it and
+  implies the engine). It usually gives better quality, especially on smooth
+  transparency, but it has to be installed separately and its output depends on
+  its version, so it can differ between machines. It is started directly, not
+  through a shell. If it cannot be started the run stops with exit status 1
+  before any file is written. ttskit does not link libimagequant (GPL); pngquant
+  is only used if you install it yourself.
+
+The report shows old size, new size, saving, palette size and quality per file.
+`--json` prints one object with `dry_run`, `lossy` (always `true`), `engine`,
+`colors`, `quality` (`"MIN-MAX"` or `null`), `dither`, `level`, `strip`, `files`
+(`input`, `output`, `status` of `quantized`, `unchanged` or `skipped`, `code`
+for skipped files such as `quality-too-low`, `not-png` or `animated`,
+`original_bytes`, `quantized_bytes`, `saved_bytes`, `colors`, `quality`,
+`written`, `note`), `totals` and `errors`. A file that cannot be read is an
+error for that file only; the others still run, and the exit status is 1.
+Skipped files are not errors.
+
 Which formats, animated images, 16-bit channels and colour profiles the image
 commands accept or produce follows what the game itself accepts; see
 [docs/image-formats.md](docs/image-formats.md).

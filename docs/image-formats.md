@@ -53,6 +53,7 @@ Nothing outstanding from the first rounds. Other JPEG or WebP variants (arithmet
   warning. The game shows an animated PNG as a still frame and rejects
   animated WebP and GIF, and ttskit never writes animated output.
 - 16-bit channels are kept.
+  `image quantize` is lossy and reduces them to 8-bit.
 - CMYK JPEG input is converted to RGB (the game rejects CMYK), with a note.
 - ICC profiles are dropped with a note, since the game ignores them.
 - Partial alpha is reported, and commands warn when an image has no fully

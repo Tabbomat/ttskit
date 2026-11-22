@@ -142,7 +142,7 @@ pub fn optimize(args: &OptimizeArgs, out: &mut dyn Write) -> Result<bool, String
 
 /// True when the file can be read and does not start with the PNG signature.
 #[cfg(feature = "image")]
-fn is_not_png(path: &Path) -> bool {
+pub(super) fn is_not_png(path: &Path) -> bool {
     use std::io::Read;
     let mut head = [0u8; 8];
     match std::fs::File::open(path).and_then(|mut f| f.read_exact(&mut head)) {
@@ -267,7 +267,7 @@ impl OptimizeReport {
 }
 
 #[cfg(feature = "image")]
-fn percent(part: u64, whole: u64) -> String {
+pub(super) fn percent(part: u64, whole: u64) -> String {
     if whole == 0 {
         return "0.0%".to_owned();
     }

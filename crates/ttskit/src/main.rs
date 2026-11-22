@@ -30,7 +30,7 @@ enum Command {
         #[command(subcommand)]
         command: CloudCommand,
     },
-    /// Inspect, convert and optimize image files (local only; needs a build with the `image` feature; unofficial)
+    /// Inspect, convert, optimize and quantize image files (local only; needs a build with the `image` feature; unofficial)
     Image {
         #[command(subcommand)]
         command: ImageCommand,
@@ -328,6 +328,69 @@ enum ImageCommand {
         #[arg(long)]
         yes: bool,
         /// Optimize in memory and report the savings, but write nothing
+        #[arg(long)]
+        dry_run: bool,
+        /// Print one JSON object with all results
+        #[arg(long)]
+        json: bool,
+    },
+    /// Reduce PNG files to at most 256 colours (lossy)
+    ///
+    /// Turns each PNG into an indexed PNG with a palette of at most --colors
+    /// entries (alpha included), then runs the lossless optimizer over it. This
+    /// is LOSSY: pixels change, and the colour profile, pixel density, text and
+    /// other chunks are not kept (the file is re-encoded; 16-bit becomes 8-bit).
+    /// The built-in engine is deterministic. --engine pngquant (or --pngquant
+    /// PATH) runs your own pngquant executable instead, which usually looks
+    /// better, especially with smooth transparency; it is not shipped with
+    /// ttskit and its output depends on its version. --quality MIN-MAX sets a
+    /// quality floor and target (0 to 100): a file that cannot reach MIN is
+    /// skipped and left alone, and gets no output file. Animated PNGs and files
+    /// that are not PNG are skipped too. A result is only used when it is
+    /// smaller: in place, a file that did not shrink is left untouched; with
+    /// --out or --out-dir, the original bytes are copied to the output. You
+    /// must say where results go: --out FILE (one input), --out-dir DIR, or
+    /// --in-place with --yes; --dry-run alone runs in memory and only reports
+    /// the savings. Existing outputs are never overwritten without --yes.
+    /// Exits with status 1 if any file failed or pngquant cannot be run.
+    Quantize {
+        /// PNG files or directories (scanned recursively)
+        #[arg(required = true, value_name = "INPUT")]
+        inputs: Vec<PathBuf>,
+        /// Largest palette size, 2 to 256
+        #[arg(long, value_name = "N", default_value_t = 256, value_parser = clap::value_parser!(u16).range(2..=256))]
+        colors: u16,
+        /// Quality floor and target, MIN-MAX, each 0 to 100 (e.g. 60-90)
+        #[arg(long, value_name = "MIN-MAX", value_parser = image::parse_quality)]
+        quality: Option<(u8, u8)>,
+        /// Dithering strength, 0.0 (none) to 1.0 (full)
+        #[arg(long, value_name = "F", default_value_t = 1.0, value_parser = image::parse_dither)]
+        dither: f32,
+        /// Effort of the final lossless pass, 0 (fastest) to 6 (smallest, slowest)
+        #[arg(long, value_name = "N", default_value_t = 2, value_parser = clap::value_parser!(u8).range(0..=6))]
+        level: u8,
+        /// Metadata to remove: safe, all or none
+        #[arg(long, value_enum, default_value = "safe")]
+        strip: image::Strip,
+        /// Quantizer: builtin (default) or pngquant
+        #[arg(long, value_enum)]
+        engine: Option<image::EngineKind>,
+        /// Path of the pngquant executable (implies --engine pngquant)
+        #[arg(long, value_name = "PATH")]
+        pngquant: Option<PathBuf>,
+        /// Output file (for exactly one input)
+        #[arg(long, value_name = "FILE", conflicts_with_all = ["out_dir", "in_place"])]
+        out: Option<PathBuf>,
+        /// Output directory (created if missing); files are named like their input
+        #[arg(long, value_name = "DIR", conflicts_with = "in_place")]
+        out_dir: Option<PathBuf>,
+        /// Replace the input files (needs --yes)
+        #[arg(long)]
+        in_place: bool,
+        /// Confirm --in-place, or overwrite existing output files
+        #[arg(long)]
+        yes: bool,
+        /// Quantize in memory and report the savings, but write nothing
         #[arg(long)]
         dry_run: bool,
         /// Print one JSON object with all results
@@ -1266,6 +1329,52 @@ fn run(cli: Cli) -> Result<ExitCode, CliError> {
                     inputs,
                     level,
                     strip,
+                    out,
+                    out_dir,
+                    in_place,
+                    yes,
+                    dry_run,
+                    json,
+                },
+                &mut stdout,
+            )?;
+            stdout.flush().map_err(|e| e.to_string())?;
+            Ok(if ok {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            })
+        }
+        Command::Image {
+            command:
+                ImageCommand::Quantize {
+                    inputs,
+                    colors,
+                    quality,
+                    dither,
+                    level,
+                    strip,
+                    engine,
+                    pngquant,
+                    out,
+                    out_dir,
+                    in_place,
+                    yes,
+                    dry_run,
+                    json,
+                },
+        } => {
+            let mut stdout = std::io::stdout().lock();
+            let ok = image::quantize(
+                &image::QuantizeArgs {
+                    inputs,
+                    colors,
+                    quality,
+                    dither,
+                    level,
+                    strip,
+                    engine,
+                    pngquant,
                     out,
                     out_dir,
                     in_place,
