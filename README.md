@@ -598,9 +598,55 @@ notes do not change the exit status. `--json` prints one JSON object with
 `images` (each with `compatible` and `problems`, whose `code` values are
 stable) and `errors`.
 
-Which formats, animated images, 16-bit channels and colour profiles the future
-conversion and optimization commands will accept or produce follows what the
-game itself accepts; see [docs/image-formats.md](docs/image-formats.md).
+### Converting images
+
+```
+ttskit image convert photo.webp card.bmp --to png --out-dir converted
+ttskit image convert art.png --to jpg --quality 90 --background "#ffffff"
+ttskit image convert deck/ --to png --out-dir converted --dry-run
+```
+
+`image convert INPUT... --to png|jpg` turns images into the two formats the
+game loads. Inputs are files or directories (scanned recursively); PNG, JPEG,
+WebP, BMP, TIFF and GIF are read, and the format is decided by content, not by
+the extension.
+
+- Output goes to `--out FILE` (exactly one input), to `--out-dir DIR` (created
+  if missing; each file keeps its name with the new extension), or, with
+  neither, next to the input.
+- Nothing is overwritten without `--yes`, and a run is refused before anything
+  is written if two inputs would write the same file or an output is another
+  input of the run. `--dry-run` converts in memory and prints what would be
+  written. Files are written atomically. Each file is converted on its own: a
+  failure is reported and the other files still convert; the exit status is 1
+  if any failed.
+- Output is deterministic: the same input and options give the same bytes.
+- `--json` prints one object with `dry_run`, `conversions` (input, output,
+  formats, size, `overwrote` and `notes` with stable codes) and `errors`.
+
+JPEG output:
+
+- `--quality N` (1 to 100, default 85).
+- An image with any transparent or translucent pixel is refused unless
+  `--background COLOR` (`#RRGGBB`, `#RGB`, `white` or `black`) says what to
+  flatten it onto, so alpha is never lost silently. An alpha channel that is
+  fully opaque needs no background.
+- Channels are 8-bit; deeper input is reduced, with a note.
+
+PNG output keeps alpha and 16-bit channels. A 32-bit float TIFF is stored as
+16-bit.
+
+Policy for the rest, from what the game accepts: an animated input (GIF,
+animated WebP or PNG) converts its first frame, with a warning; a CMYK JPEG
+becomes RGB; the embedded colour profile and EXIF data are dropped, since the
+game ignores them, unless `--keep-metadata` is given. Before the EXIF data is
+dropped, its orientation is applied to the pixels, so a rotated photo stays
+upright. Converting a file to its own format re-encodes it, which also strips
+metadata and normalises progressive, interlaced or CMYK files.
+
+Which formats, animated images, 16-bit channels and colour profiles the image
+commands accept or produce follows what the game itself accepts; see
+[docs/image-formats.md](docs/image-formats.md).
 
 ## License
 

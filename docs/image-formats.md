@@ -45,8 +45,10 @@ Nothing outstanding from the first rounds. Other JPEG or WebP variants (arithmet
 
 ## Policy for ttskit image commands
 
-- Read PNG, JPEG and WebP; write PNG and JPEG. Other formats are an error that
-  names the format.
+- Write PNG and JPEG only. `image info` reads PNG, JPEG and WebP as usable and
+  reports GIF, BMP and TIFF as rejected by the game. `image convert` also
+  reads GIF, BMP and TIFF, since turning them into something the game loads is
+  its purpose. Any other format is an error that names the format.
 - Animated input (APNG, animated WebP, GIF): use the first frame and print a
   warning. The game shows an animated PNG as a still frame and rejects
   animated WebP and GIF, and ttskit never writes animated output.
