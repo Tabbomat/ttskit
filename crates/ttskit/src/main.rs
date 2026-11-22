@@ -1,3 +1,4 @@
+mod check_urls;
 mod cloud;
 mod editor;
 mod image;
@@ -815,6 +816,46 @@ enum SaveCommand {
     Unpack(SaveUnpackCli),
     /// Pack an unpacked directory back into a save file
     Pack(SavePackCli),
+    /// Check which asset URLs of a save no longer load (needs the network)
+    ///
+    /// Requests every distinct URL once (HEAD, or a ranged GET for hosts that
+    /// refuse HEAD), follows redirects and retries timeouts, network errors,
+    /// 429 and 5xx. Results: ok, redirect (the target loads), dead (HTTP
+    /// error), unreachable (network error or timeout) and skipped (excluded
+    /// by --host / --skip-host). Exit status: 0 when nothing is dead or
+    /// unreachable, 2 when something is, 1 on errors.
+    CheckUrls(SaveCheckUrlsCli),
+}
+
+#[derive(clap::Args)]
+struct SaveCheckUrlsCli {
+    /// The save file (JSON)
+    save: PathBuf,
+    /// Also download the start of each file and report HTML pages (some hosts
+    /// answer 200 with an error page) as dead
+    #[arg(long)]
+    verify_content: bool,
+    /// Only check URLs on this host or its subdomains; repeatable
+    #[arg(long, value_name = "HOST")]
+    host: Vec<String>,
+    /// Skip URLs on this host or its subdomains; repeatable
+    #[arg(long, value_name = "HOST")]
+    skip_host: Vec<String>,
+    /// Most requests in flight at once
+    #[arg(long, value_name = "N", default_value_t = 16, value_parser = clap::value_parser!(u32).range(1..=256))]
+    concurrency: u32,
+    /// Most requests in flight at once to one host
+    #[arg(long, value_name = "N", default_value_t = 4, value_parser = clap::value_parser!(u32).range(1..=64))]
+    per_host: u32,
+    /// Timeout of one request in seconds
+    #[arg(long, value_name = "SECONDS", default_value_t = 10, value_parser = clap::value_parser!(u32).range(1..=600))]
+    timeout: u32,
+    /// Extra attempts after a timeout, network error, 429 or 5xx
+    #[arg(long, value_name = "N", default_value_t = 3, value_parser = clap::value_parser!(u32).range(0..=10))]
+    retries: u32,
+    /// Print machine-readable JSON instead of text
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(clap::Args)]
@@ -1648,7 +1689,10 @@ fn run_simple(command: Command) -> Result<(), CliError> {
         Command::Cloud {
             command: CloudCommand::Status(CloudStatusCli { .. }),
         }
-        | Command::Image { .. } => unreachable!("handled by run"),
+        | Command::Image { .. }
+        | Command::Save {
+            command: SaveCommand::CheckUrls(_),
+        } => unreachable!("handled by run"),
     }
 }
 
@@ -2081,6 +2125,39 @@ fn run(cli: Cli) -> Result<ExitCode, CliError> {
             yes,
             json,
         }),
+        Command::Save {
+            command:
+                SaveCommand::CheckUrls(SaveCheckUrlsCli {
+                    save,
+                    verify_content,
+                    host,
+                    skip_host,
+                    concurrency,
+                    per_host,
+                    timeout,
+                    retries,
+                    json,
+                }),
+        } => {
+            let client =
+                check_urls::HttpClient::new(std::time::Duration::from_secs(u64::from(timeout)))?;
+            let config = ttskit_core::CheckConfig {
+                concurrency: concurrency as usize,
+                per_host: per_host as usize,
+                retries,
+                verify_content,
+                only_hosts: host,
+                skip_hosts: skip_host,
+                ..ttskit_core::CheckConfig::default()
+            };
+            let mut out = std::io::stdout().lock();
+            let status = check_urls::check_urls(&save, &client, &config, json, &mut out)?;
+            out.flush().map_err(|e| e.to_string())?;
+            Ok(match status {
+                check_urls::CheckStatus::Clean => ExitCode::SUCCESS,
+                check_urls::CheckStatus::Problems => ExitCode::from(2),
+            })
+        }
         command => run_simple(command).map(|()| ExitCode::SUCCESS),
     }
 }
