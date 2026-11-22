@@ -53,6 +53,8 @@
 
 mod external;
 
+pub use external::pngquant_version;
+
 use std::path::{Path, PathBuf};
 
 use exoquant::ditherer::{self, Ditherer};
@@ -61,7 +63,7 @@ use exoquant::{Color, ColorCount, ColorMap, ColorSpace, Colorf, Remapper, Simple
 
 use crate::ImageError;
 use crate::optimize::{
-    DEFAULT_LEVEL, MAX_LEVEL, PNG_SIGNATURE, Skipped, StripMode, is_animated, optimize_bytes,
+    DEFAULT_LEVEL, MAX_LEVEL, PNG_SIGNATURE, Skipped, StripMode, is_animated, optimize_raw,
 };
 
 /// Palette size used when none is given.
@@ -511,6 +513,22 @@ fn validate(options: &QuantizeOptions) -> Result<(), ImageError> {
 /// not an error.
 pub fn quantize(path: &Path, options: &QuantizeOptions) -> Result<QuantizeOutcome, ImageError> {
     validate(options)?;
+    let original = std::fs::read(path).map_err(|source| ImageError::Io {
+        path: path.to_owned(),
+        source,
+    })?;
+    quantize_bytes(path, &original, options)
+}
+
+/// Like [`quantize`], for PNG data already in memory. `label` is only used in
+/// error messages; it is never opened.
+pub fn quantize_bytes(
+    label: &Path,
+    original: &[u8],
+    options: &QuantizeOptions,
+) -> Result<QuantizeOutcome, ImageError> {
+    let path = label;
+    validate(options)?;
     let fail = |message: String| ImageError::Optimize {
         path: path.to_owned(),
         message,
@@ -521,20 +539,16 @@ pub fn quantize(path: &Path, options: &QuantizeOptions) -> Result<QuantizeOutcom
             message: message.to_owned(),
         }))
     };
-    let original = std::fs::read(path).map_err(|source| ImageError::Io {
-        path: path.to_owned(),
-        source,
-    })?;
     if !original.starts_with(&PNG_SIGNATURE) {
         return skip("not-png", "not a PNG; only PNG files are quantized");
     }
-    if is_animated(&original) {
+    if is_animated(original) {
         return skip(
             "animated",
             "animated PNG; quantizing would remove the animation",
         );
     }
-    let decoded = image::load_from_memory_with_format(&original, image::ImageFormat::Png)
+    let decoded = image::load_from_memory_with_format(original, image::ImageFormat::Png)
         .map_err(|e| fail(format!("not a readable PNG: {e}")))?;
     let (width, height) = (decoded.width(), decoded.height());
     let pixels: Vec<[u8; 4]> = decoded
@@ -546,7 +560,7 @@ pub fn quantize(path: &Path, options: &QuantizeOptions) -> Result<QuantizeOutcom
     let produced = match &options.engine {
         Engine::Builtin => builtin_candidate(&pixels, width, height, options, &fail)?,
         Engine::Pngquant { program } => {
-            external_candidate(program.as_deref(), &original, &pixels, options, &fail)?
+            external_candidate(program.as_deref(), original, &pixels, options, &fail)?
         }
     };
     let Candidate {
@@ -559,7 +573,7 @@ pub fn quantize(path: &Path, options: &QuantizeOptions) -> Result<QuantizeOutcom
         Err(skipped) => return Ok(QuantizeOutcome::Skipped(skipped)),
     };
 
-    let candidate = optimize_bytes(&encoded, options.level, options.strip).map_err(&fail)?;
+    let candidate = optimize_raw(&encoded, options.level, options.strip).map_err(&fail)?;
     let candidate = if candidate.len() < encoded.len() {
         candidate
     } else {
@@ -569,7 +583,7 @@ pub fn quantize(path: &Path, options: &QuantizeOptions) -> Result<QuantizeOutcom
     let original_bytes = original.len() as u64;
     if candidate.len() >= original.len() {
         return Ok(QuantizeOutcome::Quantized(Quantized {
-            bytes: original,
+            bytes: original.to_vec(),
             original_bytes,
             quantized_bytes: original_bytes,
             smaller: false,

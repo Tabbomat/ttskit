@@ -1,6 +1,7 @@
 use super::*;
 use crate::compatibility_tests::ANIMATED_WEBP;
 use image::{GenericImageView, ImageBuffer, Luma, Rgb, Rgba};
+use std::fs::File;
 
 fn tmp() -> tempfile::TempDir {
     tempfile::tempdir().unwrap()
@@ -539,4 +540,29 @@ fn output_is_identical_across_runs() {
         let b = convert(&path, &o).unwrap();
         assert_eq!(a.bytes, b.bytes);
     }
+}
+
+#[test]
+fn bytes_variant_matches_the_path_variant() {
+    let dir = tmp();
+    let path = dir.path().join("a.png");
+    rgba_soft(6, 5).save(&path).unwrap();
+    let data = std::fs::read(&path).unwrap();
+    for to in [OutputFormat::Png, OutputFormat::Jpeg] {
+        let mut options = opts(to);
+        options.background = Some([10, 20, 30]);
+        let from_path = convert(&path, &options).unwrap();
+        let label = dir.path().join("label.png");
+        let from_bytes = convert_bytes(&label, &data, &options).unwrap();
+        assert_eq!(from_bytes.bytes, from_path.bytes);
+        assert_eq!(from_bytes.from, from_path.from);
+        assert_eq!(codes(&from_bytes), codes(&from_path));
+    }
+}
+
+#[test]
+fn bytes_variant_errors_name_the_label() {
+    let label = Path::new("some/label.png");
+    let error = convert_bytes(label, b"not an image", &opts(OutputFormat::Png)).unwrap_err();
+    assert!(error.to_string().contains("label.png"), "{error}");
 }

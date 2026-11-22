@@ -100,7 +100,7 @@ fn decoded(data: &[u8]) -> Result<image::DynamicImage, image::ImageError> {
 
 /// Runs the lossless `oxipng` pass over PNG data in memory. The error is a
 /// message without a path.
-pub(crate) fn optimize_bytes(data: &[u8], level: u8, strip: StripMode) -> Result<Vec<u8>, String> {
+pub(crate) fn optimize_raw(data: &[u8], level: u8, strip: StripMode) -> Result<Vec<u8>, String> {
     let mut oxi = Options::from_preset(level);
     oxi.strip = match strip {
         StripMode::None => StripChunks::None,
@@ -119,27 +119,44 @@ pub(crate) fn optimize_bytes(data: &[u8], level: u8, strip: StripMode) -> Result
 /// Optimizes the PNG at `path` in memory; nothing is written. Anything that
 /// is not a PNG (decided by content) is skipped, not an error.
 pub fn optimize(path: &Path, options: &OptimizeOptions) -> Result<Outcome, ImageError> {
+    check_level(options)?;
+    let original = std::fs::read(path).map_err(|source| ImageError::Io {
+        path: path.to_owned(),
+        source,
+    })?;
+    optimize_bytes(path, &original, options)
+}
+
+fn check_level(options: &OptimizeOptions) -> Result<(), ImageError> {
     if options.level > MAX_LEVEL {
         return Err(ImageError::Options(format!(
             "level must be between 0 and {MAX_LEVEL}, not {}",
             options.level
         )));
     }
+    Ok(())
+}
+
+/// Like [`optimize`], for PNG data already in memory. `label` is only used in
+/// error messages; it is never opened.
+pub fn optimize_bytes(
+    label: &Path,
+    original: &[u8],
+    options: &OptimizeOptions,
+) -> Result<Outcome, ImageError> {
+    let path = label;
+    check_level(options)?;
     let fail = |message: String| ImageError::Optimize {
         path: path.to_owned(),
         message,
     };
-    let original = std::fs::read(path).map_err(|source| ImageError::Io {
-        path: path.to_owned(),
-        source,
-    })?;
     if !original.starts_with(&PNG_SIGNATURE) {
         return Ok(Outcome::Skipped(Skipped {
             code: "not-png",
             message: "not a PNG; only PNG files are optimized".to_owned(),
         }));
     }
-    if options.strip == StripMode::All && is_animated(&original) {
+    if options.strip == StripMode::All && is_animated(original) {
         return Ok(Outcome::Skipped(Skipped {
             code: "animated-strip-all",
             message:
@@ -148,14 +165,14 @@ pub fn optimize(path: &Path, options: &OptimizeOptions) -> Result<Outcome, Image
         }));
     }
 
-    let before = decoded(&original).map_err(|e| fail(format!("not a readable PNG: {e}")))?;
-    let candidate = optimize_bytes(&original, options.level, options.strip).map_err(fail)?;
+    let before = decoded(original).map_err(|e| fail(format!("not a readable PNG: {e}")))?;
+    let candidate = optimize_raw(original, options.level, options.strip).map_err(fail)?;
 
     let (width, height) = (before.width(), before.height());
     let original_bytes = original.len() as u64;
     if candidate.len() >= original.len() {
         return Ok(Outcome::Optimized(Optimized {
-            bytes: original,
+            bytes: original.to_vec(),
             original_bytes,
             optimized_bytes: original_bytes,
             smaller: false,

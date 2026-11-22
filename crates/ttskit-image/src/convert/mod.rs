@@ -2,15 +2,14 @@
 //! (`docs/image-formats.md`). Output is deterministic: the same input and
 //! options give the same bytes.
 
-use std::fs::File;
-use std::io::BufReader;
+use std::io::Cursor;
 use std::path::Path;
 
 use image::codecs::jpeg::JpegEncoder;
 use image::codecs::png::PngEncoder;
 use image::{ColorType, DynamicImage, ImageDecoder, ImageEncoder, ImageReader, Rgba};
 
-use crate::{ImageError, Problem, Severity, inspect};
+use crate::{ImageError, Problem, Severity, inspect_bytes};
 
 /// JPEG quality used when none is given.
 pub const DEFAULT_JPEG_QUALITY: u8 = 85;
@@ -106,12 +105,33 @@ fn note(code: &'static str, message: impl Into<String>) -> Problem {
 /// channels and alpha; JPEG output is 8-bit and refuses an image with
 /// transparent pixels unless a background colour is given.
 pub fn convert(path: &Path, options: &ConvertOptions) -> Result<Converted, ImageError> {
+    check_quality(options)?;
+    let data = std::fs::read(path).map_err(|source| ImageError::Io {
+        path: path.to_owned(),
+        source,
+    })?;
+    convert_bytes(path, &data, options)
+}
+
+fn check_quality(options: &ConvertOptions) -> Result<(), ImageError> {
     if !(1..=100).contains(&options.quality) {
         return Err(ImageError::Options(format!(
             "quality must be between 1 and 100, not {}",
             options.quality
         )));
     }
+    Ok(())
+}
+
+/// Like [`convert`], for image data already in memory. `label` is only used
+/// in error messages; it is never opened.
+pub fn convert_bytes(
+    label: &Path,
+    data: &[u8],
+    options: &ConvertOptions,
+) -> Result<Converted, ImageError> {
+    let path = label;
+    check_quality(options)?;
     let io = |source| ImageError::Io {
         path: path.to_owned(),
         source,
@@ -121,7 +141,7 @@ pub fn convert(path: &Path, options: &ConvertOptions) -> Result<Converted, Image
         source,
     };
     // Header facts (format, frame count); also rejects formats we do not read.
-    let info = inspect(path)?;
+    let info = inspect_bytes(path, data)?;
     let mut notes = Vec::new();
     if info.animated {
         notes.push(Problem::new(
@@ -137,8 +157,7 @@ pub fn convert(path: &Path, options: &ConvertOptions) -> Result<Converted, Image
         notes.push(note("cmyk-to-rgb", "CMYK JPEG converted to RGB"));
     }
 
-    let file = File::open(path).map_err(io)?;
-    let reader = ImageReader::new(BufReader::new(file))
+    let reader = ImageReader::new(Cursor::new(data))
         .with_guessed_format()
         .map_err(io)?;
     let mut decoder = reader.into_decoder().map_err(decode)?;

@@ -319,3 +319,29 @@ fn animated_png_uses_the_first_frame_with_a_warning() {
     );
     assert_eq!(dims(&r.bytes), (4, 4));
 }
+
+#[test]
+fn bytes_variant_matches_the_path_variant() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("a.png");
+    gradient(&path, 40, 20);
+    let data = std::fs::read(&path).unwrap();
+    let options = ResizeOptions::new(Target::MaxSide(10));
+    let from_path = resized(resize(&path, &options).unwrap());
+    let label = dir.path().join("label.png");
+    let from_bytes = resized(resize_bytes(&label, &data, &options).unwrap());
+    assert_eq!(from_bytes.bytes, from_path.bytes);
+    assert_eq!(from_bytes.original_bytes, from_path.original_bytes);
+    assert_eq!(
+        (from_bytes.width, from_bytes.height),
+        (from_path.width, from_path.height)
+    );
+}
+
+#[test]
+fn bytes_variant_errors_name_the_label() {
+    let label = Path::new("some/label.png");
+    let options = ResizeOptions::new(Target::MaxSide(10));
+    let error = resize_bytes(label, b"not an image", &options).unwrap_err();
+    assert!(error.to_string().contains("label.png"), "{error}");
+}

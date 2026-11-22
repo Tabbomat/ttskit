@@ -224,3 +224,29 @@ fn animated_png_is_skipped_for_strip_all_only() {
         Ok(Outcome::Skipped(_))
     ));
 }
+
+#[test]
+fn bytes_variant_matches_the_path_variant() {
+    let dir = tmp();
+    let path = dir.path().join("a.png");
+    write_fat_png(&path);
+    let data = std::fs::read(&path).unwrap();
+    let options = opts(DEFAULT_LEVEL, StripMode::Safe);
+    let from_path = optimized(optimize(&path, &options).unwrap());
+    // The label does not exist on disk: it is never opened.
+    let label = dir.path().join("label.png");
+    let from_bytes = optimized(optimize_bytes(&label, &data, &options).unwrap());
+    assert_eq!(from_bytes.bytes, from_path.bytes);
+    assert_eq!(from_bytes.original_bytes, from_path.original_bytes);
+    assert_eq!(from_bytes.optimized_bytes, from_path.optimized_bytes);
+    assert_eq!(from_bytes.smaller, from_path.smaller);
+}
+
+#[test]
+fn bytes_variant_errors_name_the_label() {
+    let label = Path::new("some/label.png");
+    let mut data = PNG_SIGNATURE.to_vec();
+    data.extend_from_slice(b"garbage");
+    let error = optimize_bytes(label, &data, &opts(DEFAULT_LEVEL, StripMode::Safe)).unwrap_err();
+    assert!(error.to_string().contains("label.png"), "{error}");
+}

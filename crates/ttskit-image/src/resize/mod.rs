@@ -197,22 +197,38 @@ pub(crate) fn resize_pixels(
 /// PNG is resized by its first frame. The colour profile and EXIF data are
 /// dropped, as `image convert` does; an EXIF orientation is applied first.
 pub fn resize(path: &Path, options: &ResizeOptions) -> Result<Outcome, ImageError> {
+    check_quality(options)?;
+    let data = std::fs::read(path).map_err(|source| ImageError::Io {
+        path: path.to_owned(),
+        source,
+    })?;
+    resize_bytes(path, &data, options)
+}
+
+fn check_quality(options: &ResizeOptions) -> Result<(), ImageError> {
     if !(1..=100).contains(&options.jpeg_quality) {
         return Err(ImageError::Options(format!(
             "quality must be between 1 and 100, not {}",
             options.jpeg_quality
         )));
     }
-    let io = |source| ImageError::Io {
-        path: path.to_owned(),
-        source,
-    };
+    Ok(())
+}
+
+/// Like [`resize`], for image data already in memory. `label` is only used
+/// in error messages; it is never opened.
+pub fn resize_bytes(
+    label: &Path,
+    data: &[u8],
+    options: &ResizeOptions,
+) -> Result<Outcome, ImageError> {
+    let path = label;
+    check_quality(options)?;
     let decode = |source| ImageError::Decode {
         path: path.to_owned(),
         source,
     };
-    let data = std::fs::read(path).map_err(io)?;
-    let format = image::guess_format(&data).map_err(|_| ImageError::UnknownFormat {
+    let format = image::guess_format(data).map_err(|_| ImageError::UnknownFormat {
         path: path.to_owned(),
     })?;
     if !matches!(format, ImageFormat::Png | ImageFormat::Jpeg) {
@@ -226,7 +242,7 @@ pub fn resize(path: &Path, options: &ResizeOptions) -> Result<Outcome, ImageErro
     }
     let original_bytes = data.len() as u64;
     let mut notes = Vec::new();
-    if format == ImageFormat::Png && data.starts_with(&PNG_SIGNATURE) && is_animated(&data) {
+    if format == ImageFormat::Png && data.starts_with(&PNG_SIGNATURE) && is_animated(data) {
         notes.push(Problem::new(
             Severity::Warning,
             "animated-first-frame",
@@ -234,7 +250,7 @@ pub fn resize(path: &Path, options: &ResizeOptions) -> Result<Outcome, ImageErro
         ));
     }
 
-    let mut decoder = ImageReader::with_format(Cursor::new(&data), format)
+    let mut decoder = ImageReader::with_format(Cursor::new(data), format)
         .into_decoder()
         .map_err(decode)?;
     let icc = decoder.icc_profile().map_err(decode)?;

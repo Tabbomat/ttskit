@@ -6,6 +6,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 use super::QuantizeOptions;
+use crate::ImageError;
 use crate::optimize::StripMode;
 
 /// Name looked up on `PATH` when no program path is given.
@@ -57,6 +58,40 @@ fn arguments(options: &QuantizeOptions) -> Vec<String> {
     args.push(options.colors.to_string());
     args.push("-".to_owned());
     args
+}
+
+/// Runs `pngquant --version` and returns its trimmed output. The pipeline uses
+/// it as part of a cache key, so a different pngquant gives a different key.
+pub fn pngquant_version(program: Option<&Path>) -> Result<String, ImageError> {
+    let output = command(program)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| {
+            if e.kind() == ErrorKind::NotFound {
+                ImageError::Options(match program {
+                    Some(path) => format!(
+                        "pngquant was not found at {}; install pngquant or pass the path of its executable",
+                        path.display()
+                    ),
+                    None => "pngquant was not found on PATH; install pngquant or pass the path of its executable"
+                        .to_owned(),
+                })
+            } else {
+                ImageError::Options(format!("could not start pngquant: {e}"))
+            }
+        })?;
+    if !output.status.success() {
+        let status = match output.status.code() {
+            Some(code) => format!("exit code {code}"),
+            None => "a signal".to_owned(),
+        };
+        return Err(ImageError::Options(format!(
+            "pngquant --version failed with {status}{}",
+            detail(&output.stderr)
+        )));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
 fn trimmed_stderr(stderr: &[u8]) -> String {

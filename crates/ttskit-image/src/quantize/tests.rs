@@ -263,7 +263,7 @@ fn result_that_is_not_smaller_returns_the_original() {
     let img = ImageBuffer::from_fn(2, 2, |x, _| Rgba([x as u8 * 255, 0, 0, 255]));
     write(&path, &img);
     // Make the input as small as it gets, so quantizing cannot win.
-    let tight = optimize_bytes(&std::fs::read(&path).unwrap(), MAX_LEVEL, StripMode::All).unwrap();
+    let tight = optimize_raw(&std::fs::read(&path).unwrap(), MAX_LEVEL, StripMode::All).unwrap();
     std::fs::write(&path, &tight).unwrap();
     let q = quantized(quantize(&path, &with_colors(2)).unwrap());
     assert!(!q.smaller);
@@ -502,4 +502,38 @@ fn external_options_are_validated() {
 #[test]
 fn external_without_a_path_looks_up_pngquant() {
     assert_eq!(external::program_name(None), "pngquant");
+}
+
+#[test]
+fn bytes_variant_matches_the_path_variant() {
+    let dir = tmp();
+    let path = dir.path().join("a.png");
+    write(&path, &gradient());
+    let data = std::fs::read(&path).unwrap();
+    let options = QuantizeOptions::default();
+    let from_path = quantized(quantize(&path, &options).unwrap());
+    let label = dir.path().join("label.png");
+    let from_bytes = quantized(quantize_bytes(&label, &data, &options).unwrap());
+    assert_eq!(from_bytes.bytes, from_path.bytes);
+    assert_eq!(from_bytes.original_bytes, from_path.original_bytes);
+    assert_eq!(from_bytes.colors_used, from_path.colors_used);
+    assert_eq!(from_bytes.quality, from_path.quality);
+}
+
+#[test]
+fn bytes_variant_errors_name_the_label() {
+    let label = Path::new("some/label.png");
+    let mut data = PNG_SIGNATURE.to_vec();
+    data.extend_from_slice(b"garbage");
+    let error = quantize_bytes(label, &data, &QuantizeOptions::default()).unwrap_err();
+    assert!(error.to_string().contains("label.png"), "{error}");
+}
+
+#[test]
+fn pngquant_version_reports_a_missing_program() {
+    let dir = tmp();
+    let missing = dir.path().join("no-such-pngquant");
+    let error = pngquant_version(Some(&missing)).unwrap_err();
+    assert!(matches!(error, ImageError::Options(_)), "{error:?}");
+    assert!(error.to_string().contains("no-such-pngquant"), "{error}");
 }

@@ -14,7 +14,8 @@ mod resize;
 
 pub use check::{CheckOptions, CheckReport, DEFAULT_MAX_SIDE, Finding, check};
 pub use convert::{
-    ConvertOptions, Converted, DEFAULT_JPEG_QUALITY, OutputFormat, convert, parse_color,
+    ConvertOptions, Converted, DEFAULT_JPEG_QUALITY, OutputFormat, convert, convert_bytes,
+    parse_color,
 };
 pub use deck::{
     CardDescription, DESCRIPTION_VERSION, Deck, DeckOptions, Description, Fit, MAX_COLUMNS,
@@ -24,18 +25,18 @@ pub use deck::{
 };
 pub use optimize::{
     DEFAULT_LEVEL, MAX_LEVEL, OptimizeOptions, Optimized, Outcome, Skipped, StripMode, optimize,
+    optimize_bytes,
 };
 pub use quantize::{
     DEFAULT_COLORS, Engine, MAX_COLORS, MIN_COLORS, QuantizeOptions, QuantizeOutcome, Quantized,
-    quantize,
+    pngquant_version, quantize, quantize_bytes,
 };
 pub use resize::{
     Filter, MAX_RESULT_SIDE, Outcome as ResizeOutcome, ResizeOptions, Resized,
-    Target as ResizeTarget, Unchanged, resize, target_size,
+    Target as ResizeTarget, Unchanged, resize, resize_bytes, target_size,
 };
 
-use std::fs::File;
-use std::io::{BufReader, Read, Seek};
+use std::io::{Cursor, Read, Seek};
 use std::path::{Path, PathBuf};
 
 use image::codecs::gif::GifDecoder;
@@ -232,9 +233,8 @@ fn jpeg_frame_header(reader: &mut impl Read) -> Option<(u32, u32, u8)> {
     }
 }
 
-fn alpha_stats(path: &Path, format: ImageFormat) -> Result<AlphaStats, image::ImageError> {
-    let file = File::open(path)?;
-    let img = ImageReader::with_format(BufReader::new(file), format).decode()?;
+fn alpha_stats(data: &[u8], format: ImageFormat) -> Result<AlphaStats, image::ImageError> {
+    let img = ImageReader::with_format(Cursor::new(data), format).decode()?;
     let mut stats = AlphaStats {
         opaque: 0,
         translucent: 0,
@@ -270,6 +270,17 @@ fn alpha_stats(path: &Path, format: ImageFormat) -> Result<AlphaStats, image::Im
 /// nor this crate knows, is an `Err`; every other finding is a `Problem` in
 /// the result.
 pub fn inspect(path: &Path) -> Result<ImageInfo, ImageError> {
+    let data = std::fs::read(path).map_err(|source| ImageError::Io {
+        path: path.to_owned(),
+        source,
+    })?;
+    inspect_bytes(path, &data)
+}
+
+/// Like [`inspect`], for image data already in memory. `label` is only used
+/// in the result and in error messages; it is never opened.
+pub fn inspect_bytes(label: &Path, data: &[u8]) -> Result<ImageInfo, ImageError> {
+    let path = label;
     let io = |source| ImageError::Io {
         path: path.to_owned(),
         source,
@@ -278,9 +289,8 @@ pub fn inspect(path: &Path) -> Result<ImageInfo, ImageError> {
         path: path.to_owned(),
         source,
     };
-    let file_bytes = std::fs::metadata(path).map_err(io)?.len();
-    let file = File::open(path).map_err(io)?;
-    let reader = ImageReader::new(BufReader::new(file))
+    let file_bytes = data.len() as u64;
+    let reader = ImageReader::new(Cursor::new(data))
         .with_guessed_format()
         .map_err(io)?;
     let format = reader.format().ok_or_else(|| ImageError::UnknownFormat {
@@ -402,7 +412,7 @@ pub fn inspect(path: &Path) -> Result<ImageInfo, ImageError> {
         && matches!(format, ImageFormat::Png | ImageFormat::WebP)
         && !(animated && format == ImageFormat::WebP);
     let alpha = if checks_alpha {
-        match alpha_stats(path, format) {
+        match alpha_stats(data, format) {
             Ok(stats) => Some(stats),
             Err(error) => {
                 problems.push(Problem::new(
@@ -528,6 +538,7 @@ mod tests {
     use super::*;
     use image::codecs::gif::GifEncoder;
     use image::{Delay, Frame, ImageBuffer, Rgb, Rgba};
+    use std::fs::File;
 
     fn rgba(w: u32, h: u32) -> ImageBuffer<Rgba<u8>, Vec<u8>> {
         ImageBuffer::from_fn(w, h, |x, y| Rgba([x as u8, y as u8, 7, 200]))
@@ -549,6 +560,24 @@ mod tests {
         assert_eq!(info.frames, 1);
         assert_eq!(info.icc_profile_bytes, None);
         assert_eq!(info.file_bytes, std::fs::metadata(&path).unwrap().len());
+    }
+
+    #[test]
+    fn inspect_bytes_matches_inspect() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.png");
+        rgba(5, 3).save(&path).unwrap();
+        let data = std::fs::read(&path).unwrap();
+        let from_path = inspect(&path).unwrap();
+        let from_bytes = inspect_bytes(&path, &data).unwrap();
+        assert_eq!(from_bytes, from_path);
+        // The label is never opened.
+        let label = dir.path().join("label.png");
+        let labelled = inspect_bytes(&label, &data).unwrap();
+        assert_eq!(labelled.path, label.display().to_string());
+        assert_eq!(labelled.file_bytes, data.len() as u64);
+        let error = inspect_bytes(&label, b"not an image").unwrap_err();
+        assert!(error.to_string().contains("label.png"), "{error}");
     }
 
     #[test]
@@ -643,6 +672,7 @@ pub(crate) mod compatibility_tests {
     use super::*;
     use image::codecs::png::PngEncoder;
     use image::{ImageBuffer, ImageEncoder, Rgb, Rgba};
+    use std::fs::File;
 
     /// A 2x2, two-frame lossless animated WebP (generated, 140 bytes).
     pub(crate) const ANIMATED_WEBP: &[u8] = &[
