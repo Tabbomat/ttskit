@@ -884,6 +884,58 @@ Notes have stable codes: `scaled-down`, `alpha-flattened`, `reduced-to-8-bit`,
 `orientation-applied`, `icc-dropped`, `exif-dropped`, and the warnings
 `sheet-too-large` and `animated-first-frame`.
 
+### Splitting deck sheets
+
+```
+ttskit image deck split deck.png --description deck.json --out-dir cards
+ttskit image deck split sheet.png --columns 10 --rows 7 --count 40 --out-dir cards
+ttskit image deck split sheet.jpg --save save.json --deck-id 1 --to jpg --out-dir cards
+ttskit image deck split sheet.png --columns 5 --rows 2 --no-hidden-slot --dry-run
+```
+
+`image deck split SHEET --out-dir DIR` is the reverse of `image deck build`: it
+cuts one sheet (PNG, JPEG or WebP) into single card images. The grid comes from
+exactly one of three places:
+
+- `--columns N --rows N` (1 to 10 and 1 to 7). The last slot is assumed to be
+  the hidden-card slot, as in `image deck build`; say `--no-hidden-slot` if all
+  slots are cards.
+- `--description FILE`, the `NAME.json` of `image deck build`. The sheet is
+  found by its file name among the `sheets` of the description (an exact,
+  case-sensitive match; the error lists the names that exist). Columns, rows,
+  the card count (the default of `--count`) and the hidden-card slot (`null`:
+  none) are taken from it.
+- `--save FILE --deck-id ID`, a save file. Every `CustomDeck` entry with that
+  key, in objects at any depth, gives `NumWidth` and `NumHeight`; `BackIsHidden:
+  true` means there is no hidden-card slot (the back is a separate image and all
+  slots are cards), `false` that the last slot is the hidden-card slot (see
+  [docs/deck-sheets.md](docs/deck-sheets.md)). The entries must agree with each
+  other, and an unknown ID is an error that lists the IDs the save has.
+
+Slots are numbered as in `build`. Card slots are written as `NAME_NN.png` with
+the slot number padded to at least 2 digits (`_00` to `_68` for a 10x7 sheet; the
+width depends on the grid, never on `--count`), the hidden-card slot as
+`NAME_hidden.png`. `NAME` is the file name of the sheet without extension, or
+`--name`. `--count N` writes only the first N cards (an error if N is 0 or more
+than the card slots), `--skip-hidden` leaves the hidden-card slot out, and
+`--no-hidden-slot` treats the last slot as a card whatever the description or
+save says. A sheet whose size does not divide evenly into the grid is an error
+that names both, and nothing is written.
+
+Cards are written as PNG whatever the sheet's format (`--to jpg` with `--quality`
+for JPEG, flattening transparency onto `--fill`, default `808080`). A PNG card
+keeps the pixels of the sheet exactly, including 16-bit channels and the colour
+type, so `build` followed by `split` gives back the original card pixels
+(compare the decoded pixels, not the file bytes: files are re-encoded). The
+colour profile and EXIF data are dropped, an EXIF orientation is applied first,
+and an animated image gives its first frame. Output rules are those of `build`:
+existing files need `--yes`, the whole run is refused before anything is
+written, `--dry-run` writes nothing, output is deterministic, exit status 1 on
+any error. `--json` prints one object with `dry_run`, `sheet`, `columns`,
+`rows`, `cell_width`, `cell_height`, `grid_source` (`flags`, `description` or
+`save`), `files` (`path`, `slot`, `column`, `row`, `hidden`, `width`, `height`,
+`bytes`, `overwrote`, `written`), `notes` and `errors`.
+
 Which formats, animated images, 16-bit channels and colour profiles the image
 commands accept or produce follows what the game itself accepts; see
 [docs/image-formats.md](docs/image-formats.md).

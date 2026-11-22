@@ -15,11 +15,13 @@ mod cell;
 mod description;
 mod grid;
 mod input;
+mod split;
 
 pub use cell::Fit;
 pub use description::{CardDescription, DESCRIPTION_VERSION, Description, SheetDescription};
 pub use grid::{MAX_COLUMNS, MAX_ROWS, SheetPlan, grid_for, plan_sheets, slot_origin};
 pub use input::{expand_card_inputs, natural_cmp, read_card_list};
+pub use split::{SlotPlan, Split, SplitOptions, SplitPlan, SplitSlot, plan_split, split_sheet};
 
 /// Largest side of a sheet this crate writes (the JPEG limit).
 pub const MAX_SHEET_SIDE: u32 = 65_535;
@@ -143,6 +145,24 @@ fn final_cell(
     Ok(cell)
 }
 
+/// Flattens `canvas` onto the `fill` colour; the second value is the number of
+/// pixels that were not opaque.
+fn flatten(canvas: &RgbaImage, fill: [u8; 3]) -> (image::RgbImage, u64) {
+    let fill = fill.map(u32::from);
+    let mut flattened = 0;
+    let rgb = image::RgbImage::from_fn(canvas.width(), canvas.height(), |x, y| {
+        let Rgba([r, g, b, a]) = *canvas.get_pixel(x, y);
+        if a == 255 {
+            return image::Rgb([r, g, b]);
+        }
+        flattened += 1;
+        let a = u32::from(a);
+        let mix = |c: u8, bg: u32| ((u32::from(c) * a + bg * (255 - a) + 127) / 255) as u8;
+        image::Rgb([mix(r, fill[0]), mix(g, fill[1]), mix(b, fill[2])])
+    });
+    (rgb, flattened)
+}
+
 /// Encodes a sheet; the second value is the number of pixels flattened
 /// onto the fill colour (JPEG only).
 fn encode_sheet(
@@ -169,17 +189,8 @@ fn encode_sheet(
                 .map_err(fail)?;
         }
         OutputFormat::Jpeg => {
-            let fill = options.fill.map(u32::from);
-            let rgb = image::RgbImage::from_fn(canvas.width(), canvas.height(), |x, y| {
-                let Rgba([r, g, b, a]) = *canvas.get_pixel(x, y);
-                if a == 255 {
-                    return image::Rgb([r, g, b]);
-                }
-                flattened += 1;
-                let a = u32::from(a);
-                let mix = |c: u8, bg: u32| ((u32::from(c) * a + bg * (255 - a) + 127) / 255) as u8;
-                image::Rgb([mix(r, fill[0]), mix(g, fill[1]), mix(b, fill[2])])
-            });
+            let (rgb, count) = flatten(&canvas, options.fill);
+            flattened = count;
             DynamicImage::ImageRgb8(rgb)
                 .write_with_encoder(JpegEncoder::new_with_quality(&mut bytes, options.quality))
                 .map_err(fail)?;
@@ -373,5 +384,7 @@ pub fn build_deck(cards: &[PathBuf], options: &DeckOptions) -> Result<Deck, Imag
     })
 }
 
+#[cfg(test)]
+mod split_tests;
 #[cfg(test)]
 mod tests;

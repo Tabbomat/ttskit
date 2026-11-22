@@ -30,10 +30,14 @@ fn note(code: &'static str, path: &Path, message: &str) -> Problem {
     )
 }
 
-/// Reads a PNG, JPEG or WebP file as 8-bit RGBA. The EXIF orientation is
-/// applied to the pixels; the colour profile and EXIF data are dropped; an
-/// animated image gives its first frame. Each change is a note in `notes`.
-pub(super) fn decode(path: &Path, notes: &mut Vec<Problem>) -> Result<RgbaImage, ImageError> {
+/// Reads a PNG, JPEG or WebP file with its colour type and bit depth. The
+/// EXIF orientation is applied to the pixels; the colour profile and EXIF data
+/// are dropped; an animated image gives its first frame. Each change is a note
+/// in `notes`.
+pub(super) fn decode_keeping_depth(
+    path: &Path,
+    notes: &mut Vec<Problem>,
+) -> Result<DynamicImage, ImageError> {
     let io = |source| ImageError::Io {
         path: path.to_owned(),
         source,
@@ -100,8 +104,19 @@ pub(super) fn decode(path: &Path, notes: &mut Vec<Problem>) -> Result<RgbaImage,
     if exif.is_some() {
         notes.push(note("exif-dropped", path, "EXIF data dropped"));
     }
+    Ok(img)
+}
+
+/// True when a channel of `img` has more than 8 bits.
+pub(super) fn is_deep(img: &DynamicImage) -> bool {
     let color = img.color();
-    if color.bits_per_pixel() / u16::from(color.channel_count()) > 8 {
+    color.bits_per_pixel() / u16::from(color.channel_count()) > 8
+}
+
+/// Reads a PNG, JPEG or WebP file as 8-bit RGBA (see [`decode_keeping_depth`]).
+pub(super) fn decode(path: &Path, notes: &mut Vec<Problem>) -> Result<RgbaImage, ImageError> {
+    let img = decode_keeping_depth(path, notes)?;
+    if is_deep(&img) {
         notes.push(note(
             "reduced-to-8-bit",
             path,

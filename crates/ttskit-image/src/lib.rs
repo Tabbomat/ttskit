@@ -18,8 +18,9 @@ pub use convert::{
 };
 pub use deck::{
     CardDescription, DESCRIPTION_VERSION, Deck, DeckOptions, Description, Fit, MAX_COLUMNS,
-    MAX_ROWS, MAX_SHEET_SIDE, PlacedCard, Sheet, SheetDescription, SheetPlan, build_deck,
-    expand_card_inputs, grid_for, natural_cmp, plan_sheets, read_card_list, slot_origin,
+    MAX_ROWS, MAX_SHEET_SIDE, PlacedCard, Sheet, SheetDescription, SheetPlan, SlotPlan, Split,
+    SplitOptions, SplitPlan, SplitSlot, build_deck, expand_card_inputs, grid_for, natural_cmp,
+    plan_sheets, plan_split, read_card_list, slot_origin, split_sheet,
 };
 pub use optimize::{
     DEFAULT_LEVEL, MAX_LEVEL, OptimizeOptions, Optimized, Outcome, Skipped, StripMode, optimize,

@@ -43,6 +43,14 @@ explicitly.
   hidden-card image (`BackIsHidden: false` in the game).
 - With `--no-hidden-slot` all slots hold cards (up to 70 per sheet) and the
   deck must be set up with `BackIsHidden: true` in the game.
+- `ttskit image deck split` reads the same rules backwards. From a save
+  (`--save FILE --deck-id ID`) the grid is `NumWidth` x `NumHeight` of the
+  `CustomDeck` entry with that key, and `BackIsHidden: true` means every slot
+  is a card (no hidden-card slot), while `BackIsHidden: false` (or no key, the
+  game's default) means the last slot is the hidden-card slot. The entry is
+  repeated by every card and by the deck object, so all occurrences must agree.
+  With only `--columns` and `--rows` the last slot is assumed to be the
+  hidden-card slot, as in `build`.
 
 ## Manual check of `image deck build`
 

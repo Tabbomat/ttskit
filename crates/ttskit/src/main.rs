@@ -30,7 +30,7 @@ enum Command {
         #[command(subcommand)]
         command: CloudCommand,
     },
-    /// Inspect, check, convert, resize, optimize and quantize image files, and build deck sheets from card images (local only; needs a build with the `image` feature; unofficial)
+    /// Inspect, check, convert, resize, optimize and quantize image files, and build or split deck sheets (local only; needs a build with the `image` feature; unofficial)
     Image {
         #[command(subcommand)]
         command: ImageCommand,
@@ -426,10 +426,10 @@ enum ImageCommand {
         #[arg(long)]
         json: bool,
     },
-    /// Build the sheets of custom decks
+    /// Build deck sheets from card images, or cut them into cards
     ///
     /// A custom deck is one or more grid sheets of card images. `deck build`
-    /// assembles single card images into such sheets.
+    /// assembles single card images into such sheets, `deck split` cuts a sheet back into cards.
     Deck {
         #[command(subcommand)]
         command: DeckCommand,
@@ -573,6 +573,84 @@ enum DeckCommand {
         #[arg(long)]
         yes: bool,
         /// Build in memory and report the plan, but write nothing
+        #[arg(long)]
+        dry_run: bool,
+        /// Print one JSON object with all results
+        #[arg(long)]
+        json: bool,
+    },
+    /// Cut a deck sheet into single card images (the reverse of `deck build`)
+    ///
+    /// Writes NAME_00.png, NAME_01.png, ... into --out-dir, one per card slot
+    /// in number order (slots count from 0, left to right and top to bottom),
+    /// and NAME_hidden.png for the hidden-card slot (unofficial; the rules are
+    /// in docs/deck-sheets.md). NAME is the file name of SHEET without its
+    /// extension unless --name says otherwise; the slot number has at least 2
+    /// digits. The grid comes from exactly one of: --columns and --rows;
+    /// --description FILE, the NAME.json of `deck build` (the sheet is found by
+    /// its file name; the card count and the hidden-card slot are taken from
+    /// it); --save FILE --deck-id ID, the CustomDeck entry of a save (the
+    /// last slot is the hidden-card slot unless BackIsHidden is true). With
+    /// --columns and --rows the last slot is assumed to be the hidden-card
+    /// slot, as in `deck build`; --no-hidden-slot says all slots are cards and
+    /// overrides the description or save, --skip-hidden does not write the
+    /// hidden-card slot. --count N writes only the first N cards. The sheet
+    /// must divide evenly into the grid. Cards are written as PNG by default
+    /// (the pixels and 16-bit depth are kept exactly, whatever the sheet's
+    /// format) or --to jpg, which flattens transparency onto --fill. The
+    /// colour profile and EXIF data are dropped (an EXIF orientation is
+    /// applied first). Existing outputs are never overwritten without --yes,
+    /// and the run is refused up front if outputs collide or overwrite an
+    /// input. --dry-run cuts in memory and writes nothing. Output is
+    /// deterministic. Exits with status 1 on any error.
+    #[command(group(clap::ArgGroup::new("grid_source").required(true).multiple(false).args(["columns", "description", "save"])))]
+    Split {
+        /// The sheet image (PNG, JPEG or WebP)
+        #[arg(value_name = "SHEET")]
+        sheet: PathBuf,
+        /// Directory for the card images (created if missing)
+        #[arg(long, value_name = "DIR")]
+        out_dir: Option<PathBuf>,
+        /// Start of the output file names [default: the file name of SHEET without extension]
+        #[arg(long, value_name = "NAME")]
+        name: Option<String>,
+        /// Output format of the cards
+        #[arg(long, value_enum, default_value = "png")]
+        to: image::Target,
+        /// JPEG quality, 1 to 100 [default: 85]
+        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u8).range(1..=100))]
+        quality: Option<u8>,
+        /// Colour that transparency is flattened onto for --to jpg: #RRGGBB, #RGB, white or black
+        #[arg(long, value_name = "COLOR", default_value = "808080")]
+        fill: String,
+        /// Columns of the sheet, 1 to 10 (with --rows; the last slot is assumed to be the hidden-card slot)
+        #[arg(long, value_name = "N", requires = "rows", value_parser = clap::value_parser!(u32).range(1..=10))]
+        columns: Option<u32>,
+        /// Rows of the sheet, 1 to 7 (with --columns)
+        #[arg(long, value_name = "N", requires = "columns", value_parser = clap::value_parser!(u32).range(1..=7))]
+        rows: Option<u32>,
+        /// Description file written by `deck build`: grid, card count and hidden-card slot of SHEET
+        #[arg(long, value_name = "FILE")]
+        description: Option<PathBuf>,
+        /// Save file (JSON) with the CustomDeck entry of the sheet (needs --deck-id)
+        #[arg(long, value_name = "FILE", requires = "deck_id")]
+        save: Option<PathBuf>,
+        /// Key of the CustomDeck entry in the save, e.g. 1 (needs --save)
+        #[arg(long, value_name = "ID", requires = "save", conflicts_with_all = ["columns", "description"])]
+        deck_id: Option<String>,
+        /// Write only the first N card slots [default: all, or the card count of the description]
+        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
+        count: Option<u32>,
+        /// The last slot is a card too (overrides the description or save)
+        #[arg(long)]
+        no_hidden_slot: bool,
+        /// Do not write the hidden-card slot
+        #[arg(long, conflicts_with = "no_hidden_slot")]
+        skip_hidden: bool,
+        /// Overwrite existing output files
+        #[arg(long)]
+        yes: bool,
+        /// Cut in memory and report the plan, but write nothing
         #[arg(long)]
         dry_run: bool,
         /// Print one JSON object with all results
@@ -1687,6 +1765,61 @@ fn run(cli: Cli) -> Result<ExitCode, CliError> {
                     no_hidden_slot,
                     fill,
                     max_sheet_side,
+                    yes,
+                    dry_run,
+                    json,
+                },
+                &mut stdout,
+            )?;
+            stdout.flush().map_err(|e| e.to_string())?;
+            Ok(if ok {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            })
+        }
+        Command::Image {
+            command:
+                ImageCommand::Deck {
+                    command:
+                        DeckCommand::Split {
+                            sheet,
+                            out_dir,
+                            name,
+                            to,
+                            quality,
+                            fill,
+                            columns,
+                            rows,
+                            description,
+                            save,
+                            deck_id,
+                            count,
+                            no_hidden_slot,
+                            skip_hidden,
+                            yes,
+                            dry_run,
+                            json,
+                        },
+                },
+        } => {
+            let mut stdout = std::io::stdout().lock();
+            let ok = image::deck_split(
+                &image::DeckSplitArgs {
+                    sheet,
+                    out_dir,
+                    name,
+                    to,
+                    quality,
+                    fill,
+                    columns,
+                    rows,
+                    description,
+                    save,
+                    deck_id,
+                    count,
+                    no_hidden_slot,
+                    skip_hidden,
                     yes,
                     dry_run,
                     json,

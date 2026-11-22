@@ -39,6 +39,27 @@ pub struct DeckBuildArgs {
     pub json: bool,
 }
 
+#[cfg_attr(not(feature = "image"), allow(dead_code))]
+pub struct DeckSplitArgs {
+    pub sheet: PathBuf,
+    pub out_dir: Option<PathBuf>,
+    pub name: Option<String>,
+    pub to: super::Target,
+    pub quality: Option<u8>,
+    pub fill: String,
+    pub columns: Option<u32>,
+    pub rows: Option<u32>,
+    pub description: Option<PathBuf>,
+    pub save: Option<PathBuf>,
+    pub deck_id: Option<String>,
+    pub count: Option<u32>,
+    pub no_hidden_slot: bool,
+    pub skip_hidden: bool,
+    pub yes: bool,
+    pub dry_run: bool,
+    pub json: bool,
+}
+
 /// Parses `--card-size`: `WIDTHxHEIGHT`, both at least 1.
 pub fn parse_card_size(text: &str) -> Result<(u32, u32), String> {
     let bad = || format!("invalid card size '{text}': use WIDTHxHEIGHT in pixels, e.g. 300x420");
@@ -210,6 +231,175 @@ pub fn deck_build(args: &DeckBuildArgs, out: &mut dyn Write) -> Result<bool, Str
     Ok(report.errors.is_empty())
 }
 
+#[cfg(not(feature = "image"))]
+pub fn deck_split(_args: &DeckSplitArgs, _out: &mut dyn Write) -> Result<bool, String> {
+    Err(
+        "this ttskit build has no image support; rebuild with `cargo build --features image`"
+            .to_owned(),
+    )
+}
+
+#[cfg(feature = "image")]
+pub fn deck_split(args: &DeckSplitArgs, out: &mut dyn Write) -> Result<bool, String> {
+    use super::deck_grid;
+    use ttskit_image::{DEFAULT_JPEG_QUALITY, OutputFormat, SplitOptions};
+
+    let name = match &args.name {
+        Some(name) => name.clone(),
+        None => args
+            .sheet
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .ok_or_else(|| format!("{}: not a file name", args.sheet.display()))?,
+    };
+    check_name(&name)?;
+    let format = match args.to {
+        super::Target::Png => OutputFormat::Png,
+        super::Target::Jpg => OutputFormat::Jpeg,
+    };
+    if format == OutputFormat::Png && args.quality.is_some() {
+        return Err("--quality only applies to --to jpg".to_owned());
+    }
+    if args.out_dir.is_none() && !args.dry_run {
+        return Err(
+            "say where the cards go: --out-dir DIR (or use --dry-run to only see the plan)"
+                .to_owned(),
+        );
+    }
+    let fill = ttskit_image::parse_color(&args.fill)?;
+
+    let (spec, grid_source) = if let Some(path) = &args.description {
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| format!("{}: cannot read the description: {e}", path.display()))?;
+        let file = args
+            .sheet
+            .file_name()
+            .ok_or_else(|| format!("{}: not a file name", args.sheet.display()))?
+            .to_string_lossy();
+        let spec = deck_grid::from_description(&text, &file)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        (spec, "description")
+    } else if let Some(path) = &args.save {
+        let id = args.deck_id.as_deref().ok_or("--save needs --deck-id ID")?;
+        let data = std::fs::read(path)
+            .map_err(|e| format!("{}: cannot read the save: {e}", path.display()))?;
+        let save: serde_json::Value = serde_json::from_slice(&data)
+            .map_err(|e| format!("{}: not a valid save file: {e}", path.display()))?;
+        let spec =
+            deck_grid::from_save(&save, id).map_err(|e| format!("{}: {e}", path.display()))?;
+        (spec, "save")
+    } else {
+        // `deck build` reserves the hidden-card slot by default; so does this.
+        let (columns, rows) = args
+            .columns
+            .zip(args.rows)
+            .ok_or("give --columns and --rows, --description FILE or --save FILE --deck-id ID")?;
+        let spec = deck_grid::GridSpec {
+            columns,
+            rows,
+            count: None,
+            hidden_slot: true,
+        };
+        (spec, "flags")
+    };
+    let options = SplitOptions {
+        columns: spec.columns,
+        rows: spec.rows,
+        count: args.count.or(spec.count),
+        hidden_slot: spec.hidden_slot && !args.no_hidden_slot,
+        skip_hidden: args.skip_hidden,
+        format,
+        quality: args.quality.unwrap_or(DEFAULT_JPEG_QUALITY),
+        fill,
+    };
+
+    // Every output path is decided, and the run refused, before the sheet is
+    // decoded or anything is written.
+    let plan = ttskit_image::plan_split(
+        options.columns,
+        options.rows,
+        options.count,
+        options.hidden_slot,
+        options.skip_hidden,
+    )
+    .map_err(|e| e.to_string())?;
+    let names: Vec<PathBuf> = plan
+        .slots
+        .iter()
+        .map(|s| PathBuf::from(plan.file_name(&name, s, format.extension())))
+        .collect();
+    let targets: Vec<PathBuf> = match &args.out_dir {
+        Some(dir) => {
+            let dest = Destinations {
+                out: None,
+                out_dir: Some(dir),
+                yes: args.yes,
+            };
+            plan_targets(&names, &dest, None)?
+                .into_iter()
+                .map(|(_, target)| target)
+                .collect()
+        }
+        None => names,
+    };
+    let clashes: Vec<String> = targets
+        .iter()
+        .filter(|t| {
+            same_file(&args.sheet, t)
+                || args.description.as_deref().is_some_and(|d| same_file(d, t))
+                || args.save.as_deref().is_some_and(|d| same_file(d, t))
+        })
+        .map(|t| format!("{} would overwrite an input of this run", t.display()))
+        .collect();
+    if !clashes.is_empty() {
+        return Err(clashes.join("\n"));
+    }
+
+    let mut report = SplitReport {
+        dry_run: args.dry_run,
+        sheet: args.sheet.display().to_string(),
+        columns: options.columns,
+        rows: options.rows,
+        cell_width: None,
+        cell_height: None,
+        grid_source,
+        files: Vec::new(),
+        notes: Vec::new(),
+        errors: Vec::new(),
+    };
+    match ttskit_image::split_sheet(&args.sheet, &options) {
+        Err(error) => report.errors.push(error.to_string()),
+        Ok(split) => {
+            report.cell_width = Some(split.cell_width);
+            report.cell_height = Some(split.cell_height);
+            for (slot, target) in split.slots.iter().zip(&targets) {
+                let overwrote = target.exists();
+                if !args.dry_run
+                    && let Err(error) = write_atomic(target, &slot.bytes)
+                {
+                    report.errors.push(format!("{}: {error}", target.display()));
+                    break;
+                }
+                report.files.push(SplitFile {
+                    path: target.display().to_string(),
+                    slot: slot.slot,
+                    column: slot.column,
+                    row: slot.row,
+                    hidden: slot.is_hidden,
+                    width: split.cell_width,
+                    height: split.cell_height,
+                    bytes: slot.bytes.len() as u64,
+                    overwrote,
+                    written: !args.dry_run,
+                });
+            }
+            report.notes = split.notes;
+        }
+    }
+    report.write(args.json, out).map_err(|e| e.to_string())?;
+    Ok(report.errors.is_empty())
+}
+
 /// True when both paths name the same file: the same path as text, or the
 /// same file on disk.
 #[cfg(feature = "image")]
@@ -292,6 +482,83 @@ impl DeckReport {
                 )
             }
             None => writeln!(out, "no deck built, {} failed", self.errors.len()),
+        }
+    }
+}
+
+#[cfg(feature = "image")]
+#[derive(Serialize)]
+struct SplitFile {
+    path: String,
+    slot: u32,
+    column: u32,
+    row: u32,
+    hidden: bool,
+    width: u32,
+    height: u32,
+    bytes: u64,
+    overwrote: bool,
+    written: bool,
+}
+
+#[cfg(feature = "image")]
+#[derive(Serialize)]
+struct SplitReport {
+    dry_run: bool,
+    sheet: String,
+    columns: u32,
+    rows: u32,
+    /// Absent if the sheet could not be cut.
+    cell_width: Option<u32>,
+    cell_height: Option<u32>,
+    /// `flags`, `description` or `save`.
+    grid_source: &'static str,
+    files: Vec<SplitFile>,
+    notes: Vec<ttskit_image::Problem>,
+    errors: Vec<String>,
+}
+
+#[cfg(feature = "image")]
+impl SplitReport {
+    fn write(&self, json: bool, out: &mut dyn Write) -> std::io::Result<()> {
+        if json {
+            serde_json::to_writer(&mut *out, self)?;
+            return writeln!(out);
+        }
+        for file in &self.files {
+            let replaces = if file.overwrote { ", overwrites" } else { "" };
+            let hidden = if file.hidden {
+                ", hidden-card slot"
+            } else {
+                ""
+            };
+            writeln!(
+                out,
+                "{}: slot {} (column {}, row {}), {}x{} px, {} bytes{hidden}{replaces}",
+                file.path, file.slot, file.column, file.row, file.width, file.height, file.bytes
+            )?;
+        }
+        for n in &self.notes {
+            writeln!(out, "  {}: {}", severity_label(n.severity), n.message)?;
+        }
+        for e in &self.errors {
+            writeln!(out, "error: {e}")?;
+        }
+        let verb = if self.dry_run {
+            "would be written (dry run, nothing written)"
+        } else {
+            "written"
+        };
+        match self.cell_width.zip(self.cell_height) {
+            Some((w, h)) => writeln!(
+                out,
+                "{} files {verb} from a {}x{} grid of {w}x{h} px cells, {} failed",
+                self.files.len(),
+                self.columns,
+                self.rows,
+                self.errors.len()
+            ),
+            None => writeln!(out, "sheet not split, {} failed", self.errors.len()),
         }
     }
 }
