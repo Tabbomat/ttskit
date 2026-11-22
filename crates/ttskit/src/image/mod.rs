@@ -146,7 +146,12 @@ pub fn convert(args: &ConvertArgs, out: &mut dyn Write) -> Result<bool, String> 
     if files.is_empty() {
         return Err("no image files found in the given inputs".to_owned());
     }
-    let plan = plan_targets(&files, args, format.extension())?;
+    let dest = Destinations {
+        out: args.out.as_deref(),
+        out_dir: args.out_dir.as_deref(),
+        yes: args.yes,
+    };
+    let plan = plan_targets(&files, &dest, Some(format.extension()))?;
 
     let mut report = ConvertReport {
         dry_run: args.dry_run,
@@ -183,14 +188,22 @@ pub fn convert(args: &ConvertArgs, out: &mut dyn Write) -> Result<bool, String> 
     Ok(report.errors.is_empty())
 }
 
+/// Where the output of a command goes.
+#[cfg(feature = "image")]
+struct Destinations<'a> {
+    out: Option<&'a Path>,
+    out_dir: Option<&'a Path>,
+    yes: bool,
+}
+
 /// Decides every output path and refuses the whole batch, before anything is
 /// decoded or written, when two inputs would write the same file, an output
 /// is another input of the batch, or a target exists and `--yes` is missing.
 #[cfg(feature = "image")]
 fn plan_targets(
     files: &[PathBuf],
-    args: &ConvertArgs,
-    extension: &str,
+    args: &Destinations,
+    extension: Option<&str>,
 ) -> Result<Vec<(PathBuf, PathBuf)>, String> {
     if args.out.is_some() && files.len() != 1 {
         return Err(format!(
@@ -200,17 +213,26 @@ fn plan_targets(
     }
     let mut plan = Vec::new();
     for file in files {
-        let target = match &args.out {
-            Some(out) => out.clone(),
+        let target = match args.out {
+            Some(out) => out.to_path_buf(),
             None => {
-                let name = file
-                    .file_stem()
-                    .ok_or_else(|| format!("{}: not a file name", file.display()))?;
-                let dir = match &args.out_dir {
-                    Some(dir) => dir.clone(),
+                let not_a_name = || format!("{}: not a file name", file.display());
+                let name = match extension {
+                    Some(ext) => format!(
+                        "{}.{ext}",
+                        file.file_stem().ok_or_else(not_a_name)?.to_string_lossy()
+                    ),
+                    None => file
+                        .file_name()
+                        .ok_or_else(not_a_name)?
+                        .to_string_lossy()
+                        .into_owned(),
+                };
+                let dir = match args.out_dir {
+                    Some(dir) => dir.to_path_buf(),
                     None => file.parent().map(PathBuf::from).unwrap_or_default(),
                 };
-                dir.join(format!("{}.{extension}", name.to_string_lossy()))
+                dir.join(name)
             }
         };
         plan.push((file.clone(), target));
@@ -334,3 +356,6 @@ impl ConvertReport {
         )
     }
 }
+
+mod optimize;
+pub use optimize::{OptimizeArgs, Strip, optimize};

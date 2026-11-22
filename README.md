@@ -644,6 +644,53 @@ dropped, its orientation is applied to the pixels, so a rotated photo stays
 upright. Converting a file to its own format re-encodes it, which also strips
 metadata and normalises progressive, interlaced or CMYK files.
 
+### Optimizing PNG files
+
+```
+ttskit image optimize deck/ --dry-run
+ttskit image optimize card.png --out card.small.png
+ttskit image optimize deck/ --out-dir optimized --level 4
+ttskit image optimize deck/ --in-place --yes
+```
+
+`image optimize INPUT...` shrinks PNG files without changing a single pixel, so
+mods load faster and use less Steam Cloud space. It uses the
+[oxipng](https://crates.io/crates/oxipng) library; no other program is needed.
+The decoded pixels (alpha included, also under fully transparent pixels) are
+compared before and after for every file, and a file whose result differs is
+refused.
+
+- You must say where results go: `--out FILE` (exactly one input),
+  `--out-dir DIR` (created if missing), or `--in-place --yes`. `--dry-run`
+  optimizes in memory, reports the savings and writes nothing; on its own it
+  needs no destination.
+- A file is only replaced when the result is smaller. In place, a file that did
+  not shrink is not touched. With `--out` or `--out-dir`, such a file is copied
+  unchanged, so the output always holds every PNG. Existing outputs are never
+  overwritten without `--yes`, and a run is refused before anything is written
+  if two inputs would write the same file. Files are written atomically.
+- The report shows old size, new size and the saving per file, plus a total.
+  `--json` prints `files` (`input`, `output`, `status` of `optimized`,
+  `unchanged` or `skipped`, `original_bytes`, `optimized_bytes`, `saved_bytes`,
+  `written`, `note`), `totals`, the `level` and `strip` used, and `errors`.
+- Files that are not PNG (decided by content, not by extension) are skipped
+  with a note, not an error. A file that cannot be read as PNG is an error for
+  that file only; the others still run, and the exit status is 1.
+- `--level 0` to `6` (default 2): higher is smaller and slower.
+- `--strip safe|all|none` (default `safe`). `safe` removes chunks that do not
+  affect how the image is shown (text, EXIF, gamma and similar) and keeps the
+  colour profile, pixel density and animation chunks. `all` also removes the
+  colour profile; pixels stay identical, but a viewer that honours the profile
+  may show other colours. An animated PNG is skipped under `all`, since that
+  would remove the animation. `none` keeps every chunk.
+- The interlacing is kept and the colour of transparent pixels is never
+  altered.
+- The output is deterministic: the same input, `--level` and `--strip` give the
+  same bytes, so an optimized file is stable (running the command again changes
+  nothing) and `cloud sync push` does not upload it again. Upgrading ttskit can
+  change the bytes, because a newer oxipng may compress differently; the files
+  then count as changed once.
+
 Which formats, animated images, 16-bit channels and colour profiles the image
 commands accept or produce follows what the game itself accepts; see
 [docs/image-formats.md](docs/image-formats.md).

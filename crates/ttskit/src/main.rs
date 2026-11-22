@@ -30,7 +30,7 @@ enum Command {
         #[command(subcommand)]
         command: CloudCommand,
     },
-    /// Inspect and convert image files (local only; needs a build with the `image` feature; unofficial)
+    /// Inspect, convert and optimize image files (local only; needs a build with the `image` feature; unofficial)
     Image {
         #[command(subcommand)]
         command: ImageCommand,
@@ -282,6 +282,52 @@ enum ImageCommand {
         #[arg(long)]
         yes: bool,
         /// Show what would be written, but write nothing
+        #[arg(long)]
+        dry_run: bool,
+        /// Print one JSON object with all results
+        #[arg(long)]
+        json: bool,
+    },
+    /// Shrink PNG files without changing a pixel
+    ///
+    /// Re-encodes each PNG losslessly with oxipng (filters, compression, colour
+    /// type and bit depth reductions). The decoded pixels, alpha included, stay
+    /// identical; this is checked for every file. A file is only replaced when
+    /// the result is smaller: in place, a file that did not shrink is left
+    /// untouched; with --out or --out-dir, the original bytes are copied to the
+    /// output. Files that are not PNG (decided by content) are skipped with a
+    /// note. You must say where results go: --out FILE (one input), --out-dir
+    /// DIR, or --in-place with --yes; --dry-run alone runs in memory and only
+    /// reports the savings. Existing outputs are never overwritten without
+    /// --yes. --strip safe (default) removes text, EXIF and similar chunks but
+    /// keeps the colour profile, pixel density and animation; all also removes
+    /// the colour profile (an animated PNG is then skipped); none keeps every
+    /// chunk. Output is deterministic for the same level, strip mode and ttskit
+    /// build, so an optimized file stays stable; a ttskit upgrade (new oxipng
+    /// version) may produce other bytes. Exits with status 1 if any file failed.
+    Optimize {
+        /// PNG files or directories (scanned recursively)
+        #[arg(required = true, value_name = "INPUT")]
+        inputs: Vec<PathBuf>,
+        /// Effort from 0 (fastest) to 6 (smallest, slowest)
+        #[arg(long, value_name = "N", default_value_t = 2, value_parser = clap::value_parser!(u8).range(0..=6))]
+        level: u8,
+        /// Metadata to remove: safe, all or none
+        #[arg(long, value_enum, default_value = "safe")]
+        strip: image::Strip,
+        /// Output file (for exactly one input)
+        #[arg(long, value_name = "FILE", conflicts_with_all = ["out_dir", "in_place"])]
+        out: Option<PathBuf>,
+        /// Output directory (created if missing); files are named like their input
+        #[arg(long, value_name = "DIR", conflicts_with = "in_place")]
+        out_dir: Option<PathBuf>,
+        /// Replace the input files (needs --yes)
+        #[arg(long)]
+        in_place: bool,
+        /// Confirm --in-place, or overwrite existing output files
+        #[arg(long)]
+        yes: bool,
+        /// Optimize in memory and report the savings, but write nothing
         #[arg(long)]
         dry_run: bool,
         /// Print one JSON object with all results
@@ -1187,6 +1233,42 @@ fn run(cli: Cli) -> Result<ExitCode, CliError> {
                     keep_metadata,
                     out,
                     out_dir,
+                    yes,
+                    dry_run,
+                    json,
+                },
+                &mut stdout,
+            )?;
+            stdout.flush().map_err(|e| e.to_string())?;
+            Ok(if ok {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            })
+        }
+        Command::Image {
+            command:
+                ImageCommand::Optimize {
+                    inputs,
+                    level,
+                    strip,
+                    out,
+                    out_dir,
+                    in_place,
+                    yes,
+                    dry_run,
+                    json,
+                },
+        } => {
+            let mut stdout = std::io::stdout().lock();
+            let ok = image::optimize(
+                &image::OptimizeArgs {
+                    inputs,
+                    level,
+                    strip,
+                    out,
+                    out_dir,
+                    in_place,
                     yes,
                     dry_run,
                     json,
