@@ -58,8 +58,9 @@ enum Command {
     ///
     /// Stdout is reserved for the protocol; diagnostics go to stderr. The
     /// server holds the editor port for its whole life and buffers what the
-    /// game sends; it does not start if the port is in use. Exits when stdin
-    /// closes.
+    /// game sends. If the port is in use the server still starts: the editor
+    /// tools then fail with the reason and only the save tools work. Exits when
+    /// stdin closes.
     Mcp(McpCli),
     /// Push scripts and UI to the running game whenever the unpacked tree changes
     ///
@@ -87,7 +88,7 @@ struct CompletionsCli {
 
 #[derive(clap::Args)]
 struct McpCli {
-    /// Project directory; save_and_play may only read paths inside it (default: the current directory)
+    /// Project directory; every path an MCP tool reads must be inside it (default: the current directory)
     #[arg(long, value_name = "DIR")]
     root: Option<PathBuf>,
     /// Keep at most this many events (print, error, custom, saved, loaded) for get_console; the buffer also holds at most 4 MiB of text

@@ -340,8 +340,11 @@ flags configure it. Setup for clients: see the README.
 
 - **Port use:** the server binds the editor port at start and holds it until
   it exits. If the port is in use (including the wildcard case described in
-  "Sharing port 39998 with other programs"), it does not start: exit status
-  1 with the busy-port error on stderr. While it runs, `ttskit watch`,
+  "Sharing port 39998 with other programs"), the server still starts, with
+  the reason on stderr: `get_status` reports `editorAvailable: false` and
+  `editorError`, the editor tools fail with that reason, and the local save
+  tools (`save_scan`, `save_lint`, `save_diff`, `save_check_urls`,
+  `manifest_show`) keep working. While it runs, `ttskit watch`,
   `editor console` and the other `editor` commands cannot listen and fail
   with the busy-port error; their probe is an empty connection that the
   server skips. Another editor integration that binds `127.0.0.1:39998`

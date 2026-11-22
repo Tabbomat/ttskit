@@ -139,10 +139,11 @@ async fn connect(ep: Endpoints, root: &std::path::Path) -> Client {
 }
 
 async fn connect_with(ep: Endpoints, root: &std::path::Path, max_events: usize) -> Client {
+    attach(EditorServer::start(ep, resolve_root(Some(root)).unwrap(), max_events).await).await
+}
+
+async fn attach(server: EditorServer) -> Client {
     let (server_side, client_side) = tokio::io::duplex(1 << 20);
-    let server = EditorServer::start(ep, resolve_root(Some(root)).unwrap(), max_events)
-        .await
-        .unwrap();
     tokio::spawn(serve_on(server, server_side));
     let (reader, writer) = tokio::io::split(client_side);
     Client {
@@ -204,7 +205,7 @@ async fn initialize_reports_name_and_tools_capability() {
 }
 
 #[tokio::test]
-async fn tools_list_has_the_six_editor_tools() {
+async fn tools_list_has_the_editor_and_save_tools() {
     let mut h = plain().await;
     let r = h.client.request("tools/list", json!({})).await;
     let tools = r["result"]["tools"].as_array().unwrap();
@@ -217,7 +218,12 @@ async fn tools_list_has_the_six_editor_tools() {
             "get_console",
             "get_scripts",
             "get_status",
+            "manifest_show",
             "save_and_play",
+            "save_check_urls",
+            "save_diff",
+            "save_lint",
+            "save_scan",
             "send_custom_message"
         ]
     );
@@ -1026,15 +1032,15 @@ fn seqs(console: &Value) -> Vec<u64> {
 }
 
 #[tokio::test]
-async fn the_server_does_not_start_when_the_editor_port_is_busy() {
+async fn the_server_starts_without_the_hub_when_the_editor_port_is_busy() {
     let ep = Endpoints::new(1, free_port());
     let _held = Listener::bind(ep.editor).await.unwrap();
     let root = tempfile::tempdir().unwrap();
-    let result = EditorServer::start(ep, resolve_root(Some(root.path())).unwrap(), 10).await;
-    let Err(e) = result else {
-        panic!("the server started on a busy port");
+    let server = EditorServer::start(ep, resolve_root(Some(root.path())).unwrap(), 10).await;
+    let Err(why) = &server.hub else {
+        panic!("the hub started on a busy port");
     };
-    assert!(e.message.contains("already in use"), "{}", e.message);
+    assert!(why.contains("already in use"), "{why}");
 }
 
 #[tokio::test]
@@ -1375,4 +1381,367 @@ async fn an_undecodable_message_is_counted_and_does_not_stop_the_buffer() {
     let c = console(&mut h, json!({})).await;
     assert_eq!(seqs(&c), [1]);
     assert_eq!(c["events"][0]["message"], "p1");
+}
+
+// ---- Without the editor port, and the save tools ----
+
+/// A server whose editor port is held by someone else: the editor tools fail,
+/// the save tools work.
+async fn without_editor(
+    fetcher: Option<save_tools::FetcherFactory>,
+) -> (Client, tempfile::TempDir) {
+    let ep = Endpoints::new(1, free_port());
+    let held = Listener::bind(ep.editor).await.unwrap();
+    std::mem::forget(held); // busy until the test process ends
+    local_with(ep, fetcher).await
+}
+
+async fn local_with(
+    ep: Endpoints,
+    fetcher: Option<save_tools::FetcherFactory>,
+) -> (Client, tempfile::TempDir) {
+    let root = tempfile::tempdir().unwrap();
+    let mut server = EditorServer::start(ep, resolve_root(Some(root.path())).unwrap(), 10).await;
+    if let Some(fetcher) = fetcher {
+        server = server.with_fetcher(fetcher);
+    }
+    let mut client = attach(server).await;
+    client.initialize().await;
+    (client, root)
+}
+
+/// The text of a failed call: the `error` field of its JSON.
+fn error_text(result: &Value) -> String {
+    assert!(is_error(result), "expected a tool error: {result}");
+    body(result)["error"]
+        .as_str()
+        .expect("an error text")
+        .to_owned()
+}
+
+const SAVE_A: &str = r#"{
+  "SaveName": "T",
+  "ObjectStates": [
+    { "GUID": "aaaaaa", "Nickname": "Deck", "Transform": { "posX": 5000, "posY": 1, "posZ": 0 },
+      "CustomImage": { "ImageURL": "https://example.com/ok.png" } },
+    { "GUID": "bbbbbb", "Nickname": "Card",
+      "CustomImage": { "ImageURL": "https://example.com/dead.png" } },
+    { "GUID": "bbbbbb", "Nickname": "Card copy" }
+  ]
+}"#;
+
+const SAVE_B: &str = r#"{
+  "SaveName": "T",
+  "ObjectStates": [
+    { "GUID": "aaaaaa", "Nickname": "Deck", "Transform": { "posX": 1, "posY": 1, "posZ": 0 } },
+    { "GUID": "dddddd", "Nickname": "Fresh" }
+  ]
+}"#;
+
+fn write(root: &tempfile::TempDir, name: &str, content: &str) {
+    std::fs::write(root.path().join(name), content).unwrap();
+}
+
+/// A fake HTTP client: URLs containing "dead" answer 404, the rest 200.
+struct FakeFetch;
+
+impl ttskit_core::Fetch for FakeFetch {
+    fn fetch(
+        &self,
+        request: &ttskit_core::FetchRequest<'_>,
+    ) -> Result<ttskit_core::FetchResponse, ttskit_core::FetchError> {
+        let status = if request.url.contains("dead") {
+            404
+        } else {
+            200
+        };
+        Ok(ttskit_core::FetchResponse {
+            status,
+            ..Default::default()
+        })
+    }
+}
+
+fn fake_fetcher() -> save_tools::FetcherFactory {
+    Arc::new(|_| Ok(Box::new(FakeFetch) as Box<dyn ttskit_core::Fetch + Send>))
+}
+
+#[tokio::test]
+async fn the_server_starts_when_the_editor_port_is_busy() {
+    let (mut client, root) = without_editor(None).await;
+    write(&root, "save.json", SAVE_A);
+
+    let status = client.call("get_status", json!({})).await;
+    assert!(!is_error(&status), "{status}");
+    let status = body(&status);
+    assert_eq!(status["editorAvailable"], false);
+    assert_eq!(status["gameReachable"], false);
+    assert!(
+        status["editorError"]
+            .as_str()
+            .unwrap()
+            .contains("already in use"),
+        "{status}"
+    );
+
+    let calls = [
+        ("get_scripts", json!({})),
+        ("execute_lua", json!({"code": "print(1)"})),
+        ("send_custom_message", json!({"message": {"a": 1}})),
+        ("get_console", json!({})),
+        ("save_and_play", json!({"dir": "."})),
+    ];
+    for (tool, args) in calls {
+        let result = client.call(tool, args).await;
+        let error = error_text(&result);
+        assert!(error.contains("editor port"), "{tool}: {error}");
+        assert!(error.contains("already in use"), "{tool}: {error}");
+    }
+
+    let scan = client.call("save_scan", json!({"save": "save.json"})).await;
+    assert!(!is_error(&scan), "{scan}");
+    assert_eq!(body(&scan)["total"], 2);
+}
+
+#[tokio::test]
+async fn save_scan_groups_asset_urls() {
+    let (mut client, root) = without_editor(None).await;
+    write(&root, "save.json", SAVE_A);
+    let r = client
+        .call(
+            "save_scan",
+            json!({"save": "save.json", "occurrences": true}),
+        )
+        .await;
+    assert!(!is_error(&r), "{r}");
+    let doc = body(&r);
+    assert_eq!(doc["total"], 2);
+    assert!(doc["hosts"].is_object(), "{doc}");
+    assert!(doc.to_string().contains("https://example.com/dead.png"));
+
+    write(&root, "bad.json", "not json");
+    let r = client.call("save_scan", json!({"save": "bad.json"})).await;
+    assert!(error_text(&r).contains("bad.json"));
+    let r = client
+        .call("save_scan", json!({"save": "missing.json"}))
+        .await;
+    assert!(error_text(&r).contains("missing.json"));
+}
+
+#[tokio::test]
+async fn save_lint_reports_findings_as_a_normal_result() {
+    let (mut client, root) = without_editor(None).await;
+    write(&root, "save.json", SAVE_A);
+    let r = client.call("save_lint", json!({"save": "save.json"})).await;
+    assert!(!is_error(&r), "{r}");
+    let doc = body(&r);
+    assert!(
+        doc["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["rule"] == "duplicate-guid"),
+        "{doc}"
+    );
+    assert_eq!(doc["level"], "warning");
+
+    // Options: allow the rule and raise the level.
+    let r = client
+        .call(
+            "save_lint",
+            json!({"save": "save.json", "allow": ["duplicate-guid"], "level": "error"}),
+        )
+        .await;
+    assert!(!is_error(&r), "{r}");
+    assert_eq!(body(&r)["summary"]["error"], 0);
+
+    // The project config in the root is the default; a bad one is an error.
+    write(&root, "ttskit.toml", "[lint\n");
+    let r = client.call("save_lint", json!({"save": "save.json"})).await;
+    assert!(error_text(&r).contains("invalid config"));
+    write(&root, "ttskit.toml", "");
+    let r = client.call("save_lint", json!({"save": "save.json"})).await;
+    assert!(!is_error(&r), "{r}");
+
+    let r = client
+        .call(
+            "save_lint",
+            json!({"save": "save.json", "deny": ["no-such-rule"]}),
+        )
+        .await;
+    assert!(is_error(&r));
+    let r = client
+        .call("save_lint", json!({"save": "save.json", "level": "loud"}))
+        .await;
+    assert!(error_text(&r).contains("invalid level"));
+    let r = client.call("save_lint", json!({"save": "nope.json"})).await;
+    assert!(error_text(&r).contains("nope.json"));
+}
+
+#[tokio::test]
+async fn save_diff_equal_and_different() {
+    let (mut client, root) = without_editor(None).await;
+    write(&root, "a.json", SAVE_A);
+    write(&root, "b.json", SAVE_B);
+
+    let r = client
+        .call("save_diff", json!({"old": "a.json", "new": "a.json"}))
+        .await;
+    assert!(!is_error(&r), "{r}");
+    assert_eq!(body(&r)["objects"], json!([]));
+
+    let r = client
+        .call(
+            "save_diff",
+            json!({"old": "a.json", "new": "b.json", "scripts": true}),
+        )
+        .await;
+    assert!(!is_error(&r), "{r}");
+    let doc = body(&r);
+    assert!(!doc["objects"].as_array().unwrap().is_empty(), "{doc}");
+    assert!(doc.to_string().contains("Fresh"), "{doc}");
+
+    let args = json!({"old": "a.json", "new": "b.json", "tolerance": -1.0});
+    let r = client.call("save_diff", args).await;
+    assert!(error_text(&r).contains("tolerance"));
+    let args = json!({"old": "a.json", "new": "b.json", "tolerance": 10000.0});
+    let r = client.call("save_diff", args).await;
+    assert!(!is_error(&r), "{r}");
+    let r = client
+        .call("save_diff", json!({"old": "a.json", "new": "missing.json"}))
+        .await;
+    assert!(error_text(&r).contains("missing.json"));
+}
+
+#[tokio::test]
+async fn save_check_urls_reports_dead_urls_as_a_normal_result() {
+    let (mut client, root) = without_editor(Some(fake_fetcher())).await;
+    write(&root, "save.json", SAVE_A);
+    let r = client
+        .call(
+            "save_check_urls",
+            json!({"save": "save.json", "retries": 0}),
+        )
+        .await;
+    assert!(!is_error(&r), "{r}");
+    let doc = body(&r);
+    assert_eq!(doc["summary"]["total"], 2);
+    assert_eq!(doc["summary"]["dead"], 1);
+    assert_eq!(doc["summary"]["ok"], 1);
+    let urls = doc["urls"].as_array().unwrap();
+    let dead = urls.iter().find(|u| u["result"] == "dead").unwrap();
+    assert_eq!(dead["url"], "https://example.com/dead.png");
+    assert_eq!(dead["status"], 404);
+
+    // Host filters work as in the CLI.
+    let r = client
+        .call(
+            "save_check_urls",
+            json!({"save": "save.json", "skip_host": ["example.com"]}),
+        )
+        .await;
+    assert_eq!(body(&r)["summary"]["skipped"], 2);
+
+    // Failures: bad arguments, an unreadable save.
+    let r = client
+        .call(
+            "save_check_urls",
+            json!({"save": "save.json", "concurrency": 0}),
+        )
+        .await;
+    assert!(error_text(&r).contains("concurrency"));
+    let r = client
+        .call(
+            "save_check_urls",
+            json!({"save": "save.json", "timeout": 601}),
+        )
+        .await;
+    assert!(error_text(&r).contains("timeout"));
+    let r = client
+        .call("save_check_urls", json!({"save": "gone.json"}))
+        .await;
+    assert!(error_text(&r).contains("gone.json"));
+}
+
+#[tokio::test]
+async fn save_check_urls_reports_a_failing_client() {
+    let failing: save_tools::FetcherFactory = Arc::new(|_| Err("no client today".to_owned()));
+    let (mut client, root) = without_editor(Some(failing)).await;
+    write(&root, "save.json", SAVE_A);
+    let r = client
+        .call("save_check_urls", json!({"save": "save.json"}))
+        .await;
+    assert_eq!(error_text(&r), "no client today");
+}
+
+#[tokio::test]
+async fn manifest_show_reads_the_manifest_in_the_root() {
+    let (mut client, root) = without_editor(None).await;
+    // Missing: the empty manifest, as the CLI shows.
+    let r = client.call("manifest_show", json!({})).await;
+    assert!(!is_error(&r), "{r}");
+    assert_eq!(body(&r)["entries"], json!([]));
+
+    let manifest = r#"{
+  "version": 1,
+  "entries": [
+    {
+      "path": "a.png",
+      "cloud_path": "Game/a.png",
+      "sha1": "0123456789ABCDEF0123456789ABCDEF01234567",
+      "size": 3,
+      "url": "https://example.invalid/ugc/1/0123456789ABCDEF0123456789ABCDEF01234567/"
+    }
+  ]
+}
+"#;
+    write(&root, "ttskit.manifest.json", manifest);
+    let r = client.call("manifest_show", json!({})).await;
+    assert!(!is_error(&r), "{r}");
+    assert_eq!(body(&r)["entries"][0]["path"], "a.png");
+    write(&root, "other.json", manifest);
+    let r = client
+        .call("manifest_show", json!({"manifest": "other.json"}))
+        .await;
+    assert_eq!(body(&r)["entries"][0]["cloud_path"], "Game/a.png");
+
+    write(&root, "broken.json", "{");
+    let r = client
+        .call("manifest_show", json!({"manifest": "broken.json"}))
+        .await;
+    assert!(is_error(&r));
+    let r = client
+        .call("manifest_show", json!({"manifest": "absent.json"}))
+        .await;
+    assert!(is_error(&r));
+}
+
+#[tokio::test]
+async fn every_save_tool_refuses_paths_outside_the_root() {
+    let (mut client, root) = without_editor(Some(fake_fetcher())).await;
+    write(&root, "save.json", SAVE_A);
+    let outside = tempfile::tempdir().unwrap();
+    let outside_save = outside.path().join("save.json");
+    std::fs::write(&outside_save, SAVE_A).unwrap();
+    let outside_text = outside_save.to_str().unwrap();
+
+    for path in ["../save.json", outside_text] {
+        let calls = [
+            ("save_scan", json!({"save": path})),
+            ("save_lint", json!({"save": path})),
+            ("save_lint", json!({"save": "save.json", "config": path})),
+            ("save_diff", json!({"old": path, "new": "save.json"})),
+            ("save_diff", json!({"old": "save.json", "new": path})),
+            ("save_check_urls", json!({"save": path})),
+            ("manifest_show", json!({"manifest": path})),
+        ];
+        for (tool, args) in calls {
+            let r = client.call(tool, args.clone()).await;
+            let error = error_text(&r);
+            assert!(
+                error.contains("`..`") || error.contains("outside the project root"),
+                "{tool} {args}: {error}"
+            );
+        }
+    }
 }

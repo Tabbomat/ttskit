@@ -377,12 +377,19 @@ the game and check that the images load, run `ttskit cloud status` and look at
 | `send_custom_message` | Send a JSON object to the game's `onExternalMessage` |
 | `get_console` | Read buffered `print` output, Lua errors, custom messages, saves and loads |
 | `save_and_play` | Send the scripts and UI of an unpacked tree and reload the game |
+| `save_scan` | List the asset URLs of a save, grouped by host (`cloud scan --json`) |
+| `save_lint` | Check a save for common mistakes (`save lint --json`) |
+| `save_diff` | Compare two saves semantically (`save diff --json`) |
+| `save_check_urls` | Request every asset URL of a save and report dead ones (`save check-urls --json`; uses the network) |
+| `manifest_show` | Show the asset manifest (`cloud manifest --json`) |
+
+The last five tools are read-only, work on local files and need no running game. Their results are the JSON the matching CLI commands print with `--json`.
 
 Safeguards and limits:
 
 - `save_and_play` never sends on the first call: it returns the diff and a fingerprint of the plan. Only a second call with `confirm` set to that fingerprint sends, and only if the plan is still the same. Deleting a script or UI that the tree lacks also needs `allow_delete`.
-- `save_and_play` only reads paths inside the server's root: the working directory, or `--root DIR`. Paths with `..` are refused.
-- The server holds the editor port (39998) for its whole life and buffers what the game sends, also between tool calls (1000 events and 4 MiB by default; `--console-buffer` changes the count). Every event has a sequence number, so `get_console` with `since` returns only what is new. While the server runs, `ttskit watch`, `ttskit editor console` and other editor integrations cannot receive from the game; the server does not start if one of them already listens. See [docs/editor-api.md](docs/editor-api.md#ttskit-mcp) for integrations that listen on the wildcard address.
+- Every path argument of every tool (`save_and_play`, and the save tools above) must be inside the server's root: the working directory, or `--root DIR`. Paths with `..`, absolute paths outside the root and symlinks leading out of it are refused. The save tools write no files.
+- The server holds the editor port (39998) for its whole life and buffers what the game sends, also between tool calls (1000 events and 4 MiB by default; `--console-buffer` changes the count). Every event has a sequence number, so `get_console` with `since` returns only what is new. While the server runs, `ttskit watch`, `ttskit editor console` and other editor integrations cannot receive from the game; if one of them already listens, the server still starts, but the editor tools fail with that reason (`get_status` shows `editorAvailable: false`) while the save tools keep working. See [docs/editor-api.md](docs/editor-api.md#ttskit-mcp) for integrations that listen on the wildcard address.
 - `--game-port`, `--editor-port` and `--timeout` work as for the `editor` commands.
 
 Claude Code, from the directory with the unpacked mod (writes `.mcp.json` for the project):

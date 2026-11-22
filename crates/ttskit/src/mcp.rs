@@ -24,6 +24,9 @@ use ttskit_editor::{EditorError, FieldChange, MessageSource, ScriptPlan};
 
 use self::buffer::{EventKind, Query};
 use self::hub::{Hub, Replies};
+use self::save_tools::{
+    ManifestShowArgs, SaveCheckUrlsArgs, SaveDiffArgs, SaveLintArgs, SaveScanArgs,
+};
 
 use crate::editor::{
     CliError, Endpoints, desired_from_tree, editor_err, exec_json, plan_json, runtime, write_plan,
@@ -39,12 +42,15 @@ const MAX_CONSOLE_LIMIT: usize = 1000;
 
 const INSTRUCTIONS: &str = "Unofficial client for the Tabletop Simulator External Editor API \
 (not affiliated with Berserk Games). The game must be running and listening on its External \
-Editor port 39999; this server holds port 39998 for its whole life, so no other editor \
-integration can use it meanwhile. Everything the game sends without being asked (print output, \
+Editor port 39999; this server holds port 39998 for its whole life (if it is in use, \
+the editor tools fail and say so; get_status reports editorAvailable false). Everything the game sends without being asked (print output, \
 Lua errors, custom messages from sendExternalMessage, and the game being saved or loaded) is \
 buffered with increasing sequence numbers (seq); read it with get_console and pass the returned \
 nextSince as `since` next time to get only newer events. execute_lua and save_and_play report \
-lastSeq for the same purpose.";
+lastSeq for the same purpose. The save_scan, save_lint, save_diff, save_check_urls and \
+manifest_show tools are read-only, work on files inside the server's root and need no game \
+(only save_check_urls uses the network); their results are the JSON of the matching ttskit \
+commands.";
 
 #[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
@@ -142,8 +148,11 @@ fn strip_verbatim(path: PathBuf) -> PathBuf {
 struct EditorServer {
     ep: Endpoints,
     root: PathBuf,
-    /// Holds the editor port and buffers what the game sends.
-    hub: Arc<Hub>,
+    /// Holds the editor port and buffers what the game sends; the error says
+    /// why the port could not be bound. The save tools do not need it.
+    hub: Result<Arc<Hub>, String>,
+    /// Makes the HTTP client of `save_check_urls`.
+    fetcher: save_tools::FetcherFactory,
     /// Serializes the tool calls that send requests: the game ties no reply
     /// to its request, so two of them must not wait at the same time.
     lock: Arc<tokio::sync::Mutex<()>>,
@@ -151,25 +160,46 @@ struct EditorServer {
 }
 
 impl EditorServer {
-    /// Bind the editor port; the server does not start if it is in use.
-    async fn start(ep: Endpoints, root: PathBuf, max_events: usize) -> Result<Self, CliError> {
+    /// Try to bind the editor port. The server starts either way: if the port
+    /// is in use, the editor tools fail with the reason and the save tools work.
+    async fn start(ep: Endpoints, root: PathBuf, max_events: usize) -> Self {
         let hub = Hub::start(ep.editor, ep.timeout, max_events)
             .await
-            .map_err(editor_err)?;
-        Ok(Self {
+            .map_err(|e| editor_err(e).message);
+        Self {
             ep,
             root,
             hub,
+            fetcher: save_tools::http_fetcher(),
             lock: Arc::default(),
             tool_router: Self::tool_router(),
+        }
+    }
+
+    /// Use another HTTP client factory for `save_check_urls` (tests).
+    #[cfg(test)]
+    fn with_fetcher(mut self, fetcher: save_tools::FetcherFactory) -> Self {
+        self.fetcher = fetcher;
+        self
+    }
+
+    /// The hub, or the error every editor tool returns when the editor port
+    /// could not be bound.
+    fn hub(&self) -> Result<&Arc<Hub>, CliError> {
+        self.hub.as_ref().map_err(|why| {
+            CliError::from(format!(
+                "the editor port {} is unavailable, so the editor tools do not work (the save tools still do): {why}",
+                self.ep.editor.port()
+            ))
         })
     }
 
     /// Start receiving replies; an error while the listener is down.
     fn replies(&self) -> Result<Replies<'_>, CliError> {
-        match self.hub.not_listening() {
+        let hub = self.hub()?;
+        match hub.not_listening() {
             Some(error) => Err(error.into()),
-            None => Ok(self.hub.replies()),
+            None => Ok(hub.replies()),
         }
     }
 
@@ -186,6 +216,7 @@ impl EditorServer {
         let ep = self.ep;
         let fetched = self.fetch().await;
         let mut doc = json!({
+            "editorAvailable": self.hub.is_ok(),
             "gameReachable": fetched.is_ok(),
             "savePath": null,
             "objectsWithScripts": null,
@@ -201,8 +232,13 @@ impl EditorServer {
             }
             Err(e) => doc["error"] = json!(e.message),
         }
-        if let (Value::Object(doc), Value::Object(hub)) = (&mut doc, self.hub.status()) {
-            doc.extend(hub);
+        match &self.hub {
+            Ok(hub) => {
+                if let (Value::Object(doc), Value::Object(hub)) = (&mut doc, hub.status()) {
+                    doc.extend(hub);
+                }
+            }
+            Err(why) => doc["editorError"] = json!(why),
         }
         doc
     }
@@ -250,7 +286,8 @@ impl EditorServer {
     }
 
     async fn console(&self, args: GetConsoleArgs) -> Result<Value, CliError> {
-        let last = self.hub.last_seq();
+        let hub = self.hub()?;
+        let last = hub.last_seq();
         if let Some(since) = args.since.filter(|s| *s > last) {
             return Err(format!(
                 "since {since} is ahead of the newest event ({last}); the server may have restarted. Omit since, or pass 0 for everything buffered"
@@ -272,14 +309,14 @@ impl EditorServer {
         let cap = Duration::from_millis(MAX_CONSOLE_MS);
         let wait = Duration::from_millis(args.wait_ms.unwrap_or(0)).min(cap);
         let quiet = Duration::from_millis(args.quiet_ms.unwrap_or(DEFAULT_QUIET_MS));
-        let mut head = self.hub.watch_head();
-        let mut page = self.hub.query(&q);
+        let mut head = hub.watch_head();
+        let mut page = hub.query(&q);
         if page.events.is_empty() && !wait.is_zero() {
             let start = tokio::time::Instant::now();
             let first_by = start + wait;
             while page.events.is_empty() {
                 match tokio::time::timeout_at(first_by, head.changed()).await {
-                    Ok(Ok(())) => page = self.hub.query(&q),
+                    Ok(Ok(())) => page = hub.query(&q),
                     Ok(Err(_)) | Err(_) => break,
                 }
             }
@@ -289,7 +326,7 @@ impl EditorServer {
                 let until = (tokio::time::Instant::now() + quiet).min(end_by);
                 let seen = page.events.len();
                 while let Ok(Ok(())) = tokio::time::timeout_at(until, head.changed()).await {
-                    page = self.hub.query(&q);
+                    page = hub.query(&q);
                     if page.events.len() > seen {
                         break;
                     }
@@ -322,6 +359,7 @@ impl EditorServer {
         let config = Some(self.root.join("ttskit.toml")).filter(|p| p.exists());
         let desired = desired_from_tree(&dir, includes, config.as_deref())?;
         // Replies for the whole call, so that the reload is noticed.
+        let hub = self.hub()?;
         let replies = self.replies()?;
         replies.expect_scripts_reply();
         let live = ttskit_editor::fetch_scripts(&replies, ep.game, ep.timeout)
@@ -368,7 +406,7 @@ impl EditorServer {
                 "the source has no script or UI for objects that have one in the game, so Save & Play would delete them (marked `delete` in the diff); nothing was sent. Add the missing files, or pass allow_delete: true if that is intended",
             );
         }
-        let before = self.hub.last_seq();
+        let before = hub.last_seq();
         ttskit_editor::send(ep.game, &plan.message(), ep.timeout)
             .await
             .map_err(editor_err)?;
@@ -377,7 +415,7 @@ impl EditorServer {
         let reloaded = wait_for_reload(&replies, ep.timeout).await?;
         let quiet = Duration::from_millis(args.quiet_ms.unwrap_or(DEFAULT_QUIET_MS));
         wait_quiet(&replies, ep.timeout, quiet, ep.timeout).await?;
-        let page = self.hub.query(&Query {
+        let page = hub.query(&Query {
             since: Some(before),
             kinds: Some(vec![EventKind::Print, EventKind::Error]),
             limit: usize::MAX,
@@ -536,6 +574,7 @@ impl EditorServer {
             Ok(r) => r,
             Err(e) => return failure_of(&e),
         };
+        let last_seq = || self.hub().map_or(0, |h| h.last_seq());
         let outcome =
             ttskit_editor::execute_lua(&replies, ep.game, &guid, &args.code, ep.timeout, quiet)
                 .await;
@@ -543,7 +582,7 @@ impl EditorServer {
         match outcome {
             Ok(outcome) => {
                 let mut doc = exec_json(&guid, &outcome);
-                doc["lastSeq"] = json!(self.hub.last_seq());
+                doc["lastSeq"] = json!(last_seq());
                 if outcome.errors.is_empty() {
                     success(&doc)
                 } else {
@@ -574,6 +613,9 @@ impl EditorServer {
     ) -> CallToolResult {
         let _guard = self.lock.lock().await;
         let ep = self.ep;
+        if let Err(e) = self.hub() {
+            return failure_of(&e);
+        }
         match ttskit_editor::send_custom(ep.game, Value::Object(args.message), ep.timeout).await {
             Ok(()) => success(&json!({ "sent": true })),
             Err(e) => failure_of(&editor_err(e)),
@@ -589,6 +631,53 @@ impl EditorServer {
             Ok(doc) => success(&doc),
             Err(e) => failure_of(&e),
         }
+    }
+
+    #[tool(
+        description = "List the asset URLs (images, models, audio, ...) of a save file, grouped by host class, with every place that uses them. Local, read-only, needs no game; the path must be inside the server's root. Same JSON as `ttskit cloud scan --json`."
+    )]
+    async fn save_scan(&self, Parameters(args): Parameters<SaveScanArgs>) -> CallToolResult {
+        let root = self.root.clone();
+        save_tools::run(move || save_tools::scan(&root, args)).await
+    }
+
+    #[tool(
+        description = "Check a save file for common mistakes (duplicate GUIDs, positions out of bounds, ...) with the rules of `ttskit save lint`. Findings are a normal result (see the summary); only an unreadable save, a bad config or an unknown rule id is an error. Local, read-only, needs no game; paths must be inside the server's root. Without `config`, ttskit.toml in the root is used if it exists."
+    )]
+    async fn save_lint(&self, Parameters(args): Parameters<SaveLintArgs>) -> CallToolResult {
+        let root = self.root.clone();
+        save_tools::run(move || save_tools::lint(&root, args)).await
+    }
+
+    #[tool(
+        description = "Compare two save files semantically and list the objects added, removed and changed (same JSON as `ttskit save diff --json`). Equal saves give an empty change list. Local, read-only, needs no game; paths must be inside the server's root."
+    )]
+    async fn save_diff(&self, Parameters(args): Parameters<SaveDiffArgs>) -> CallToolResult {
+        let root = self.root.clone();
+        save_tools::run(move || save_tools::diff(&root, args)).await
+    }
+
+    #[tool(
+        description = "Request every asset URL of a save file over the network (HEAD, or ranged GET with verify_content) and report which ones are ok, redirected, dead, unreachable or skipped (same JSON as `ttskit save check-urls --json`). Dead or unreachable URLs are a normal result, not an error. Needs internet access and can take a while; the save path must be inside the server's root."
+    )]
+    async fn save_check_urls(
+        &self,
+        Parameters(args): Parameters<SaveCheckUrlsArgs>,
+    ) -> CallToolResult {
+        let root = self.root.clone();
+        let fetcher = self.fetcher.clone();
+        save_tools::run(move || save_tools::check_urls(&root, &fetcher, args)).await
+    }
+
+    #[tool(
+        description = "Show the asset manifest (ttskit.manifest.json) that maps uploaded files to URLs, as `ttskit cloud manifest --json` does. A missing default manifest gives the empty one. Local, read-only; the path must be inside the server's root."
+    )]
+    async fn manifest_show(
+        &self,
+        Parameters(args): Parameters<ManifestShowArgs>,
+    ) -> CallToolResult {
+        let root = self.root.clone();
+        save_tools::run(move || save_tools::manifest_show(&root, args)).await
     }
 }
 
@@ -621,12 +710,15 @@ where
     Ok(())
 }
 
-/// `ttskit mcp`: hold the editor port and serve on stdin and stdout until
-/// stdin closes. `max_events` bounds the event buffer.
+/// `ttskit mcp`: hold the editor port (the editor tools are unavailable if it
+/// cannot be bound) and serve on stdin and stdout until stdin closes. `max_events` bounds the event buffer.
 pub fn run(root: Option<&Path>, ep: Endpoints, max_events: usize) -> Result<(), CliError> {
     let root = resolve_root(root)?;
     runtime()?.block_on(async {
-        let server = EditorServer::start(ep, root, max_events).await?;
+        let server = EditorServer::start(ep, root, max_events).await;
+        if let Err(why) = &server.hub {
+            eprintln!("ttskit mcp: the editor tools are unavailable: {why}");
+        }
         serve_on(server, rmcp::transport::stdio()).await
     })
 }
@@ -636,3 +728,4 @@ mod tests;
 
 mod buffer;
 mod hub;
+mod save_tools;

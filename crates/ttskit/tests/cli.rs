@@ -1032,7 +1032,7 @@ fn mcp_serves_on_stdio_and_exits_zero_when_stdin_closes() {
     assert_eq!(response(1)["result"]["serverInfo"]["name"], "ttskit");
     send(serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
     send(serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}));
-    assert_eq!(response(2)["result"]["tools"].as_array().unwrap().len(), 6);
+    assert_eq!(response(2)["result"]["tools"].as_array().unwrap().len(), 11);
     send(serde_json::json!({
         "jsonrpc": "2.0", "id": 3, "method": "tools/call",
         "params": {"name": "get_status", "arguments": {}}
@@ -1041,6 +1041,7 @@ fn mcp_serves_on_stdio_and_exits_zero_when_stdin_closes() {
     let text = result["content"][0]["text"].as_str().unwrap();
     let status: serde_json::Value = serde_json::from_str(text).unwrap();
     assert_eq!(status["gameReachable"], false);
+    assert_eq!(status["editorAvailable"], true);
     assert!(status["error"].is_string());
 
     drop(stdin);
@@ -1069,18 +1070,64 @@ fn mcp_with_a_missing_root_fails() {
 }
 
 #[test]
-fn mcp_fails_when_the_editor_port_is_in_use() {
-    // Something accepts connections on the port, so the server must not start.
+fn mcp_starts_without_the_editor_when_the_port_is_in_use() {
+    // Something accepts connections on the port: the editor tools are
+    // unavailable, but the server runs (and ends when stdin is closed).
     let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = held.local_addr().unwrap().port().to_string();
-    let output = ttskit(&["mcp", "--editor-port", &port]);
-    assert_eq!(output.status.code(), Some(1));
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ttskit"))
+        .args(["mcp", "--editor-port", &port])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    use std::io::Write;
+    let requests = [
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": {"name": "test-client", "version": "0"}
+            }
+        }),
+        serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": "get_status", "arguments": {}}
+        }),
+    ];
+    for request in requests {
+        writeln!(stdin, "{request}").unwrap();
+    }
+    stdin.flush().unwrap();
+    // The server answers what it has read, then ends at the end of input.
+    drop(stdin);
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{:?} {} {}",
+        output.status,
+        stderr(&output),
+        stdout(&output)
+    );
     assert!(
         stderr(&output).contains("already in use"),
         "{}",
         stderr(&output)
     );
-    assert!(stdout(&output).is_empty());
+    let out = stdout(&output);
+    let status_line = out
+        .lines()
+        .find(|l| l.contains("\"id\":2"))
+        .unwrap_or_else(|| panic!("no status in {out:?}"));
+    let response: serde_json::Value = serde_json::from_str(status_line).unwrap();
+    let text = response["result"]["content"][0]["text"].as_str().unwrap();
+    let status: serde_json::Value = serde_json::from_str(text).unwrap();
+    assert_eq!(status["editorAvailable"], false);
 }
 
 #[test]
