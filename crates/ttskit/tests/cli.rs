@@ -344,6 +344,7 @@ fn save_unpack_json_has_the_documented_shape() {
             "objects",
             "files",
             "mixed_eol",
+            "assets_mapped",
             "dry_run",
             "create",
             "change",

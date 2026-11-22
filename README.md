@@ -56,6 +56,8 @@ ttskit save unpack mysave.json -o mymod
 ttskit watch mymod --include lib
 ```
 
+Sources can name pushed assets by `asset:{PATH}` placeholders (PATH relative to the project's local directory) instead of URLs. `ttskit save pack` resolves them from `ttskit.manifest.json` (config: `--config`, else `ttskit.toml` in the current directory) and refuses stale entries unless `--allow-stale`; `ttskit save unpack --assets` writes placeholders for URLs that exactly match a manifest entry. See [docs/pack-layout.md](docs/pack-layout.md#asset-placeholders).
+
 All subcommands share `--game-port`, `--editor-port`, `--timeout` and `--json`, and exit with 0 (success), 1 (failure), 2 (usage error) or 3 (the game is not reachable). Messages the game sends while no `ttskit` listener is running are lost. Details, observed behaviour and limits: [docs/editor-api.md](docs/editor-api.md).
 
 Shell completions are not generated yet (tracked in the issue tracker); until then `ttskit editor --help` and `ttskit editor <command> --help` list every flag.

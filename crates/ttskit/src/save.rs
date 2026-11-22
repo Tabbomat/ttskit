@@ -40,11 +40,15 @@ pub fn unpack(
     output: &Path,
     safety: Safety,
     json: bool,
+    assets: Option<&ttskit_core::AssetMap>,
     out: &mut dyn Write,
 ) -> Result<(), String> {
     let bytes = std::fs::read(save).map_err(|e| format!("cannot read {}: {e}", save.display()))?;
-    let unpacked = ttskit_core::unpack(&bytes, Eol::native())
-        .map_err(|e| format!("{}: {e}", save.display()))?;
+    let unpacked = match assets {
+        Some(map) => ttskit_core::unpack_with_assets(&bytes, Eol::native(), map),
+        None => ttskit_core::unpack(&bytes, Eol::native()),
+    }
+    .map_err(|e| format!("{}: {e}", save.display()))?;
     let options = WriteOptions {
         force: safety.force,
         clean: safety.clean,
@@ -70,6 +74,7 @@ pub fn unpack(
             "objects": report.objects,
             "files": report.files,
             "mixed_eol": report.mixed_eol,
+            "assets_mapped": report.assets_mapped,
             "dry_run": safety.dry_run,
             "create": plan.create,
             "change": plan.change,
@@ -101,6 +106,14 @@ pub fn unpack(
             plan.remove.len(),
         )
         .map_err(io)?;
+        if assets.is_some() {
+            writeln!(
+                out,
+                "Replaced {} URLs by asset placeholders",
+                report.assets_mapped
+            )
+            .map_err(io)?;
+        }
         for path in &report.mixed_eol {
             writeln!(
                 out,
@@ -190,6 +203,16 @@ pub(crate) fn write_output(output: &Path, bytes: &[u8], replace: bool) -> Result
     Ok(())
 }
 
+/// How `pack` finds the project and reports.
+#[derive(Debug, Clone, Copy)]
+pub struct PackFormat<'a> {
+    /// The project config that resolves asset placeholders (default: the
+    /// config in the current directory, if any).
+    pub config: Option<&'a Path>,
+    /// Print JSON instead of text.
+    pub json: bool,
+}
+
 /// Packs the tree in `dir` into the save file `output`. Warnings go to `err`,
 /// the summary to `out`. An existing `output` is only overwritten with
 /// `safety.force`; with `safety.dry_run` nothing is written.
@@ -198,16 +221,17 @@ pub fn pack(
     output: &Path,
     safety: Safety,
     options: &ttskit_core::PackOptions,
-    json: bool,
+    format: PackFormat<'_>,
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> Result<(), String> {
+    let PackFormat { config, json } = format;
     let io = |e: std::io::Error| e.to_string();
     // Cheap refusal before the tree is read; repeated below with the content.
     if !safety.force && output.exists() {
         inspect_target(output, &[], false)?;
     }
-    let packed = ttskit_core::pack(dir, options).map_err(|e| e.to_string())?;
+    let packed = crate::assets::pack_resolving(dir, options, config)?;
     let target = inspect_target(output, &packed.bytes, safety.force)?;
     if !safety.dry_run {
         let replace = !matches!(target, Target::Create);
@@ -223,6 +247,12 @@ pub fn pack(
             "objects": packed.objects,
             "bytes": packed.bytes.len(),
             "warnings": packed.warnings,
+            "assets": packed.assets.iter().map(|a| json!({
+                "path": a.path,
+                "url": a.url,
+                "stale": a.stale,
+                "count": a.count,
+            })).collect::<Vec<_>>(),
             "dry_run": safety.dry_run,
             "action": target.name(),
         });
@@ -234,6 +264,18 @@ pub fn pack(
             writeln!(out, "Dry run: nothing was written.").map_err(io)?;
             if !matches!(target, Target::Unchanged) {
                 writeln!(out, "{} {}", target.name(), output.display()).map_err(io)?;
+            }
+            for asset in &packed.assets {
+                writeln!(
+                    out,
+                    "asset {} -> {} ({} use{}){}",
+                    asset.path,
+                    asset.url,
+                    asset.count,
+                    if asset.count == 1 { "" } else { "s" },
+                    if asset.stale { " [stale]" } else { "" },
+                )
+                .map_err(io)?;
             }
         }
         let verb = if safety.dry_run {
@@ -254,6 +296,15 @@ pub fn pack(
             },
         )
         .map_err(io)?;
+        let total: usize = packed.assets.iter().map(|a| a.count).sum();
+        if !safety.dry_run && total > 0 {
+            writeln!(
+                out,
+                "Resolved {total} asset placeholders ({} distinct)",
+                packed.assets.len()
+            )
+            .map_err(io)?;
+        }
     }
     Ok(())
 }

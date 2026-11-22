@@ -1,3 +1,4 @@
+mod assets;
 mod check_urls;
 mod cloud;
 mod editor;
@@ -1108,6 +1109,13 @@ struct SaveUnpackCli {
     /// Print the files that would be created, changed or removed and write nothing
     #[arg(long)]
     dry_run: bool,
+    /// Replace the URLs of pushed assets (from the manifest of the project)
+    /// by `asset:{PATH}` placeholders; only the exact URL text is mapped
+    #[arg(long)]
+    assets: bool,
+    /// With --assets: the project config [default: ttskit.toml in the current directory if it exists]
+    #[arg(long, value_name = "FILE", requires = "assets")]
+    config: Option<PathBuf>,
     /// Print machine-readable JSON instead of text
     #[arg(long)]
     json: bool,
@@ -1133,6 +1141,14 @@ struct SavePackCli {
     /// (Name.xml) from this directory; repeatable, searched in order
     #[arg(long, value_name = "LIB_DIR")]
     include: Vec<PathBuf>,
+    /// The project config whose manifest resolves `asset:{PATH}` placeholders
+    /// [default: ttskit.toml in the current directory if it exists]
+    #[arg(long, value_name = "FILE")]
+    config: Option<PathBuf>,
+    /// Resolve placeholders of assets that changed since they were pushed
+    /// (with their old URL and a warning) instead of failing
+    #[arg(long)]
+    allow_stale: bool,
     /// Print machine-readable JSON instead of text
     #[arg(long)]
     json: bool,
@@ -1548,16 +1564,27 @@ fn run_simple(command: Command) -> Result<(), CliError> {
                     force,
                     clean,
                     dry_run,
+                    assets,
+                    config,
                     json,
                 }),
         } => {
+            let map = if assets {
+                let map = assets::load_asset_map(config.as_deref())?;
+                if map.is_empty() {
+                    return Err("--assets: no ttskit.toml with manifest entries that have local paths was found; run from the project directory or pass --config".into());
+                }
+                Some(map)
+            } else {
+                None
+            };
             let mut out = std::io::stdout().lock();
             let safety = save::Safety {
                 force,
                 clean,
                 dry_run,
             };
-            save::unpack(&save, &output, safety, json, &mut out)?;
+            save::unpack(&save, &output, safety, json, map.as_ref(), &mut out)?;
             out.flush().map_err(|e| e.to_string().into())
         }
         Command::Save {
@@ -1569,6 +1596,8 @@ fn run_simple(command: Command) -> Result<(), CliError> {
                     dry_run,
                     keep_eol,
                     include,
+                    config,
+                    allow_stale,
                     json,
                 }),
         } => {
@@ -1581,9 +1610,21 @@ fn run_simple(command: Command) -> Result<(), CliError> {
             };
             let options = ttskit_core::PackOptions {
                 includes: include,
+                allow_stale,
                 ..ttskit_core::PackOptions::new(keep_eol)
             };
-            save::pack(&dir, &output, safety, &options, json, &mut out, &mut err)?;
+            save::pack(
+                &dir,
+                &output,
+                safety,
+                &options,
+                save::PackFormat {
+                    config: config.as_deref(),
+                    json,
+                },
+                &mut out,
+                &mut err,
+            )?;
             out.flush().map_err(|e| e.to_string().into())
         }
         Command::Cloud {

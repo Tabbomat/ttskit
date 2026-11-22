@@ -468,14 +468,52 @@ and the bundle was run once with a stand-alone Lua interpreter):
    script runs (for example with `print` calls in `onLoad`) and that the UI
    shows the included part.
 
+## Asset placeholders
+
+An unpacked tree may name a pushed asset by a placeholder instead of its URL, so
+the sources do not change when the asset is uploaded again and its URL changes.
+
+`ttskit save pack DIR -o FILE [--config FILE] [--allow-stale]`
+
+- **Syntax:** `asset:{PATH}`. `PATH` is relative to the project's local
+  directory (`[local] dir` of `ttskit.toml`), uses `/` as separator and is
+  matched exactly (case included). A placeholder without a closing `}`, with an
+  empty path or with a line break inside is left as it is.
+- **Where:** in any string value of the JSON files, and in Lua and XML files.
+  Placeholders are replaced after bundling, so also inside modules inlined with
+  `--include`.
+- **Which URL:** the one in the project manifest (`ttskit.manifest.json`, next to
+  the config) for the entry whose `path` is `PATH`. The config is `--config`, or
+  `ttskit.toml` in the current directory if it exists; without a config (or
+  without a manifest file) the map is empty. The config and the local files are
+  only read when the tree contains placeholders. If several entries have the same
+  path, the one whose SHA1 equals the local file wins, else the first.
+- **Errors:** a placeholder without an entry fails the pack, and so does an entry
+  that is stale. All offending paths are listed and nothing is written.
+- **Stale:** an entry is stale when its local file exists and its SHA1 differs
+  from the one recorded at push. A missing local file is not stale (the pushed
+  URL is still valid). Push again (`ttskit cloud sync push`) or pass
+  `--allow-stale` to use the old URL anyway; pack then prints a warning.
+- **Dry run:** `--dry-run` also prints one line per resolved asset, for example
+  `asset Boards/a.png -> URL (2 uses)`, with `[stale]` appended where it applies.
+  Without `--dry-run`, pack prints `Resolved N asset placeholders (M distinct)`
+  when there were any. With `--json` the result has an `assets` array of
+  `{path, url, stale, count}`.
+
+`ttskit save unpack SAVE -o DIR --assets [--config FILE]` goes the other way: every
+occurrence of the URL of a manifest entry with a local path, in any string, is
+written as its placeholder. Only the exact URL text is mapped; the same URL spelled
+differently (`http` instead of `https`, another case or a different query) stays
+a URL. It is an error when no config or no manifest entry with a local path is
+found. Without `--assets`, unpack leaves URLs alone.
+
 ## Reserved for later features
 
 - **Bundling (#9):** implemented, see [Bundling](#bundling). The layout above
   does not change.
-- **Asset placeholders (#47):** an `asset:<path>` placeholder may appear in any
-  string, in `object.json` and `save.json` as well as inside Lua and XML files.
-  Markers and placeholders use different prefixes and different fields, so they
-  cannot be confused.
+- **Asset placeholders (#47):** implemented, see
+  [Asset placeholders](#asset-placeholders). Markers and placeholders use
+  different prefixes and different fields, so they cannot be confused.
 
 ## Prior art: tts-save
 
