@@ -367,7 +367,7 @@ the game and check that the images load, run `ttskit cloud status` and look at
 
 ## MCP server
 
-`ttskit mcp` runs a [Model Context Protocol](https://modelcontextprotocol.io/) server on stdio, so an AI assistant can work with the running game: read scripts, run Lua, push an edited tree with Save & Play and read the errors. It is a client of the same External Editor API as the `editor` commands, with the same safeguards; nothing here needs Steam.
+`ttskit mcp` runs a [Model Context Protocol](https://modelcontextprotocol.io/) server on stdio, so an AI assistant can work with the running game (read scripts, run Lua, push an edited tree with Save & Play, read the errors) and with the files of a mod project (inspect, lint, diff and check saves, rewrite URLs, build images, and manage the Steam Cloud). The editor tools are a client of the same External Editor API as the `editor` commands, with the same safeguards. The other tools run the same code as the matching CLI commands and return the JSON they print with `--json`.
 
 | Tool | What it does |
 | --- | --- |
@@ -376,29 +376,40 @@ the game and check that the images load, run `ttskit cloud status` and look at
 | `execute_lua` | Run Lua in Global or an object and return prints and Lua errors |
 | `send_custom_message` | Send a JSON object to the game's `onExternalMessage` |
 | `get_console` | Read buffered `print` output, Lua errors, custom messages, saves and loads |
-| `save_and_play` | Send the scripts and UI of an unpacked tree and reload the game |
+| `save_and_play` | Send the scripts and UI of an unpacked tree and reload the game (plan first, then confirm) |
 | `save_scan` | List the asset URLs of a save, grouped by host (`cloud scan --json`) |
 | `save_lint` | Check a save for common mistakes (`save lint --json`) |
 | `save_diff` | Compare two saves semantically (`save diff --json`) |
 | `save_check_urls` | Request every asset URL of a save and report dead ones (`save check-urls --json`; uses the network) |
 | `manifest_show` | Show the asset manifest (`cloud manifest --json`) |
-| `save_rewrite_urls_plan` / `save_rewrite_urls_apply` | Replace asset URLs in a save from a mapping or manifest, in two steps (`save rewrite-urls`) |
-| `image_build_plan` / `image_build_apply` | Build the images of the project config's pipeline, in two steps (`image build`) |
+| `save_rewrite_urls_plan` / `_apply` | Replace asset URLs in a save from a mapping or manifest (`save rewrite-urls`) |
 | `image_check` | Report images that are too large for the game (`image check --json`) |
+| `image_build_plan` / `_apply` | Build the images of the project config's pipeline (`image build`) |
 | `cloud_list` | List the Steam Cloud files, optionally of one folder (`cloud list --json`) |
 | `cloud_status` | Compare a local directory with a cloud folder (`cloud status --json`) |
+| `cloud_upload_plan` / `_apply` | Upload one local file to the cloud and record it in the manifest (`cloud upload`) |
+| `cloud_sync_push_plan` / `_apply` | Upload the new local files of the project config's folder (`cloud sync push`) |
+| `cloud_sync_pull_plan` / `_apply` | Download the cloud folder's files into the project's local directory (`cloud sync pull`) |
 
-`image_check`, `image_build_plan` and `image_build_apply` exist only in builds with the `image` feature; its findings, and the files it could not read (`errors`), are in the JSON result, not tool errors. Inputs may be files or directories inside the root.
+Which tools exist depends on the build:
 
-`cloud_list` and `cloud_status` exist only in builds with the `steam` feature (other builds do not list them). They are read-only and open Steam for each call, never at server start: Steam must be running and logged in, otherwise the call fails with the reason. Cloud calls run one at a time. `cloud_status` reads the project config (`ttskit.toml` in the root by default) for its ignore patterns; "not in sync" is a normal result, see `in_sync` in the JSON.
+- The `image_*` tools exist only in builds with the `image` feature, and the `cloud_*` tools only in builds with the `steam` feature; other builds do not list them. The editor and save tools are in every build.
+- The cloud tools open Steam for each call, never at server start: Steam must be running and logged in, otherwise the call fails with the reason. Cloud calls run one at a time. They read the project config (`ttskit.toml` in the root by default) like the CLI. The index backups of upload and push go to the CLI's backup directory (`TTSKIT_BACKUP_DIR`, else the default); the assistant cannot choose it.
+- `image_check` findings and the files it could not read (`errors`) are in the JSON result, not tool errors, and `cloud_status` "not in sync" is a normal result (`in_sync` in the JSON).
 
-The last five tools are read-only, work on local files and need no running game. Their results are the JSON the matching CLI commands print with `--json`.
+### Plan and apply
+
+Every tool that changes something works in two steps, so that nothing happens without a look at the plan:
+
+1. The `*_plan` tool (for Save & Play: the first `save_and_play` call) shows what would happen, as the CLI's dry-run JSON, and returns a `fingerprint`. It changes nothing.
+2. The `*_apply` tool takes the same arguments plus that `fingerprint` and `confirm: true`. It computes the plan again from the current state and only acts if the fingerprint still matches. Otherwise it refuses, with nothing done, and returns the fresh plan; so a file or cloud change in between, a missing `confirm` or a wrong fingerprint all stop it. Plans with conflicts (sync) are never applied.
+
+Overwriting an existing output (`out`, `in_place`, a cloud file of the same name) is only possible through apply. Deleting is not offered: there is no `prune` option, `image_build_apply` never prunes, and sync push and pull never delete or replace files.
 
 Safeguards and limits:
 
 - `save_and_play` never sends on the first call: it returns the diff and a fingerprint of the plan. Only a second call with `confirm` set to that fingerprint sends, and only if the plan is still the same. Deleting a script or UI that the tree lacks also needs `allow_delete`.
-- Tools that change files come in pairs. The `*_plan` tool returns the CLI's dry-run JSON plus a `fingerprint` and changes nothing. The `*_apply` tool takes the same arguments plus that `fingerprint` and `confirm: true`; it recomputes the plan and refuses, with nothing done, if `confirm` is not true, the fingerprint is missing or wrong, or the inputs changed since the plan (the refusal carries the fresh plan). Overwriting an existing output or the input itself (`in_place`) is only possible this way. Deleting is not offered: `image_build_apply` never prunes.
-- Every path argument of every tool (`save_and_play`, and the save tools above) must be inside the server's root: the working directory, or `--root DIR`. Paths with `..`, absolute paths outside the root and symlinks leading out of it are refused. The save tools write no files.
+- Every path argument of every tool must be inside the server's root: the working directory, or `--root DIR`. Paths with `..`, absolute paths outside the root and symlinks leading out of it are refused. Only the `*_apply` tools write files (and `save_and_play` sends to the game).
 - The server holds the editor port (39998) for its whole life and buffers what the game sends, also between tool calls (1000 events and 4 MiB by default; `--console-buffer` changes the count). Every event has a sequence number, so `get_console` with `since` returns only what is new. While the server runs, `ttskit watch`, `ttskit editor console` and other editor integrations cannot receive from the game; if one of them already listens, the server still starts, but the editor tools fail with that reason (`get_status` shows `editorAvailable: false`) while the save tools keep working. See [docs/editor-api.md](docs/editor-api.md#ttskit-mcp) for integrations that listen on the wildcard address.
 - `--game-port`, `--editor-port` and `--timeout` work as for the `editor` commands.
 

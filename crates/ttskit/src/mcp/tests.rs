@@ -1942,7 +1942,16 @@ async fn cloud_calls_do_not_overlap() {
 
 #[test]
 fn the_cloud_tools_are_dropped_without_a_backend() {
-    let cloud = ["cloud_list", "cloud_status"];
+    let cloud = [
+        "cloud_list",
+        "cloud_status",
+        "cloud_upload_plan",
+        "cloud_upload_apply",
+        "cloud_sync_push_plan",
+        "cloud_sync_push_apply",
+        "cloud_sync_pull_plan",
+        "cloud_sync_pull_apply",
+    ];
     let with = cloud_tools::with_cloud_tools(EditorServer::tool_router(), true);
     let without = cloud_tools::with_cloud_tools(EditorServer::tool_router(), false);
     for name in cloud {
@@ -1951,7 +1960,7 @@ fn the_cloud_tools_are_dropped_without_a_backend() {
     }
     // Everything else stays.
     assert!(without.has_route("save_scan") && without.has_route("get_status"));
-    assert_eq!(with.list_all().len(), without.list_all().len() + 2);
+    assert_eq!(with.list_all().len(), without.list_all().len() + 8);
 }
 
 #[tokio::test]
@@ -1977,7 +1986,7 @@ async fn the_cloud_tools_are_listed_with_a_backend() {
         .map(|t| t["name"].as_str().unwrap())
         .collect();
     assert!(names.contains(&"cloud_list") && names.contains(&"cloud_status"));
-    assert_eq!(names.len(), 15 + 3 * usize::from(cfg!(feature = "image")));
+    assert_eq!(names.len(), 21 + 3 * usize::from(cfg!(feature = "image")));
 }
 
 // ---- Image tool ----
@@ -2627,4 +2636,565 @@ async fn the_image_build_tools_are_not_listed_without_image_support() {
     assert!(names.contains(&"save_rewrite_urls_plan"));
     assert!(names.contains(&"save_rewrite_urls_apply"));
     assert!(!names.iter().any(|n| n.starts_with("image_")));
+}
+
+// ---- Cloud plan/apply tools ----
+
+/// An in-memory cloud whose state lives across backend calls, so that a plan
+/// and an apply (two calls) see the same cloud.
+#[derive(Clone)]
+struct SharedCloud(Arc<std::sync::Mutex<ttskit_cloud::MemoryCloud>>);
+
+impl SharedCloud {
+    fn new(cloud: ttskit_cloud::MemoryCloud) -> Self {
+        Self(Arc::new(std::sync::Mutex::new(cloud)))
+    }
+
+    fn with<R>(&self, f: impl FnOnce(&mut ttskit_cloud::MemoryCloud) -> R) -> R {
+        f(&mut self.0.lock().unwrap())
+    }
+
+    fn factory(&self) -> cloud_tools::BackendFactory {
+        let shared = self.clone();
+        Arc::new(move || Ok(Box::new(shared.clone()) as Box<dyn ttskit_cloud::CloudBackend>))
+    }
+
+    fn names(&self) -> Vec<String> {
+        self.with(|c| c.file_names())
+    }
+}
+
+impl ttskit_cloud::CloudBackend for SharedCloud {
+    fn list(&self) -> Result<Vec<ttskit_cloud::CloudFile>, ttskit_cloud::CloudError> {
+        self.with(|c| c.list())
+    }
+    fn read(&self, name: &str) -> Result<Vec<u8>, ttskit_cloud::CloudError> {
+        self.with(|c| c.read(name))
+    }
+    fn write(&mut self, name: &str, data: &[u8]) -> Result<(), ttskit_cloud::CloudError> {
+        self.with(|c| c.write(name, data))
+    }
+    fn delete(&mut self, name: &str) -> Result<(), ttskit_cloud::CloudError> {
+        self.with(|c| c.delete(name))
+    }
+    fn share(&mut self, name: &str) -> Result<ttskit_cloud::UgcHandle, ttskit_cloud::CloudError> {
+        self.with(|c| c.share(name))
+    }
+    fn quota(&self) -> Result<ttskit_cloud::Quota, ttskit_cloud::CloudError> {
+        self.with(|c| c.quota())
+    }
+}
+
+/// A cloud with an index and the given `(name, content, folder)` files.
+fn seeded_cloud(files: &[(&str, &[u8], &str)]) -> SharedCloud {
+    let mut index = ttskit_cloud::CloudIndex::empty();
+    index.folders = vec!["Game".into()];
+    let mut cloud = ttskit_cloud::MemoryCloud::new();
+    for (name, data, folder) in files {
+        let entry = cloud_entry(name, data, folder);
+        cloud = cloud.with_file(&entry.key, data.to_vec());
+        index.entries.push(entry);
+    }
+    SharedCloud::new(
+        cloud
+            .with_file(ttskit_cloud::CLOUD_INFO_FILE, index.encode_info().unwrap())
+            .with_file(
+                ttskit_cloud::CLOUD_FOLDER_FILE,
+                index.encode_folders().unwrap(),
+            ),
+    )
+}
+
+/// A client, a root and a backup directory outside the root.
+async fn cloud_project(cloud: &SharedCloud) -> (Client, tempfile::TempDir, tempfile::TempDir) {
+    let root = tempfile::tempdir().unwrap();
+    let backups = tempfile::tempdir().unwrap();
+    let ep = Endpoints::new(1, free_port());
+    let held = Listener::bind(ep.editor).await.unwrap();
+    std::mem::forget(held);
+    let server = EditorServer::start(ep, resolve_root(Some(root.path())).unwrap(), 10)
+        .await
+        .with_backend(cloud.factory())
+        .with_backup_dir(backups.path().to_owned());
+    let mut client = attach(server).await;
+    client.initialize().await;
+    write(
+        &root,
+        "ttskit.toml",
+        "[cloud]\nfolder = \"Game\"\n\n[local]\ndir = \"src\"\n",
+    );
+    std::fs::create_dir_all(root.path().join("src")).unwrap();
+    (client, root, backups)
+}
+
+fn entries_of(dir: &tempfile::TempDir) -> usize {
+    std::fs::read_dir(dir.path()).unwrap().count()
+}
+
+/// Another client adds a file (and its index entry) to the cloud.
+fn add_cloud_file(cloud: &SharedCloud, name: &str, data: &[u8], folder: &str) {
+    use ttskit_cloud::CloudBackend as _;
+    let mut index = ttskit_cloud::CloudIndex::load(cloud).unwrap();
+    let entry = cloud_entry(name, data, folder);
+    index.entries.push(entry.clone());
+    let mut backend = cloud.clone();
+    backend.write(&entry.key, data).unwrap();
+    backend
+        .write(ttskit_cloud::CLOUD_INFO_FILE, &index.encode_info().unwrap())
+        .unwrap();
+    backend
+        .write(
+            ttskit_cloud::CLOUD_FOLDER_FILE,
+            &index.encode_folders().unwrap(),
+        )
+        .unwrap();
+}
+
+/// Everything a plan call must leave alone.
+struct Snapshot {
+    cloud: Vec<String>,
+    backups: usize,
+    manifest: bool,
+    src: Vec<String>,
+}
+
+fn snapshot(
+    cloud: &SharedCloud,
+    root: &tempfile::TempDir,
+    backups: &tempfile::TempDir,
+) -> Snapshot {
+    let mut src: Vec<String> = std::fs::read_dir(root.path().join("src"))
+        .unwrap()
+        .map(|e| {
+            let e = e.unwrap();
+            format!(
+                "{}={:?}",
+                e.file_name().to_string_lossy(),
+                std::fs::read(e.path()).unwrap()
+            )
+        })
+        .collect();
+    src.sort();
+    Snapshot {
+        cloud: cloud.names(),
+        backups: entries_of(backups),
+        manifest: root.path().join("ttskit.manifest.json").exists(),
+        src,
+    }
+}
+
+fn assert_unchanged(before: &Snapshot, after: &Snapshot) {
+    assert_eq!(before.cloud, after.cloud);
+    assert_eq!(before.backups, after.backups);
+    assert_eq!(before.manifest, after.manifest);
+    assert_eq!(before.src, after.src);
+}
+
+const SYNC_PAIRS: [(&str, &str); 2] = [
+    ("cloud_sync_push_plan", "cloud_sync_push_apply"),
+    ("cloud_sync_pull_plan", "cloud_sync_pull_apply"),
+];
+
+#[tokio::test]
+async fn cloud_upload_plan_changes_nothing_and_apply_uploads() {
+    let cloud = seeded_cloud(&[]);
+    let (mut client, root, backups) = cloud_project(&cloud).await;
+    write(&root, "src/new.png", "hello");
+    let before = snapshot(&cloud, &root, &backups);
+    let args = json!({"file": "src/new.png", "folder": "Game"});
+
+    let r = client.call("cloud_upload_plan", args.clone()).await;
+    assert!(!is_error(&r), "{r}");
+    let plan = body(&r);
+    assert_eq!(plan["name"], "new.png");
+    assert_eq!(plan["write"], true, "{plan}");
+    assert_eq!(plan["dry_run"], true);
+    assert!(
+        plan["next"]
+            .as_str()
+            .unwrap()
+            .contains("cloud_upload_apply")
+    );
+    assert_unchanged(&before, &snapshot(&cloud, &root, &backups));
+    let print = plan["fingerprint"].as_str().unwrap().to_owned();
+
+    let r = client
+        .call(
+            "cloud_upload_apply",
+            with_confirmation(args, &print, json!(true)),
+        )
+        .await;
+    assert!(!is_error(&r), "{r}");
+    let result = body(&r);
+    assert_eq!(result["applied"], true);
+    assert_eq!(result["done"], true);
+    assert_eq!(result["dry_run"], false);
+    let key = result["cloud_name"].as_str().unwrap();
+    assert!(
+        cloud.names().iter().any(|n| n == key),
+        "{:?}",
+        cloud.names()
+    );
+    assert_eq!(cloud.with(|c| c.contents(key)).unwrap(), b"hello");
+    // The manifest next to the config records it, and the index was backed up.
+    assert!(read(&root, "ttskit.manifest.json").contains("new.png"));
+    assert!(entries_of(&backups) > before.backups);
+}
+
+#[tokio::test]
+async fn cloud_upload_apply_is_refused_without_confirmation_or_after_changes() {
+    let cloud = seeded_cloud(&[]);
+    let (mut client, root, backups) = cloud_project(&cloud).await;
+    write(&root, "src/new.png", "hello");
+    let args = json!({"file": "src/new.png", "folder": "Game"});
+    let print = plan_print(&mut client, "cloud_upload_plan", args.clone()).await;
+    let before = snapshot(&cloud, &root, &backups);
+
+    let mut no_confirm = args.clone();
+    no_confirm["fingerprint"] = json!(print);
+    let mut no_print = args.clone();
+    no_print["confirm"] = json!(true);
+    for call in [
+        no_confirm,
+        no_print,
+        with_confirmation(args.clone(), &print, json!(false)),
+        with_confirmation(args.clone(), "0000000000000000", json!(true)),
+    ] {
+        let r = client.call("cloud_upload_apply", call.clone()).await;
+        assert!(is_error(&r), "{call}");
+    }
+    assert_unchanged(&before, &snapshot(&cloud, &root, &backups));
+
+    // The file changes after the plan (same size).
+    write(&root, "src/new.png", "HELLO");
+    let before = snapshot(&cloud, &root, &backups);
+    let r = client
+        .call(
+            "cloud_upload_apply",
+            with_confirmation(args.clone(), &print, json!(true)),
+        )
+        .await;
+    assert!(error_text(&r).contains("state changed"));
+    assert_ne!(body(&r)["plan"]["fingerprint"], json!(print));
+    assert_unchanged(&before, &snapshot(&cloud, &root, &backups));
+
+    // The cloud changes after the plan: the same name is there already.
+    write(&root, "src/new.png", "hello");
+    let print = plan_print(&mut client, "cloud_upload_plan", args.clone()).await;
+    add_cloud_file(&cloud, "new.png", b"other", "Game");
+    let r = client
+        .call(
+            "cloud_upload_apply",
+            with_confirmation(args, &print, json!(true)),
+        )
+        .await;
+    assert!(error_text(&r).contains("state changed"));
+}
+
+#[tokio::test]
+async fn cloud_sync_push_plan_changes_nothing_and_apply_uploads_new_files() {
+    let cloud = seeded_cloud(&[("old.png", b"old", "Game")]);
+    let (mut client, root, backups) = cloud_project(&cloud).await;
+    write(&root, "src/new.png", "fresh");
+    write(&root, "src/old.png", "different");
+    let before = snapshot(&cloud, &root, &backups);
+
+    let r = client.call("cloud_sync_push_plan", json!({})).await;
+    assert!(!is_error(&r), "{r}");
+    let plan = body(&r);
+    let steps = plan["plan"]["steps"].as_array().unwrap();
+    assert!(
+        steps
+            .iter()
+            .any(|s| s["path"] == "new.png" && s["action"] == "upload")
+    );
+    // A changed file needs prune, which is not offered: it is listed, not pushed.
+    assert!(steps.iter().any(|s| s["reason"] == "needs_prune"), "{plan}");
+    assert_eq!(plan["plan"]["prune"], false);
+    assert_unchanged(&before, &snapshot(&cloud, &root, &backups));
+    let print = plan["fingerprint"].as_str().unwrap().to_owned();
+
+    let r = client
+        .call(
+            "cloud_sync_push_apply",
+            json!({"fingerprint": print, "confirm": true}),
+        )
+        .await;
+    assert!(!is_error(&r), "{r}");
+    let result = body(&r);
+    assert_eq!(result["applied"], true);
+    assert_eq!(result["uploaded"], json!(["new.png"]), "{result}");
+    assert_eq!(result["deleted"], json!([]));
+    let key = format!("{}_new.png", ttskit_cloud::sha1_hex(b"fresh"));
+    assert_eq!(cloud.with(|c| c.contents(&key)).unwrap(), b"fresh");
+    assert!(cloud.names().iter().any(|n| n.ends_with("_old.png")));
+    assert!(entries_of(&backups) > before.backups);
+    assert!(read(&root, "ttskit.manifest.json").contains("new.png"));
+}
+
+#[tokio::test]
+async fn cloud_sync_push_apply_is_refused_without_confirmation_or_after_changes() {
+    let cloud = seeded_cloud(&[]);
+    let (mut client, root, backups) = cloud_project(&cloud).await;
+    write(&root, "src/a.png", "aaa");
+    let print = plan_print(&mut client, "cloud_sync_push_plan", json!({})).await;
+    let before = snapshot(&cloud, &root, &backups);
+    for call in [
+        json!({"fingerprint": print}),
+        json!({"fingerprint": print, "confirm": false}),
+        json!({"confirm": true}),
+        json!({"fingerprint": "0000000000000000", "confirm": true}),
+    ] {
+        let r = client.call("cloud_sync_push_apply", call.clone()).await;
+        assert!(is_error(&r), "{call}");
+    }
+    assert_unchanged(&before, &snapshot(&cloud, &root, &backups));
+
+    // A local file changes (same name and size) after the plan.
+    write(&root, "src/a.png", "AAA");
+    let before = snapshot(&cloud, &root, &backups);
+    let r = client
+        .call(
+            "cloud_sync_push_apply",
+            json!({"fingerprint": print, "confirm": true}),
+        )
+        .await;
+    assert!(error_text(&r).contains("state changed"));
+    assert!(body(&r)["plan"]["fingerprint"].is_string());
+    assert_unchanged(&before, &snapshot(&cloud, &root, &backups));
+
+    // A cloud file appears after the plan.
+    write(&root, "src/a.png", "aaa");
+    let print = plan_print(&mut client, "cloud_sync_push_plan", json!({})).await;
+    add_cloud_file(&cloud, "extra.png", b"x", "Game");
+    let r = client
+        .call(
+            "cloud_sync_push_apply",
+            json!({"fingerprint": print, "confirm": true}),
+        )
+        .await;
+    assert!(error_text(&r).contains("state changed") || is_error(&r));
+}
+
+#[tokio::test]
+async fn cloud_sync_with_conflicts_is_a_plan_but_never_applied() {
+    // Two index entries for one name in the cloud folder: a collision.
+    let cloud = seeded_cloud(&[("a.png", b"one", "Game"), ("a.png", b"two", "Game")]);
+    let (mut client, root, backups) = cloud_project(&cloud).await;
+    write(&root, "src/a.png", "local");
+    let before = snapshot(&cloud, &root, &backups);
+    for (plan_tool, apply_tool) in SYNC_PAIRS {
+        let r = client.call(plan_tool, json!({})).await;
+        assert!(!is_error(&r), "{plan_tool}: {r}");
+        let plan = body(&r);
+        assert_eq!(plan["plan"]["has_conflicts"], true, "{plan}");
+        assert!(plan["blocked"].as_str().unwrap().contains("conflict"));
+        let print = plan["fingerprint"].as_str().unwrap().to_owned();
+        let r = client
+            .call(apply_tool, json!({"fingerprint": print, "confirm": true}))
+            .await;
+        assert!(is_error(&r), "{apply_tool}: {r}");
+        let result = body(&r);
+        assert_eq!(result["applied"], false);
+        assert!(result["error"].as_str().unwrap().contains("conflict"));
+    }
+    assert_unchanged(&before, &snapshot(&cloud, &root, &backups));
+}
+
+#[tokio::test]
+async fn cloud_sync_pull_plan_changes_nothing_and_apply_downloads() {
+    let cloud = seeded_cloud(&[("b.png", b"bbbb", "Game")]);
+    let (mut client, root, backups) = cloud_project(&cloud).await;
+    write(&root, "src/local-only.txt", "mine");
+    let before = snapshot(&cloud, &root, &backups);
+
+    let r = client.call("cloud_sync_pull_plan", json!({})).await;
+    assert!(!is_error(&r), "{r}");
+    let plan = body(&r);
+    assert!(
+        plan["plan"]["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["path"] == "b.png" && s["action"] == "download"),
+        "{plan}"
+    );
+    assert!(!root.path().join("src/b.png").exists());
+    assert_unchanged(&before, &snapshot(&cloud, &root, &backups));
+    let print = plan["fingerprint"].as_str().unwrap().to_owned();
+
+    let r = client
+        .call(
+            "cloud_sync_pull_apply",
+            json!({"fingerprint": print, "confirm": true}),
+        )
+        .await;
+    assert!(!is_error(&r), "{r}");
+    let result = body(&r);
+    assert_eq!(result["applied"], true);
+    assert_eq!(read(&root, "src/b.png"), "bbbb");
+    // Never deletes local files.
+    assert_eq!(read(&root, "src/local-only.txt"), "mine");
+}
+
+#[tokio::test]
+async fn cloud_sync_pull_apply_is_refused_without_confirmation_or_after_changes() {
+    let cloud = seeded_cloud(&[("b.png", b"bbbb", "Game")]);
+    let (mut client, root, backups) = cloud_project(&cloud).await;
+    let print = plan_print(&mut client, "cloud_sync_pull_plan", json!({})).await;
+    let before = snapshot(&cloud, &root, &backups);
+    for call in [
+        json!({"fingerprint": print}),
+        json!({"fingerprint": print, "confirm": false}),
+        json!({"confirm": true}),
+        json!({"fingerprint": "0000000000000000", "confirm": true}),
+    ] {
+        let r = client.call("cloud_sync_pull_apply", call.clone()).await;
+        assert!(is_error(&r), "{call}");
+    }
+    assert_unchanged(&before, &snapshot(&cloud, &root, &backups));
+
+    // Another cloud file appears after the plan.
+    add_cloud_file(&cloud, "c.png", b"cc", "Game");
+    let before = snapshot(&cloud, &root, &backups);
+    let r = client
+        .call(
+            "cloud_sync_pull_apply",
+            json!({"fingerprint": print, "confirm": true}),
+        )
+        .await;
+    assert!(is_error(&r), "{r}");
+    assert!(!root.path().join("src/b.png").exists());
+    assert_unchanged(&before, &snapshot(&cloud, &root, &backups));
+}
+
+#[tokio::test]
+async fn cloud_change_tools_refuse_paths_outside_the_root() {
+    let cloud = seeded_cloud(&[]);
+    let (mut client, root, backups) = cloud_project(&cloud).await;
+    write(&root, "src/a.png", "aaa");
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("a.png"), "aaa").unwrap();
+    std::fs::write(
+        outside.path().join("ttskit.toml"),
+        "[cloud]\nfolder = \"Game\"\n\n[local]\ndir = \"src\"\n",
+    )
+    .unwrap();
+    let outside_file = outside.path().join("a.png").to_str().unwrap().to_owned();
+    let outside_config = outside
+        .path()
+        .join("ttskit.toml")
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let before = snapshot(&cloud, &root, &backups);
+
+    let mut cases: Vec<(&str, Value)> = Vec::new();
+    for file in ["../a.png", outside_file.as_str()] {
+        cases.push(("cloud_upload_plan", json!({"file": file})));
+        cases.push(("cloud_upload_apply", json!({"file": file})));
+    }
+    for config in ["../ttskit.toml", outside_config.as_str()] {
+        cases.push((
+            "cloud_upload_plan",
+            json!({"file": "src/a.png", "config": config}),
+        ));
+        cases.push((
+            "cloud_upload_apply",
+            json!({"file": "src/a.png", "config": config}),
+        ));
+        for tool in [
+            "cloud_sync_push_plan",
+            "cloud_sync_push_apply",
+            "cloud_sync_pull_plan",
+            "cloud_sync_pull_apply",
+        ] {
+            cases.push((tool, json!({"config": config})));
+        }
+    }
+    for (tool, mut args) in cases {
+        if tool.ends_with("apply") {
+            args["fingerprint"] = json!("0000000000000000");
+            args["confirm"] = json!(true);
+        }
+        let r = client.call(tool, args.clone()).await;
+        let error = error_text(&r);
+        assert!(
+            error.contains("`..`") || error.contains("outside the project root"),
+            "{tool} {args}: {error}"
+        );
+    }
+    assert_unchanged(&before, &snapshot(&cloud, &root, &backups));
+}
+
+#[tokio::test]
+async fn cloud_change_tools_report_a_failing_backend_and_offer_no_prune() {
+    let cloud = seeded_cloud(&[]);
+    let (mut client, root, _backups) = cloud_project(&cloud).await;
+    write(&root, "src/a.png", "aaa");
+    // No tool has a prune or backup directory argument.
+    let r = client.request("tools/list", json!({})).await;
+    let tools = r["result"]["tools"].as_array().unwrap();
+    let mut checked = 0;
+    for tool in tools {
+        let name = tool["name"].as_str().unwrap();
+        if name.starts_with("cloud_upload") || name.starts_with("cloud_sync") {
+            checked += 1;
+            let schema = tool["inputSchema"].to_string();
+            assert!(!schema.contains("prune"), "{name}: {schema}");
+            assert!(!schema.contains("backup"), "{name}: {schema}");
+            assert!(!schema.contains("yes"), "{name}: {schema}");
+        }
+    }
+    assert_eq!(checked, 6);
+
+    let failing: cloud_tools::BackendFactory = Arc::new(|| Err("Steam is not running".to_owned()));
+    let (mut client, root, _backups) = {
+        let root = tempfile::tempdir().unwrap();
+        let backups = tempfile::tempdir().unwrap();
+        let ep = Endpoints::new(1, free_port());
+        let held = Listener::bind(ep.editor).await.unwrap();
+        std::mem::forget(held);
+        let server = EditorServer::start(ep, resolve_root(Some(root.path())).unwrap(), 10)
+            .await
+            .with_backend(failing)
+            .with_backup_dir(backups.path().to_owned());
+        let mut client = attach(server).await;
+        client.initialize().await;
+        write(
+            &root,
+            "ttskit.toml",
+            "[cloud]\nfolder = \"Game\"\n\n[local]\ndir = \"src\"\n",
+        );
+        std::fs::create_dir_all(root.path().join("src")).unwrap();
+        (client, root, backups)
+    };
+    write(&root, "src/a.png", "aaa");
+    for (tool, args) in [
+        ("cloud_upload_plan", json!({"file": "src/a.png"})),
+        ("cloud_sync_push_plan", json!({})),
+        ("cloud_sync_pull_plan", json!({})),
+        (
+            "cloud_upload_apply",
+            json!({"file": "src/a.png", "fingerprint": "00", "confirm": true}),
+        ),
+        (
+            "cloud_sync_push_apply",
+            json!({"fingerprint": "00", "confirm": true}),
+        ),
+        (
+            "cloud_sync_pull_apply",
+            json!({"fingerprint": "00", "confirm": true}),
+        ),
+    ] {
+        let r = client.call(tool, args).await;
+        assert_eq!(error_text(&r), "Steam is not running", "{tool}");
+    }
+}
+
+#[test]
+fn the_backup_directory_comes_from_the_server_setting() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = cloud_change_tools::backup_store(&Some(dir.path().to_owned())).unwrap();
+    assert_eq!(store.root(), dir.path());
 }

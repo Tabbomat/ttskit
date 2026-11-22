@@ -26,6 +26,9 @@ use self::buffer::{EventKind, Query};
 use self::change_tools::{
     ImageBuildApplyArgs, ImageBuildArgs, RewriteUrlsApplyArgs, RewriteUrlsArgs,
 };
+use self::cloud_change_tools::{
+    CloudSyncApplyArgs, CloudSyncArgs, CloudUploadApplyArgs, CloudUploadArgs,
+};
 use self::cloud_tools::{CloudListArgs, CloudStatusArgs};
 use self::hub::{Hub, Replies};
 use self::image_tools::ImageCheckArgs;
@@ -55,7 +58,7 @@ nextSince as `since` next time to get only newer events. execute_lua and save_an
 lastSeq for the same purpose. The save_scan, save_lint, save_diff, save_check_urls and \
 manifest_show tools are read-only, work on files inside the server's root and need no game \
 (only save_check_urls uses the network); their results are the JSON of the matching ttskit \
-commands. The cloud_list and cloud_status tools (only in builds with Steam support) are read-only and open Steam for each call, so Steam must be running and logged in; if it is not, they fail with the reason. image_check (only in builds with image support) is local and read-only too. Tools that change files come in pairs: save_rewrite_urls_plan and image_build_plan (only with image support) change nothing and return a fingerprint; the matching *_apply tool needs the same arguments, that fingerprint and confirm: true, and refuses if anything changed since the plan. Nothing is deleted.";
+commands. The cloud tools (only in builds with Steam support) open Steam for each call, so Steam must be running and logged in; if it is not, they fail with the reason. cloud_list and cloud_status are read-only; cloud_upload, cloud_sync_push and cloud_sync_pull are plan and apply pairs that never delete or replace existing cloud files, except that an upload of an existing name replaces it. image_check (only in builds with image support) is local and read-only too. Tools that change files come in pairs: save_rewrite_urls_plan and image_build_plan (only with image support) change nothing and return a fingerprint; the matching *_apply tool needs the same arguments, that fingerprint and confirm: true, and refuses if anything changed since the plan. Nothing is deleted.";
 
 #[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
@@ -161,6 +164,9 @@ struct EditorServer {
     /// Opens the cloud backend per tool call; `None` in builds without Steam
     /// support, which then do not list the cloud tools.
     backend: Option<cloud_tools::BackendFactory>,
+    /// Where the cloud index backups go; `None`: `TTSKIT_BACKUP_DIR`, else the
+    /// CLI's default. Not an argument of any tool.
+    backup_dir: Option<PathBuf>,
     /// Serializes all use of the cloud backend, held across a whole call.
     cloud_lock: Arc<tokio::sync::Mutex<()>>,
     /// Serializes the tool calls that send requests: the game ties no reply
@@ -182,10 +188,18 @@ impl EditorServer {
             hub,
             fetcher: save_tools::http_fetcher(),
             backend: cloud_tools::production_backend(),
+            backup_dir: None,
             cloud_lock: Arc::default(),
             tool_router: Self::router(cloud_tools::production_backend().is_some()),
             lock: Arc::default(),
         }
+    }
+
+    /// Keep the index backups in `dir` (tests).
+    #[cfg(test)]
+    fn with_backup_dir(mut self, dir: PathBuf) -> Self {
+        self.backup_dir = Some(dir);
+        self
     }
 
     /// All tools of this build: the cloud tools need a backend factory, the
@@ -212,11 +226,21 @@ impl EditorServer {
     where
         F: FnOnce(&cloud_tools::BackendFactory) -> Result<Value, String> + Send + 'static,
     {
+        self.with_cloud_value(move |factory| work(factory).map_err(plan_apply::error))
+            .await
+    }
+
+    /// Like [`Self::with_cloud`], for work whose error is a whole result body
+    /// (the plan/apply tools).
+    async fn with_cloud_value<F>(&self, work: F) -> CallToolResult
+    where
+        F: FnOnce(&cloud_tools::BackendFactory) -> Result<Value, Value> + Send + 'static,
+    {
         let Some(factory) = self.backend.clone() else {
             return failure(&json!({ "error": "this build has no Steam support" }));
         };
         let guard = self.cloud_lock.clone().lock_owned().await;
-        save_tools::run(move || {
+        change_tools::run(move || {
             let _guard = guard;
             work(&factory)
         })
@@ -816,6 +840,78 @@ impl EditorServer {
     }
 
     #[tool(
+        description = "Step 1 of uploading a local file to the Steam Cloud: show what `ttskit cloud upload` would do (its dry-run JSON: name, folder, size, whether a cloud file of that name is replaced, index changes) and return a fingerprint. Changes nothing. The file and config must be inside the server's root; the manifest next to the config is updated by the apply. Then call cloud_upload_apply. Opens Steam for this call."
+    )]
+    async fn cloud_upload_plan(
+        &self,
+        Parameters(args): Parameters<CloudUploadArgs>,
+    ) -> CallToolResult {
+        let (root, backup) = (self.root.clone(), self.backup_dir.clone());
+        self.with_cloud_value(move |f| cloud_change_tools::upload_plan(&root, f, &backup, &args))
+            .await
+    }
+
+    #[tool(
+        description = "Step 2 of uploading: with the same arguments as cloud_upload_plan plus its fingerprint and confirm: true, upload the file (replacing a cloud file of the same name), back up the cloud index to the CLI's backup directory and update the manifest. Refused, with nothing done, if confirm is not true, the fingerprint is missing or wrong, or the plan changed (the result then holds the fresh plan). Opens Steam for this call."
+    )]
+    async fn cloud_upload_apply(
+        &self,
+        Parameters(args): Parameters<CloudUploadApplyArgs>,
+    ) -> CallToolResult {
+        let (root, backup) = (self.root.clone(), self.backup_dir.clone());
+        self.with_cloud_value(move |f| cloud_change_tools::upload_apply(&root, f, &backup, &args))
+            .await
+    }
+
+    #[tool(
+        description = "Step 1 of `ttskit cloud sync push`: show which local files of the project config would be uploaded to its cloud folder (the dry-run JSON, including conflicts and changed files that need prune, which is not offered) and return a fingerprint. Changes nothing. Config (default ttskit.toml in the root) must be inside the server's root. Then call cloud_sync_push_apply. Opens Steam for this call."
+    )]
+    async fn cloud_sync_push_plan(
+        &self,
+        Parameters(args): Parameters<CloudSyncArgs>,
+    ) -> CallToolResult {
+        let (root, backup) = (self.root.clone(), self.backup_dir.clone());
+        self.with_cloud_value(move |f| cloud_change_tools::push_plan(&root, f, &backup, &args))
+            .await
+    }
+
+    #[tool(
+        description = "Step 2 of sync push: with the same arguments as cloud_sync_push_plan plus its fingerprint and confirm: true, upload the new files, back up the cloud index and refresh the manifest. Never replaces or deletes cloud files. Refused, with nothing done, if confirm is not true, the fingerprint is missing or wrong, the plan changed (the result then holds the fresh plan) or the plan has conflicts. Opens Steam for this call."
+    )]
+    async fn cloud_sync_push_apply(
+        &self,
+        Parameters(args): Parameters<CloudSyncApplyArgs>,
+    ) -> CallToolResult {
+        let (root, backup) = (self.root.clone(), self.backup_dir.clone());
+        self.with_cloud_value(move |f| cloud_change_tools::push_apply(&root, f, &backup, &args))
+            .await
+    }
+
+    #[tool(
+        description = "Step 1 of `ttskit cloud sync pull`: show which cloud files of the project config's cloud folder would be downloaded into its local directory (the dry-run JSON, including conflicts) and return a fingerprint. Changes nothing. Config (default ttskit.toml in the root) and the local directory must be inside the server's root. Then call cloud_sync_pull_apply. Opens Steam for this call."
+    )]
+    async fn cloud_sync_pull_plan(
+        &self,
+        Parameters(args): Parameters<CloudSyncArgs>,
+    ) -> CallToolResult {
+        let root = self.root.clone();
+        self.with_cloud_value(move |f| cloud_change_tools::pull_plan(&root, f, &args))
+            .await
+    }
+
+    #[tool(
+        description = "Step 2 of sync pull: with the same arguments as cloud_sync_pull_plan plus its fingerprint and confirm: true, download the files into the local directory. Never deletes local files. Refused, with nothing done, if confirm is not true, the fingerprint is missing or wrong, the plan changed (the result then holds the fresh plan) or the plan has conflicts. Opens Steam for this call."
+    )]
+    async fn cloud_sync_pull_apply(
+        &self,
+        Parameters(args): Parameters<CloudSyncApplyArgs>,
+    ) -> CallToolResult {
+        let root = self.root.clone();
+        self.with_cloud_value(move |f| cloud_change_tools::pull_apply(&root, f, &args))
+            .await
+    }
+
+    #[tool(
         description = "Compare a local directory with a Steam Cloud folder (same JSON as `ttskit cloud status --json`): which files are in sync, changed, only local or only in the cloud. Not being in sync is a normal result, see the JSON. Read-only. The directory and config must be inside the server's root; ignore patterns come from the project config (default ttskit.toml in the root). Opens Steam for this call; it fails with the reason if Steam is unavailable."
     )]
     async fn cloud_status(&self, Parameters(args): Parameters<CloudStatusArgs>) -> CallToolResult {
@@ -872,6 +968,7 @@ mod tests;
 
 mod buffer;
 mod change_tools;
+mod cloud_change_tools;
 mod cloud_tools;
 mod hub;
 mod image_tools;

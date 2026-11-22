@@ -25,7 +25,16 @@ pub(super) type BackendFactory =
     Arc<dyn Fn() -> Result<Box<dyn CloudBackend>, String> + Send + Sync>;
 
 /// The names of the tools that need a backend.
-const CLOUD_TOOLS: [&str; 2] = ["cloud_list", "cloud_status"];
+const CLOUD_TOOLS: [&str; 8] = [
+    "cloud_list",
+    "cloud_status",
+    "cloud_upload_plan",
+    "cloud_upload_apply",
+    "cloud_sync_push_plan",
+    "cloud_sync_push_apply",
+    "cloud_sync_pull_plan",
+    "cloud_sync_pull_apply",
+];
 
 /// The factory of this build: Steam if compiled in, else none.
 pub(super) fn production_backend() -> Option<BackendFactory> {
