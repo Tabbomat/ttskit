@@ -38,6 +38,9 @@ pub struct FetchResponse {
     pub location: Option<String>,
     /// The `Content-Type` header, if any.
     pub content_type: Option<String>,
+    /// The `Content-Length` header, if any. For `HEAD` it is the size of the
+    /// file; for a ranged `GET` it is only the size of the part.
+    pub content_length: Option<u64>,
     /// The first bytes of the body (empty for `HEAD`).
     pub body: Vec<u8>,
 }

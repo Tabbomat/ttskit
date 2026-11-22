@@ -38,6 +38,7 @@ impl Fetch for HttpClient {
         let status = response.status().as_u16();
         let location = header("location");
         let content_type = header("content-type");
+        let content_length = header("content-length").and_then(|v| v.trim().parse::<u64>().ok());
         let mut body = Vec::new();
         if let FetchMethod::GetRange { max_body } = request.method {
             let mut response = response;
@@ -56,6 +57,7 @@ impl Fetch for HttpClient {
             status,
             location,
             content_type,
+            content_length,
             body,
         })
     }

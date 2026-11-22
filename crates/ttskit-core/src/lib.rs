@@ -22,8 +22,8 @@ pub use check::{
 };
 pub use fetch_assets::{
     CacheDir, CacheError, Download, DownloadError, DownloadResponse, Failed, FetchConfig,
-    FetchPlan, FetchReport, Fetched, Index, IndexEntry, Skipped, Source, Store, StoreError,
-    cache_key, detect_type, fetch_assets, fetch_assets_with_plan, plan as plan_fetch,
+    FetchPlan, FetchReport, Fetched, Index, IndexEntry, Size, Skipped, Source, Store, StoreError,
+    cache_key, detect_type, fetch_assets, fetch_assets_with_plan, plan as plan_fetch, probe_sizes,
 };
 pub use pack::{PackError, PackOptions, Packed, pack};
 pub use save::write::Eol;

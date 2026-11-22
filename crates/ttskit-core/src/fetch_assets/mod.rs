@@ -22,6 +22,7 @@
 mod cache;
 mod detect;
 mod engine;
+mod probe;
 mod store;
 
 use std::fs::File;
@@ -38,6 +39,7 @@ use crate::save::AssetUrl;
 
 pub use cache::{CACHE_FOLDERS, CacheDir, CacheError, cache_key};
 pub use detect::detect_type;
+pub use probe::{Size, probe_sizes};
 pub use store::{Index, IndexEntry, Store, StoreError};
 
 /// The answer to a [`Download::download`] call.
