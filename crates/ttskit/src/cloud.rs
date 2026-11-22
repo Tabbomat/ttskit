@@ -21,7 +21,7 @@ fn read_quota(backend: &dyn CloudBackend) -> Option<Quota> {
     backend.quota().ok()
 }
 
-/// `cloud: 59.7 MB used, 99.9 GB free`
+/// `cloud: 113.3 MiB used, 93.0 GiB free`
 fn quota_line(quota: Quota) -> String {
     format!(
         "cloud: {} used, {} free",
@@ -2346,7 +2346,7 @@ mod tests {
         assert_eq!(
             String::from_utf8(out).unwrap(),
             "0 files in 0 folders, 0 bytes
-cloud: 0 B used, 2.0 MB free
+cloud: 0 B used, 1.9 MiB free
 "
         );
     }
@@ -3902,7 +3902,7 @@ cloud: 0 B used, 2.0 MB free
             .unwrap();
             assert!(String::from_utf8(out).unwrap().ends_with(
                 "
-cloud: 0 B used, 2.0 MB free
+cloud: 0 B used, 1.9 MiB free
 "
             ));
             let (_, text) = run(&cloud, &[], "Decks", true);
@@ -4163,7 +4163,7 @@ cloud: 0 B used, 2.0 MB free
             assert!(
                 run.raw.ends_with(
                     "2 upload (2 B)
-cloud: 0 B used, 2.0 MB free
+cloud: 0 B used, 1.9 MiB free
 Dry run: nothing was changed.
 "
                 ),
