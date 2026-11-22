@@ -22,6 +22,7 @@ mods. Not affiliated with or endorsed by Berserk Games.
   Cloud folder and rewrites a copy of the save.
 - **Save lint (done):** `save lint` checks a save for duplicate GUIDs, bad URLs,
   Lua and XML syntax errors, oversized script state and broken decks.
+- **Save diff (done):** `save diff` shows which objects changed between two saves.
 - **Dead-link check (done):** `save check-urls` tells which asset URLs of a save no
   longer load.
 - **External Editor API client (done):** talk to a running game to read and write
@@ -139,6 +140,25 @@ Notes:
 - **GUID rules are split.** The game repeats GUIDs on copies of an object inside different containers, so `duplicate-guid` and `missing-guid` look only at the top-level objects of the save, and `duplicate-guid-nested` and `missing-guid-nested` (info by default) cover objects inside containers and states.
 - **Card ids.** `deck-id-out-of-range` checks `DeckIDs` as `sheet * 100 + card` against the object's own sheets. A card's own `CardID` is only checked to be a non-negative integer, because cards taken out of a deck keep the numbering of that deck.
 - **Speed.** Linting runs in a single pass over the save. With a release build, a 20 MB save with hundreds of thousands of values lints in about 2 seconds in total, most of it parsing Lua.
+
+## Save diff
+
+`ttskit save diff OLD.json NEW.json` shows what changed between two saves in terms of objects, not JSON lines. It works on the files alone: no network, no Steam, no game.
+
+```
+ttskit save diff old.json new.json                    # short summary
+ttskit save diff old.json new.json --verbose          # every change with old and new values
+ttskit save diff old.json new.json --scripts          # also the line diff of changed scripts and XML UI
+ttskit save diff old.json new.json --tolerance 0.001  # ignore float noise in transforms
+ttskit save diff old.json new.json --json             # machine-readable
+```
+
+- Objects are matched by GUID, also inside containers (bags, decks) and states, so an object that moved to another container is reported as moved, not as removed and added. Each object is reported as added, removed, moved or changed, with the kinds of change: `transform`, `script`, `xml_ui`, `script_state`, `assets` (URL fields, old and new) and `other` (listed by JSON path).
+- The global parts are compared too: global script, UI and script state, table, sky, lighting, hands, tab states and custom UI assets.
+- Numbers are compared as text, so `1.0` and `1` differ. `--tolerance EPSILON` makes transform numbers within EPSILON count as equal; it does not apply to other fields.
+- An object without a GUID, or with a GUID that occurs more than once in either save, is ambiguous. It is paired with the object at the same index in the same parent list; the rest is reported as added or removed. Such objects are flagged, and repeated GUIDs are listed.
+- Output is sorted and stable. Exit status: 0 when the saves are equal, 2 when they differ, 1 on errors (unreadable file, invalid JSON, bad tolerance). Repeated GUIDs alone do not make saves different.
+- To review script changes line by line, unpack both saves and use a file diff; this command answers "which objects changed".
 
 ## Asset backup
 

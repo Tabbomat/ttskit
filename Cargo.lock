@@ -2800,6 +2800,7 @@ dependencies = [
  "tokio",
  "ttskit-cloud",
  "ttskit-core",
+ "ttskit-diff",
  "ttskit-editor",
  "ttskit-image",
  "ttskit-lint",

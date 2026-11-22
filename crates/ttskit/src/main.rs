@@ -1,6 +1,7 @@
 mod assets;
 mod check_urls;
 mod cloud;
+mod diff;
 mod editor;
 mod fetch_assets;
 mod http;
@@ -902,6 +903,39 @@ enum SaveCommand {
     /// shown, 2 when there are findings, 1 on errors (unreadable save, bad
     /// config, unknown rule id).
     Lint(SaveLintCli),
+    /// Show which objects changed between two saves (local only)
+    ///
+    /// Objects are matched by GUID, also inside containers and states, and
+    /// reported as added, removed, moved to another container or changed
+    /// (transform, script, XML UI, script state, asset URLs, other fields by
+    /// JSON path). Global script, UI, table, sky, lighting, tab states and
+    /// custom UI assets are compared too. Numbers are compared as text unless
+    /// --tolerance is given (transform values only). Objects with a missing or
+    /// repeated GUID are reported as ambiguous and paired by position in
+    /// their parent list. Unpack both saves and use a file diff to review
+    /// scripts line by line. Exit status: 0 when equal, 2 when different, 1
+    /// on errors.
+    Diff(SaveDiffCli),
+}
+
+#[derive(clap::Args)]
+struct SaveDiffCli {
+    /// The old save file (JSON)
+    old: PathBuf,
+    /// The new save file (JSON)
+    new: PathBuf,
+    /// Treat transform numbers closer than this as equal [default: exact text]
+    #[arg(long, value_name = "EPSILON", default_value = "0")]
+    tolerance: String,
+    /// Show the full line diff of changed scripts and XML UI
+    #[arg(long)]
+    scripts: bool,
+    /// List every change with old and new values
+    #[arg(long, short)]
+    verbose: bool,
+    /// Print machine-readable JSON instead of text
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(clap::Args)]
@@ -1978,7 +2012,8 @@ fn run_simple(command: Command) -> Result<(), CliError> {
                 | SaveCommand::FetchAssets(_)
                 | SaveCommand::RewriteUrls(_)
                 | SaveCommand::Rehost(_)
-                | SaveCommand::Lint(_),
+                | SaveCommand::Lint(_)
+                | SaveCommand::Diff(_),
         } => unreachable!("handled by run"),
     }
 }
@@ -2456,8 +2491,30 @@ fn run(cli: Cli) -> Result<ExitCode, CliError> {
         Command::Save {
             command: SaveCommand::Lint(args),
         } => run_lint(args),
+        Command::Save {
+            command: SaveCommand::Diff(args),
+        } => run_diff(args),
         command => run_simple(command).map(|()| ExitCode::SUCCESS),
     }
+}
+
+#[inline(never)]
+fn run_diff(args: SaveDiffCli) -> Result<ExitCode, CliError> {
+    let options = diff::Options {
+        old: &args.old,
+        new: &args.new,
+        tolerance: diff::parse_tolerance(&args.tolerance)?,
+        scripts: args.scripts,
+        verbose: args.verbose,
+        json: args.json,
+    };
+    let mut out = std::io::stdout().lock();
+    let status = diff::diff(&options, &mut out)?;
+    out.flush().map_err(|e| e.to_string())?;
+    Ok(match status {
+        diff::Status::Equal => ExitCode::SUCCESS,
+        diff::Status::Different => ExitCode::from(2),
+    })
 }
 
 #[inline(never)]
