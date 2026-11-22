@@ -39,6 +39,13 @@ pub(crate) struct SceneObject<'a, 'p> {
     pub owner: Owner<'a>,
 }
 
+/// Any JSON object of the save (the root, scene objects, nested maps).
+pub(crate) struct ObjectMap<'a, 'p> {
+    pub map: &'a Map<String, Value>,
+    pub path: &'p str,
+    pub owner: Owner<'a>,
+}
+
 /// A string-valued key/value pair of any JSON object in the save.
 pub(crate) struct Field<'a, 'p> {
     pub key: &'a str,
@@ -57,6 +64,8 @@ pub(crate) struct Ctx<'a> {
     pub root: &'a Value,
     /// Whether any rule that looks at string fields is on.
     pub field_rules_active: bool,
+    /// Whether any rule that looks at whole object maps is on.
+    pub map_rules_active: bool,
     findings: Vec<Finding>,
     /// Syntax-check results per distinct script text: `None` when it is fine,
     /// else the error message. Same scripts repeat on many objects.
@@ -77,6 +86,7 @@ impl<'a> Ctx<'a> {
         Ctx {
             config,
             root,
+            map_rules_active: crate::rules::map_rules().any(|id| config.severity(id).is_some()),
             field_rules_active: crate::rules::field_rules().any(|id| config.severity(id).is_some()),
             findings: Vec::new(),
             lua_cache: HashMap::new(),
@@ -85,6 +95,11 @@ impl<'a> Ctx<'a> {
             seen_top_guids: HashMap::new(),
             pending_first_paths: Vec::new(),
         }
+    }
+
+    /// The configured size limit for script state, in bytes.
+    pub fn state_limit(&self) -> usize {
+        self.config.state_limit
     }
 
     /// Whether rule `id` is switched on.

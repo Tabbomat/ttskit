@@ -189,7 +189,7 @@ fn only_scene_objects_are_checked() {
     let f = run(json!({
         "Other": [ {}, { "Transform": { "posX": 9999 } } ],
         "Nested": { "ObjectStates": [ {} ] },
-        "ObjectStates": [ { "GUID": "a", "Transform": { "posX": 1 }, "CustomDeck": { "1": {} } } ]
+        "ObjectStates": [ { "GUID": "a", "Transform": { "posX": 1 }, "CustomDeck": { "1": { "NumWidth": 1, "NumHeight": 1 } } } ]
     }));
     assert!(f.is_empty(), "{f:?}");
 }
@@ -897,4 +897,209 @@ fn script_rules_are_independent_and_can_be_off() {
             .iter()
             .all(|f| f.rule != "lua-syntax" && f.rule != "xml-malformed")
     );
+}
+
+// --- script state and deck rules ---
+
+fn with_limit(limit: usize) -> LintConfig {
+    let mut c = LintConfig::default();
+    c.state_limit = limit;
+    c
+}
+
+#[test]
+fn large_script_state_positive_and_limit_edge() {
+    let v = json!({
+        "LuaScriptState": "12345",
+        "ObjectStates": [ { "GUID": "a", "LuaScriptState": "123456" } ]
+    });
+    let f = lint(&save(v.clone()), &with_limit(5));
+    let got: Vec<_> = f.iter().map(|f| (f.rule, f.path.as_str())).collect();
+    // Exactly at the limit is fine; one byte over is reported.
+    assert_eq!(
+        got,
+        [("large-script-state", "ObjectStates[0].LuaScriptState")]
+    );
+    assert!(f[0].message.contains('6') && f[0].message.contains('5'));
+    assert_eq!(f[0].guid.as_deref(), Some("a"));
+    // Bytes, not characters; the root counts too.
+    let f = lint(
+        &save(json!({ "LuaScriptState": "\u{e4}\u{e4}\u{e4}" })),
+        &with_limit(5),
+    );
+    assert_eq!(f[0].path, "LuaScriptState");
+}
+
+#[test]
+fn large_script_state_negative() {
+    let v = json!({ "ObjectStates": [ { "GUID": "a", "LuaScriptState": "x".repeat(1000) },
+        { "GUID": "b", "LuaScriptState": 5 }, { "GUID": "c" } ] });
+    assert!(lint(&save(v.clone()), &LintConfig::default()).is_empty());
+    assert!(lint(&save(v), &with_limit(1000)).is_empty());
+}
+
+#[test]
+fn large_script_state_uses_the_toml_limit() {
+    let c = LintConfig::from_toml_table("[lint]\nstate_limit = 3").unwrap();
+    let f = lint(&save(json!({ "LuaScriptState": "abcd" })), &c);
+    assert_eq!(rules_of(&f), ["large-script-state"]);
+}
+
+#[test]
+fn script_state_not_json_positive() {
+    let f = run(json!({
+        "ObjectStates": [ { "GUID": "a", "LuaScript": "local s = JSON.decode(self.script_state)",
+                            "LuaScriptState": "{\"a\": 1,\n oops}" } ],
+        "LuaScript": "JSON.decode(x)", "LuaScriptState": "not json"
+    }));
+    let got: Vec<_> = f.iter().map(|f| (f.rule, f.path.as_str())).collect();
+    assert_eq!(
+        got,
+        [
+            ("script-state-not-json", "LuaScriptState"),
+            ("script-state-not-json", "ObjectStates[0].LuaScriptState"),
+        ]
+    );
+    assert!(f[1].message.contains("line 2"), "{}", f[1].message);
+}
+
+#[test]
+fn script_state_not_json_negative() {
+    let f = run(json!({ "ObjectStates": [
+        { "GUID": "a", "LuaScript": "JSON.decode(s)", "LuaScriptState": "{\"a\": [1, 2.50, 1E+400, null]}" },
+        { "GUID": "b", "LuaScript": "JSON.decode(s)", "LuaScriptState": "  " },
+        { "GUID": "c", "LuaScript": "JSON.decode(s)", "LuaScriptState": "" },
+        { "GUID": "d", "LuaScript": "print(1)", "LuaScriptState": "plain text" },
+        { "GUID": "e", "LuaScriptState": "plain text" },
+        { "GUID": "f", "LuaScript": "JSON.decode(s)" }
+    ] }));
+    assert!(f.is_empty(), "{f:?}");
+}
+
+#[test]
+fn deck_size_positive() {
+    let f = run_rule(
+        json!({ "ObjectStates": [ { "GUID": "a", "CustomDeck": {
+            "1": { "NumWidth": 11, "NumHeight": 7 },
+            "2": { "NumWidth": 10, "NumHeight": 8 },
+            "3": { "NumWidth": 0, "NumHeight": 1 },
+            "4": { "NumHeight": 1 },
+            "5": { "NumWidth": 2.5, "NumHeight": "3" },
+            "6": 7
+        } } ] }),
+        "deck-size",
+    );
+    let paths: Vec<_> = f.iter().map(|f| f.path.as_str()).collect();
+    assert_eq!(
+        paths,
+        [
+            "ObjectStates[0].CustomDeck.1",
+            "ObjectStates[0].CustomDeck.2",
+            "ObjectStates[0].CustomDeck.3",
+            "ObjectStates[0].CustomDeck.4",
+            "ObjectStates[0].CustomDeck.5",
+            "ObjectStates[0].CustomDeck.6",
+        ]
+    );
+    assert!(f[0].message.contains("NumWidth") && !f[0].message.contains("NumHeight"));
+    assert!(f[3].message.contains("NumWidth is missing"));
+    assert!(f[4].message.contains("NumWidth") && f[4].message.contains("NumHeight"));
+    assert_eq!(f[0].severity, Severity::Warning);
+}
+
+#[test]
+fn deck_size_negative() {
+    let f = run_rule(
+        json!({ "ObjectStates": [ { "GUID": "a", "CustomDeck": {
+            "1": { "NumWidth": 10, "NumHeight": 7 },
+            "2": { "NumWidth": 1, "NumHeight": 1 }
+        } }, { "GUID": "b", "CustomDeck": 5 }, { "GUID": "c", "Other": { "NumWidth": 99 } } ] }),
+        "deck-size",
+    );
+    assert!(f.is_empty(), "{f:?}");
+}
+
+fn deck_obj(extra: Value) -> Value {
+    let mut o = json!({ "GUID": "d", "CustomDeck": {
+        "1": { "NumWidth": 2, "NumHeight": 2 },
+        "12": { "NumWidth": 10, "NumHeight": 7 },
+        "3": { "NumWidth": 99, "NumHeight": 1 }
+    } });
+    for (k, v) in extra.as_object().unwrap() {
+        o[k] = v.clone();
+    }
+    json!({ "ObjectStates": [o] })
+}
+
+#[test]
+fn deck_id_out_of_range_positive() {
+    let f = run_rule(
+        deck_obj(
+            json!({ "DeckIDs": [100, 103, 104, 200, -1, 1.5, "x", 1269, 1270], "CardID": -5 }),
+        ),
+        "deck-id-out-of-range",
+    );
+    let paths: Vec<_> = f.iter().map(|f| f.path.as_str()).collect();
+    assert_eq!(
+        paths,
+        [
+            "ObjectStates[0].CardID",
+            "ObjectStates[0].DeckIDs[2]",
+            "ObjectStates[0].DeckIDs[3]",
+            "ObjectStates[0].DeckIDs[4]",
+            "ObjectStates[0].DeckIDs[5]",
+            "ObjectStates[0].DeckIDs[6]",
+            "ObjectStates[0].DeckIDs[8]",
+        ]
+    );
+    assert!(f[0].message.contains("negative"));
+    assert!(f[1].message.contains("card 4 of sheet 1"));
+    assert!(f[2].message.contains("sheet 2"));
+    assert!(f[3].message.contains("negative"));
+    assert_eq!(f[0].severity, Severity::Error);
+    assert_eq!(f[0].guid.as_deref(), Some("d"));
+}
+
+#[test]
+fn deck_id_out_of_range_negative() {
+    let f = run_rule(
+        json!({ "ObjectStates": [
+            { "GUID": "a", "CustomDeck": { "1": { "NumWidth": 2, "NumHeight": 2 }, "12": { "NumWidth": 10, "NumHeight": 7 } },
+              "DeckIDs": [100, 101, 102, 103, 1200, 1269], "CardID": 4711 },
+            { "GUID": "b", "DeckIDs": [999, 5] },
+            { "GUID": "c", "CustomDeck": { "1": { "NumWidth": 2, "NumHeight": 2 } }, "CardID": "text" },
+            { "GUID": "d", "CustomDeck": { "3": { "NumWidth": 99, "NumHeight": 1 } }, "DeckIDs": [399, 350] }
+        ] }),
+        "deck-id-out-of-range",
+    );
+    // Invalid grids are left to deck-size; a deck without CustomDeck is ignored.
+    assert!(f.is_empty(), "{f:?}");
+}
+
+#[test]
+fn deck_id_findings_are_capped() {
+    let ids: Vec<i64> = (0..50).map(|_| 9999).collect();
+    let f = run_rule(deck_obj(json!({ "DeckIDs": ids })), "deck-id-out-of-range");
+    assert_eq!(f.len(), 21);
+    assert!(f[20].message.contains("30 more"), "{}", f[20].message);
+    assert_eq!(f[20].path, "ObjectStates[0].DeckIDs");
+}
+
+#[test]
+fn deck_rules_see_nested_objects_once_and_can_be_off() {
+    let v = json!({ "ObjectStates": [ { "GUID": "deck", "ContainedObjects": [
+        { "GUID": "card", "CardID": 500, "CustomDeck": { "5": { "NumWidth": 0, "NumHeight": 1 }, "6": { "NumWidth": 1, "NumHeight": 1 } } }
+    ] } ] });
+    let f = run(v.clone());
+    let got: Vec<_> = f.iter().map(|f| (f.rule, f.path.as_str())).collect();
+    assert_eq!(
+        got,
+        [(
+            "deck-size",
+            "ObjectStates[0].ContainedObjects[0].CustomDeck.5"
+        )]
+    );
+    let mut c = LintConfig::default();
+    c.set("deck-size", Setting::Off).unwrap();
+    assert!(lint(&save(v), &c).is_empty());
 }

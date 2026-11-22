@@ -6,7 +6,7 @@ use serde_json::{Map, Value};
 use ttskit_core::Save;
 
 use crate::config::LintConfig;
-use crate::ctx::{Ctx, Field, Finding, Owner, SceneObject};
+use crate::ctx::{Ctx, Field, Finding, ObjectMap, Owner, SceneObject};
 use crate::rules;
 
 /// What the walker knows about the value it is visiting.
@@ -74,6 +74,9 @@ fn walk_map<'a>(
         )),
         _ => owner,
     };
+    if ctx.map_rules_active {
+        rules::check_map(ctx, &ObjectMap { map, path, owner });
+    }
     if matches!(role, Role::Scene | Role::TopScene) {
         let top_level = role == Role::TopScene;
         let object = SceneObject {
