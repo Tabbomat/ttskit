@@ -60,6 +60,20 @@ pub struct DeckSplitArgs {
     pub json: bool,
 }
 
+#[cfg_attr(not(feature = "image"), allow(dead_code))]
+pub struct DeckObjectArgs {
+    pub description: PathBuf,
+    pub out: Option<PathBuf>,
+    pub face_urls: Vec<String>,
+    pub back_urls: Vec<String>,
+    pub unique_backs: bool,
+    pub config: Option<PathBuf>,
+    pub nicknames_from_files: bool,
+    pub yes: bool,
+    pub dry_run: bool,
+    pub json: bool,
+}
+
 /// Parses `--card-size`: `WIDTHxHEIGHT`, both at least 1.
 pub fn parse_card_size(text: &str) -> Result<(u32, u32), String> {
     let bad = || format!("invalid card size '{text}': use WIDTHxHEIGHT in pixels, e.g. 300x420");
@@ -398,6 +412,294 @@ pub fn deck_split(args: &DeckSplitArgs, out: &mut dyn Write) -> Result<bool, Str
     }
     report.write(args.json, out).map_err(|e| e.to_string())?;
     Ok(report.errors.is_empty())
+}
+
+#[cfg(not(feature = "image"))]
+pub fn deck_object(_args: &DeckObjectArgs, _out: &mut dyn Write) -> Result<bool, String> {
+    Err(
+        "this ttskit build has no image support; rebuild with `cargo build --features image`"
+            .to_owned(),
+    )
+}
+
+/// Finds the shared URL of local files in the project manifest.
+#[cfg(feature = "image")]
+struct ManifestUrls {
+    manifest: ttskit_cloud::Manifest,
+    local_dir: PathBuf,
+}
+
+#[cfg(feature = "image")]
+impl ManifestUrls {
+    fn load(config: &Path) -> Result<Self, String> {
+        let project = ttskit_cloud::ProjectConfig::load(config).map_err(|e| e.to_string())?;
+        let config_dir = match config.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent,
+            _ => Path::new("."),
+        };
+        let manifest_file = config_dir.join(ttskit_cloud::Manifest::FILE_NAME);
+        let manifest = ttskit_cloud::Manifest::load(&manifest_file).map_err(|e| e.to_string())?;
+        Ok(ManifestUrls {
+            manifest,
+            local_dir: project.resolve_local_dir(config_dir),
+        })
+    }
+
+    /// The URL of the uploaded copy of `file`. Refused when the manifest has
+    /// no entry for it, or only for other content (the file changed after the
+    /// upload), so that an object never points at an outdated sheet.
+    fn url_of(&self, file: &Path) -> Result<String, String> {
+        let shown = file.display();
+        let rel = crate::cloud::local_path_in(&self.local_dir, file).ok_or_else(|| {
+            format!(
+                "{shown}: not a file below the project's local directory ({}), so the manifest cannot know it",
+                self.local_dir.display()
+            )
+        })?;
+        let data = std::fs::read(file).map_err(|e| format!("{shown}: {e}"))?;
+        let sha1 = ttskit_cloud::sha1_hex(&data);
+        let of_path: Vec<_> = self
+            .manifest
+            .entries
+            .iter()
+            .filter(|e| e.path.as_deref() == Some(rel.as_str()))
+            .collect();
+        if of_path.is_empty() {
+            return Err(format!(
+                "{shown}: '{rel}' is not in the manifest; upload it first (`ttskit cloud sync push`) or give the URL"
+            ));
+        }
+        let mut urls: Vec<&str> = of_path
+            .iter()
+            .filter(|e| e.sha1.eq_ignore_ascii_case(&sha1))
+            .map(|e| e.url.as_str())
+            .collect();
+        urls.sort_unstable();
+        urls.dedup();
+        match urls.as_slice() {
+            [url] => Ok((*url).to_owned()),
+            [] => Err(format!(
+                "{shown}: changed since it was uploaded (the manifest has other content for '{rel}'); upload it again (`ttskit cloud sync push`) or give the URL"
+            )),
+            _ => Err(format!(
+                "{shown}: the manifest has {} different URLs for this content of '{rel}'; give the URL",
+                urls.len()
+            )),
+        }
+    }
+}
+
+#[cfg(feature = "image")]
+fn is_url(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.starts_with("http://") || lower.starts_with("https://")
+}
+
+#[cfg(feature = "image")]
+pub fn deck_object(args: &DeckObjectArgs, out: &mut dyn Write) -> Result<bool, String> {
+    use super::deck_object::{Meta, ObjectInput, build_object};
+
+    if args.out.is_none() && !args.dry_run {
+        return Err(
+            "say where the object goes: --out FILE (or use --dry-run to only see the plan)"
+                .to_owned(),
+        );
+    }
+    let text = std::fs::read_to_string(&args.description).map_err(|e| {
+        format!(
+            "{}: cannot read the description: {e}",
+            args.description.display()
+        )
+    })?;
+    let description = super::deck_grid::parse_description(&text)
+        .map_err(|e| format!("{}: {e}", args.description.display()))?;
+    let sheets = description.sheets.len();
+    let base = match args.description.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+
+    let config = match &args.config {
+        Some(path) => Some(path.clone()),
+        None => {
+            let default = PathBuf::from(ttskit_cloud::ProjectConfig::FILE_NAME);
+            default.exists().then_some(default)
+        }
+    };
+    // A value is a URL, or the local path of an uploaded file; the manifest is
+    // only loaded when a path needs it.
+    let mut manifest: Option<ManifestUrls> = None;
+    let mut resolve = |value: &str, what: &str| -> Result<String, String> {
+        if is_url(value) {
+            return Ok(value.to_owned());
+        }
+        if manifest.is_none() {
+            let config = config.as_deref().ok_or_else(|| {
+                format!(
+                    "{what} needs the project manifest: give --config FILE (or run in the project directory), or give URLs"
+                )
+            })?;
+            manifest = Some(ManifestUrls::load(config)?);
+        }
+        manifest
+            .as_ref()
+            .expect("just loaded")
+            .url_of(Path::new(value))
+    };
+
+    let face_urls: Vec<String> = if args.face_urls.is_empty() {
+        description
+            .sheets
+            .iter()
+            .map(|s| {
+                let file = base.join(&s.file);
+                resolve(&file.to_string_lossy(), "looking up the face sheets")
+            })
+            .collect::<Result<_, _>>()?
+    } else {
+        args.face_urls
+            .iter()
+            .map(|v| resolve(v, "a face sheet given as a path"))
+            .collect::<Result<_, _>>()?
+    };
+    if args.back_urls.is_empty() {
+        return Err(
+            "give --back-url (a URL or the local path of an uploaded back image)".to_owned(),
+        );
+    }
+    let back_urls: Vec<String> = args
+        .back_urls
+        .iter()
+        .map(|v| resolve(v, "a back image given as a path"))
+        .collect::<Result<_, _>>()?;
+    if face_urls.len() != sheets {
+        return Err(format!(
+            "the description has {sheets} sheets, but {} --face-url values were given",
+            face_urls.len()
+        ));
+    }
+
+    let meta = Meta::default();
+    let value = build_object(&ObjectInput {
+        description: &description,
+        face_urls: &face_urls,
+        back_urls: &back_urls,
+        unique_backs: args.unique_backs,
+        meta: &meta,
+        nicknames_from_files: args.nicknames_from_files,
+    })?;
+    let cards: usize = description.sheets.iter().map(|s| s.cards.len()).sum();
+    let bytes = ttskit_core::Save::from_value(value)
+        .map_err(|e| e.to_string())?
+        .to_vec();
+
+    let mut report = ObjectReport {
+        dry_run: args.dry_run,
+        object: if cards == 1 { "card" } else { "deck" },
+        cards,
+        sheets,
+        face_urls,
+        back_urls,
+        file: None,
+        errors: Vec::new(),
+    };
+    if let Some(target) = &args.out {
+        if same_file(&args.description, target) {
+            return Err(format!(
+                "{} would overwrite an input of this run",
+                target.display()
+            ));
+        }
+        let overwrote = target.exists();
+        if overwrote && !args.yes && !args.dry_run {
+            return Err(format!(
+                "{} exists; use --yes to overwrite it",
+                target.display()
+            ));
+        }
+        if !args.dry_run
+            && let Err(error) = write_atomic(target, &bytes)
+        {
+            report.errors.push(format!("{}: {error}", target.display()));
+        }
+        report.file = Some(ObjectFile {
+            path: target.display().to_string(),
+            bytes: bytes.len() as u64,
+            overwrote,
+            written: !args.dry_run && report.errors.is_empty(),
+        });
+    }
+    report.write(args.json, out).map_err(|e| e.to_string())?;
+    Ok(report.errors.is_empty())
+}
+
+#[cfg(feature = "image")]
+#[derive(Serialize)]
+struct ObjectFile {
+    path: String,
+    bytes: u64,
+    overwrote: bool,
+    written: bool,
+}
+
+#[cfg(feature = "image")]
+#[derive(Serialize)]
+struct ObjectReport {
+    dry_run: bool,
+    /// `deck`, or `card` for a single card.
+    object: &'static str,
+    cards: usize,
+    sheets: usize,
+    face_urls: Vec<String>,
+    back_urls: Vec<String>,
+    file: Option<ObjectFile>,
+    errors: Vec<String>,
+}
+
+#[cfg(feature = "image")]
+impl ObjectReport {
+    fn write(&self, json: bool, out: &mut dyn Write) -> std::io::Result<()> {
+        if json {
+            serde_json::to_writer(&mut *out, self)?;
+            return writeln!(out);
+        }
+        for (n, url) in self.face_urls.iter().enumerate() {
+            writeln!(out, "  sheet {} face: {url}", n + 1)?;
+        }
+        for (n, url) in self.back_urls.iter().enumerate() {
+            writeln!(out, "  back {}: {url}", n + 1)?;
+        }
+        for e in &self.errors {
+            writeln!(out, "error: {e}")?;
+        }
+        let what = format!(
+            "{} with {} card{} on {} sheet{}",
+            self.object,
+            self.cards,
+            if self.cards == 1 { "" } else { "s" },
+            self.sheets,
+            if self.sheets == 1 { "" } else { "s" }
+        );
+        let replaces = |f: &ObjectFile| if f.overwrote { ", overwrites" } else { "" };
+        match &self.file {
+            Some(f) if f.written => {
+                writeln!(out, "{}: {what}, {} bytes{}", f.path, f.bytes, replaces(f))
+            }
+            Some(f) => writeln!(
+                out,
+                "{}: {what}, {} bytes{}{}",
+                f.path,
+                f.bytes,
+                replaces(f),
+                if self.dry_run {
+                    " (dry run, nothing written)"
+                } else {
+                    " (not written)"
+                }
+            ),
+            None => writeln!(out, "{what} (dry run, nothing written)"),
+        }
+    }
 }
 
 /// True when both paths name the same file: the same path as text, or the

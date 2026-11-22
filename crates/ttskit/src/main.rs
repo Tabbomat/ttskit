@@ -579,6 +579,59 @@ enum DeckCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Write the saved-object JSON of a deck built by `deck build`
+    ///
+    /// Reads DESCRIPTION, the NAME.json of `deck build`, and writes FILE, an
+    /// object file for Tabletop Simulator (unofficial; see
+    /// docs/deck-sheets.md): a `DeckCustom` with one `CustomDeck` entry per
+    /// sheet, `DeckIDs` and one card per card (card id = sheet number times
+    /// 100 plus the slot), or a single `CardCustom` for a one-card deck.
+    /// The sheets must already be uploaded. Give each face sheet as a URL
+    /// with --face-url (once per sheet, in order), or leave it out: the
+    /// sheets named in the description (relative to its folder) are then
+    /// looked up by local path in the project manifest (--config, default
+    /// ttskit.toml in the current directory; the manifest is the one
+    /// `cloud sync push` and `cloud upload` keep). A sheet that changed
+    /// after its upload is refused. --back-url is a URL or the local path of
+    /// an uploaded back image; with --unique-backs give one per sheet.
+    /// BackIsHidden comes from the description (`deck build --no-hidden-slot`
+    /// sets it). Card nicknames are empty unless --nicknames-from-files
+    /// names each card after its source file. GUIDs are derived from the
+    /// content, so output is identical between runs. An existing FILE is
+    /// not overwritten without --yes. --dry-run writes nothing. Exits with
+    /// status 1 on any error.
+    Object {
+        /// The description file (NAME.json) written by `deck build`
+        #[arg(value_name = "DESCRIPTION")]
+        description: PathBuf,
+        /// The object file to write
+        #[arg(long, value_name = "FILE")]
+        out: Option<PathBuf>,
+        /// URL (or local path of an uploaded file) of a face sheet; once per sheet [default: look the sheets up in the manifest]
+        #[arg(long = "face-url", value_name = "URL")]
+        face_urls: Vec<String>,
+        /// URL (or local path of an uploaded file) of the card back; with --unique-backs once per sheet
+        #[arg(long = "back-url", value_name = "URL")]
+        back_urls: Vec<String>,
+        /// Every card has its own back: one back sheet per face sheet (UniqueBack)
+        #[arg(long)]
+        unique_backs: bool,
+        /// The project config for the manifest lookup [default: ttskit.toml in the current directory if it exists]
+        #[arg(long, value_name = "PATH")]
+        config: Option<PathBuf>,
+        /// Name each card after its source file (without extension)
+        #[arg(long)]
+        nicknames_from_files: bool,
+        /// Overwrite an existing output file
+        #[arg(long)]
+        yes: bool,
+        /// Build the object and report it, but write nothing
+        #[arg(long)]
+        dry_run: bool,
+        /// Print one JSON object with all results
+        #[arg(long)]
+        json: bool,
+    },
     /// Cut a deck sheet into single card images (the reverse of `deck build`)
     ///
     /// Writes NAME_00.png, NAME_01.png, ... into --out-dir, one per card slot
@@ -1820,6 +1873,47 @@ fn run(cli: Cli) -> Result<ExitCode, CliError> {
                     count,
                     no_hidden_slot,
                     skip_hidden,
+                    yes,
+                    dry_run,
+                    json,
+                },
+                &mut stdout,
+            )?;
+            stdout.flush().map_err(|e| e.to_string())?;
+            Ok(if ok {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            })
+        }
+        Command::Image {
+            command:
+                ImageCommand::Deck {
+                    command:
+                        DeckCommand::Object {
+                            description,
+                            out,
+                            face_urls,
+                            back_urls,
+                            unique_backs,
+                            config,
+                            nicknames_from_files,
+                            yes,
+                            dry_run,
+                            json,
+                        },
+                },
+        } => {
+            let mut stdout = std::io::stdout().lock();
+            let ok = image::deck_object(
+                &image::DeckObjectArgs {
+                    description,
+                    out,
+                    face_urls,
+                    back_urls,
+                    unique_backs,
+                    config,
+                    nicknames_from_files,
                     yes,
                     dry_run,
                     json,

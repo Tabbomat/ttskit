@@ -4,8 +4,6 @@
 //! be tested exactly. The field set and defaults were taken from a 60 card
 //! deck made in the game (see docs/deck-sheets.md).
 
-#![allow(dead_code)] // wired into the command by the next commit
-
 use std::collections::BTreeSet;
 
 use serde_json::{Map, Value, json};

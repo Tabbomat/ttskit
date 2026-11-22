@@ -22,24 +22,7 @@ pub struct GridSpec {
 /// The entry of the sheet file `sheet_file` (compared as a whole, case
 /// sensitive) in the text of a description file.
 pub fn from_description(text: &str, sheet_file: &str) -> Result<GridSpec, String> {
-    let value: Value = serde_json::from_str(text.trim_start_matches('\u{feff}'))
-        .map_err(|e| format!("the description is not valid JSON: {e}"))?;
-    match value.get("format_version").and_then(Value::as_u64) {
-        Some(v) if v == u64::from(DESCRIPTION_VERSION) => {}
-        Some(v) => {
-            return Err(format!(
-                "the description has format_version {v}; this ttskit reads version {DESCRIPTION_VERSION} (is it from a newer ttskit?)"
-            ));
-        }
-        None => {
-            return Err(
-                "the description has no format_version; it is not a file written by `ttskit image deck build`"
-                    .to_owned(),
-            );
-        }
-    }
-    let description: Description =
-        serde_json::from_value(value).map_err(|e| format!("the description is malformed: {e}"))?;
+    let description = parse_description(text)?;
     let Some(sheet) = description.sheets.iter().find(|s| s.file == sheet_file) else {
         let names: Vec<&str> = description.sheets.iter().map(|s| s.file.as_str()).collect();
         return Err(format!(
@@ -57,6 +40,27 @@ pub fn from_description(text: &str, sheet_file: &str) -> Result<GridSpec, String
         count: Some(sheet.card_count),
         hidden_slot: sheet.hidden_slot.is_some(),
     })
+}
+
+/// Parses the text of a description file, refusing other versions.
+pub fn parse_description(text: &str) -> Result<Description, String> {
+    let value: Value = serde_json::from_str(text.trim_start_matches('\u{feff}'))
+        .map_err(|e| format!("the description is not valid JSON: {e}"))?;
+    match value.get("format_version").and_then(Value::as_u64) {
+        Some(v) if v == u64::from(DESCRIPTION_VERSION) => {}
+        Some(v) => {
+            return Err(format!(
+                "the description has format_version {v}; this ttskit reads version {DESCRIPTION_VERSION} (is it from a newer ttskit?)"
+            ));
+        }
+        None => {
+            return Err(
+                "the description has no format_version; it is not a file written by `ttskit image deck build`"
+                    .to_owned(),
+            );
+        }
+    }
+    serde_json::from_value(value).map_err(|e| format!("the description is malformed: {e}"))
 }
 
 /// Every `CustomDeck` map found anywhere in `value` (object states at any

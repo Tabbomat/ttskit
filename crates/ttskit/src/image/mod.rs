@@ -370,4 +370,7 @@ mod deck;
 mod deck_grid;
 #[cfg(feature = "image")]
 mod deck_object;
-pub use deck::{DeckBuildArgs, DeckSplitArgs, FitKind, deck_build, deck_split, parse_card_size};
+pub use deck::{
+    DeckBuildArgs, DeckObjectArgs, DeckSplitArgs, FitKind, deck_build, deck_object, deck_split,
+    parse_card_size,
+};
