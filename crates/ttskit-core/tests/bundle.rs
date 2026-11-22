@@ -52,6 +52,7 @@ fn run(f: &Fixture, includes: &[&Path]) -> Result<Value, String> {
         keep_eol: false,
         native: Eol::Crlf,
         includes: includes.iter().map(|p| p.to_path_buf()).collect(),
+        ..PackOptions::new(false)
     };
     pack(&f.tree, &options)
         .map(|p| serde_json::from_slice(&p.bytes).unwrap())

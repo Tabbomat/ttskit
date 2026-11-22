@@ -10,12 +10,14 @@
 //! See the module documentation for why the model is value-backed and which
 //! round-trip guarantees apply.
 
+pub mod asset_ref;
 pub mod check;
 pub mod fetch_assets;
 pub mod pack;
 pub mod save;
 pub mod unpack;
 
+pub use asset_ref::{AssetEntry, AssetMap, PLACEHOLDER_PREFIX, placeholder};
 pub use check::{
     CheckConfig, CheckReport, Fetch, FetchError, FetchMethod, FetchRequest, FetchResponse, Outcome,
     UrlResult, check_urls,
@@ -25,7 +27,7 @@ pub use fetch_assets::{
     FetchPlan, FetchReport, Fetched, Index, IndexEntry, Size, Skipped, Source, Store, StoreError,
     cache_key, detect_type, fetch_assets, fetch_assets_with_plan, plan as plan_fetch, probe_sizes,
 };
-pub use pack::{PackError, PackOptions, Packed, pack};
+pub use pack::{PackError, PackOptions, Packed, ResolvedAsset, pack};
 pub use save::write::Eol;
 pub use save::{
     AssetUrl, HostClass, MapProblem, ObjectView, ObjectViewMut, Occurrence, RewriteOptions,

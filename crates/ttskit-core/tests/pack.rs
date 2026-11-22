@@ -11,7 +11,7 @@ fn options(keep_eol: bool) -> PackOptions {
     PackOptions {
         keep_eol,
         native: Eol::Crlf,
-        includes: Vec::new(),
+        ..PackOptions::new(keep_eol)
     }
 }
 
@@ -452,7 +452,7 @@ fn metadata_is_optional_and_checked() {
         &PackOptions {
             keep_eol: true,
             native: Eol::Lf,
-            includes: Vec::new(),
+            ..PackOptions::new(true)
         },
     )
     .unwrap();

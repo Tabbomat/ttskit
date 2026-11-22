@@ -6,12 +6,13 @@
 
 mod bundle;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
 
+use crate::asset_ref::{AssetMap, PLACEHOLDER_PREFIX, find_placeholders, replace_placeholders};
 use crate::save::write::{Eol, to_vec_with};
 use crate::unpack::{FORMAT_VERSION, METADATA_PATH, compact_state, eol};
 
@@ -59,6 +60,15 @@ pub enum PackError {
         /// The value found.
         found: String,
     },
+    /// Asset placeholders without a usable map entry. Both lists are sorted
+    /// and free of duplicates.
+    #[error("{}", assets_message(.missing, .stale))]
+    Assets {
+        /// Paths with no entry in the asset map.
+        missing: Vec<String>,
+        /// Paths whose entry is stale.
+        stale: Vec<String>,
+    },
     /// The tree does not follow the layout.
     #[error("{}: {message}", path.display())]
     Layout {
@@ -81,6 +91,12 @@ pub struct PackOptions {
     /// `Name.ttslua`) and `<Include src="Name"/>` (`Name.xml`). When empty,
     /// scripts and UI are packed as they are.
     pub includes: Vec<PathBuf>,
+    /// Resolves `asset:{PATH}` placeholders. Always consulted: with an empty
+    /// map, any placeholder in the save is an error.
+    pub assets: AssetMap,
+    /// Resolve placeholders of stale entries too (with a warning) instead of
+    /// failing.
+    pub allow_stale: bool,
 }
 
 impl PackOptions {
@@ -90,6 +106,8 @@ impl PackOptions {
             keep_eol,
             native: Eol::native(),
             includes: Vec::new(),
+            assets: AssetMap::new(),
+            allow_stale: false,
         }
     }
 }
@@ -103,6 +121,22 @@ pub struct Packed {
     pub objects: usize,
     /// Files and directories that were ignored.
     pub warnings: Vec<String>,
+    /// The asset placeholders that were replaced, one per distinct path,
+    /// sorted by path. Empty when the tree has none.
+    pub assets: Vec<ResolvedAsset>,
+}
+
+/// An asset placeholder path that [`pack`] replaced by a URL.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedAsset {
+    /// The path inside the placeholder.
+    pub path: String,
+    /// The URL it was replaced by.
+    pub url: String,
+    /// The map marked the entry stale (only possible with `allow_stale`).
+    pub stale: bool,
+    /// Number of occurrences replaced.
+    pub count: usize,
 }
 
 /// What `.ttskit/unpack.json` tells pack. Everything is optional.
@@ -137,17 +171,94 @@ pub fn pack(dir: &Path, options: &PackOptions) -> Result<Packed, PackError> {
         objects: 0,
     };
     packer.read_meta()?;
-    let root = packer.object("", "save.json", true)?;
+    let mut root = Value::Object(packer.object("", "save.json", true)?);
+    let assets = resolve_assets(&mut root, options, &mut packer.warnings)?;
     let layout = if options.keep_eol {
         packer.meta.layout_eol.unwrap_or(options.native)
     } else {
         Eol::Lf
     };
     Ok(Packed {
-        bytes: to_vec_with(&Value::Object(root), layout, false),
+        bytes: to_vec_with(&root, layout, false),
         objects: packer.objects,
         warnings: packer.warnings,
+        assets,
     })
+}
+
+/// Calls `f` for every string value (not key) of `value`.
+fn for_each_string(value: &mut Value, f: &mut dyn FnMut(&mut String)) {
+    match value {
+        Value::String(s) => f(s),
+        Value::Array(items) => items.iter_mut().for_each(|v| for_each_string(v, f)),
+        Value::Object(map) => map.values_mut().for_each(|v| for_each_string(v, f)),
+        _ => {}
+    }
+}
+
+/// Replaces the `asset:{PATH}` placeholders in all string values of `root`.
+/// Nothing is changed when any placeholder cannot be resolved.
+fn resolve_assets(
+    root: &mut Value,
+    options: &PackOptions,
+    warnings: &mut Vec<String>,
+) -> Result<Vec<ResolvedAsset>, PackError> {
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    for_each_string(root, &mut |s| {
+        for path in find_placeholders(s) {
+            *counts.entry(path.to_owned()).or_default() += 1;
+        }
+    });
+    if counts.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut missing = Vec::new();
+    let mut stale = Vec::new();
+    let mut resolved = Vec::new();
+    for (path, count) in counts {
+        match options.assets.get(&path) {
+            None => missing.push(path),
+            Some(entry) if entry.stale && !options.allow_stale => stale.push(path),
+            Some(entry) => resolved.push(ResolvedAsset {
+                url: entry.url.clone(),
+                stale: entry.stale,
+                path,
+                count,
+            }),
+        }
+    }
+    if !missing.is_empty() || !stale.is_empty() {
+        return Err(PackError::Assets { missing, stale });
+    }
+    for asset in resolved.iter().filter(|a| a.stale) {
+        warnings.push(format!(
+            "asset {} is stale: the local file differs from the manifest",
+            asset.path
+        ));
+    }
+    for_each_string(root, &mut |s| {
+        if s.contains(PLACEHOLDER_PREFIX) {
+            *s = replace_placeholders(s, |p| options.assets.get(p).map(|e| e.url.as_str()));
+        }
+    });
+    Ok(resolved)
+}
+
+fn assets_message(missing: &[String], stale: &[String]) -> String {
+    let mut message = String::from("asset placeholders cannot be resolved:");
+    if !missing.is_empty() {
+        message.push_str(&format!(
+            "\n  no entry for: {}",
+            missing.join("\n  no entry for: ")
+        ));
+    }
+    if !stale.is_empty() {
+        message.push_str(&format!(
+            "\n  changed since last push (stale): {}",
+            stale.join("\n  changed since last push (stale): ")
+        ));
+    }
+    message
 }
 
 struct Packer {
