@@ -68,7 +68,7 @@ decks (cards spawned from JSON with `UniqueBack: false`).
 ## Deck objects (`image deck object`)
 
 The field set of `image deck object` was compared with a 60 card deck made in
-the game's custom deck dialog (one 10x7 sheet, `UniqueBack`, `Sideways` and
+the game's custom deck dialog (one sheet, `UniqueBack`, `Sideways` and
 `BackIsHidden` all off). Observed there:
 
 - The object is a `DeckCustom` with `DeckIDs` 100 to 159 and a `CustomDeck`
@@ -96,7 +96,6 @@ verified against the game's own output.
   spawned as a deck of type `Deck` with 5 cards; the nicknames were the file
   names and every card had its own GUID.
 - A one-card object spawned as a `Card` with the nickname of its file.
-- Looked at in the game: the 5 card deck shows the sheet's cards correctly. The one-card object shows slot 0 of the
-  sheet it points at (the image of its own sheet, whatever the file name in the nickname says).
-- Not checked in the game: the hand view with `BackIsHidden` on and off for generated objects, and
-  `UniqueBack: true`.
+- The first check used a deck with a 10x7 grid over a sheet image that is really 9x7, so
+  the cards showed two card parts and the check proved nothing about the images. It is being
+  repeated with the 9x7 grid, with `BackIsHidden` on and off (result pending).
