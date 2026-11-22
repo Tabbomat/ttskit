@@ -28,8 +28,9 @@ pub use fetch_assets::{
 pub use pack::{PackError, PackOptions, Packed, pack};
 pub use save::write::Eol;
 pub use save::{
-    AssetUrl, HostClass, ObjectView, ObjectViewMut, Occurrence, Save, SaveError, SaveView,
-    SaveViewMut,
+    AssetUrl, HostClass, MapProblem, ObjectView, ObjectViewMut, Occurrence, RewriteOptions,
+    RewriteReport, RuleError, RuleReport, Save, SaveError, SaveView, SaveViewMut, Touched, UrlRule,
+    UrlRules, parse_map_tsv,
 };
 pub use unpack::{
     OutputFile, UnpackError, UnpackReport, Unpacked, WriteOptions, WritePlan, unpack,
