@@ -1,0 +1,311 @@
+//! `ttskit image deck`: assemble card images into the sheets of a custom deck.
+
+use std::io::Write;
+use std::path::PathBuf;
+
+#[cfg(feature = "image")]
+use super::{Destinations, plan_targets, severity_label, write_atomic};
+#[cfg(feature = "image")]
+use serde::Serialize;
+#[cfg(feature = "image")]
+use std::path::Path;
+
+/// How `image deck build` fits a card of another size into the cell.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum FitKind {
+    Contain,
+    Cover,
+    Stretch,
+}
+
+#[cfg_attr(not(feature = "image"), allow(dead_code))]
+pub struct DeckBuildArgs {
+    pub cards: Vec<PathBuf>,
+    pub list: Option<PathBuf>,
+    pub out_dir: Option<PathBuf>,
+    pub name: String,
+    pub to: super::Target,
+    pub quality: Option<u8>,
+    pub columns: Option<u32>,
+    pub rows: Option<u32>,
+    pub card_size: Option<(u32, u32)>,
+    pub fit: Option<FitKind>,
+    pub hidden: Option<PathBuf>,
+    pub no_hidden_slot: bool,
+    pub fill: String,
+    pub max_sheet_side: Option<u32>,
+    pub yes: bool,
+    pub dry_run: bool,
+    pub json: bool,
+}
+
+/// Parses `--card-size`: `WIDTHxHEIGHT`, both at least 1.
+pub fn parse_card_size(text: &str) -> Result<(u32, u32), String> {
+    let bad = || format!("invalid card size '{text}': use WIDTHxHEIGHT in pixels, e.g. 300x420");
+    let (w, h) = text.split_once(['x', 'X']).ok_or_else(bad)?;
+    match (w.trim().parse::<u32>(), h.trim().parse::<u32>()) {
+        (Ok(w), Ok(h)) if w >= 1 && h >= 1 => Ok((w, h)),
+        _ => Err(bad()),
+    }
+}
+
+/// `--name` is the stem of the output files: a plain name, no path.
+#[cfg(feature = "image")]
+fn check_name(name: &str) -> Result<(), String> {
+    let bad_char = |c: char| c.is_control() || "/\\<>:\"|?*".contains(c);
+    if name.is_empty() || name == "." || name == ".." || name.contains(bad_char) {
+        return Err(format!(
+            "invalid --name '{name}': use a plain file name without a path (--out-dir says where the files go)"
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(feature = "image"))]
+pub fn deck_build(_args: &DeckBuildArgs, _out: &mut dyn Write) -> Result<bool, String> {
+    Err(
+        "this ttskit build has no image support; rebuild with `cargo build --features image`"
+            .to_owned(),
+    )
+}
+
+#[cfg(feature = "image")]
+pub fn deck_build(args: &DeckBuildArgs, out: &mut dyn Write) -> Result<bool, String> {
+    use ttskit_image::{DEFAULT_JPEG_QUALITY, DeckOptions, Fit, OutputFormat};
+
+    check_name(&args.name)?;
+    let format = match args.to {
+        super::Target::Png => OutputFormat::Png,
+        super::Target::Jpg => OutputFormat::Jpeg,
+    };
+    if format == OutputFormat::Png && args.quality.is_some() {
+        return Err("--quality only applies to --to jpg".to_owned());
+    }
+    if args.hidden.is_some() && args.no_hidden_slot {
+        return Err(
+            "--hidden needs the hidden-card slot; do not combine it with --no-hidden-slot"
+                .to_owned(),
+        );
+    }
+    if args.out_dir.is_none() && !args.dry_run {
+        return Err(
+            "say where the sheets go: --out-dir DIR (or use --dry-run to only see the plan)"
+                .to_owned(),
+        );
+    }
+    let options = DeckOptions {
+        columns: args.columns,
+        rows: args.rows,
+        card_size: args.card_size,
+        fit: args.fit.map(|f| match f {
+            FitKind::Contain => Fit::Contain,
+            FitKind::Cover => Fit::Cover,
+            FitKind::Stretch => Fit::Stretch,
+        }),
+        hidden: args.hidden.clone(),
+        hidden_slot: !args.no_hidden_slot,
+        fill: ttskit_image::parse_color(&args.fill)?,
+        max_sheet_side: args.max_sheet_side,
+        format,
+        quality: args.quality.unwrap_or(DEFAULT_JPEG_QUALITY),
+    };
+
+    let mut entries = args.cards.clone();
+    if let Some(list) = &args.list {
+        entries.extend(ttskit_image::read_card_list(list).map_err(|e| e.to_string())?);
+    }
+    let cards = ttskit_image::expand_card_inputs(&entries).map_err(|e| e.to_string())?;
+    if cards.is_empty() {
+        return Err("no cards: give image files or directories, or --list FILE".to_owned());
+    }
+
+    // Every output path is decided, and the run refused, before any card is
+    // decoded or anything is written.
+    let plans = ttskit_image::plan_sheets(
+        cards.len(),
+        options.columns,
+        options.rows,
+        options.hidden_slot,
+    )
+    .map_err(|e| e.to_string())?;
+    let sheet_names: Vec<String> = if plans.len() == 1 {
+        vec![format!("{}.{}", args.name, format.extension())]
+    } else {
+        (1..=plans.len())
+            .map(|n| format!("{}_{n}.{}", args.name, format.extension()))
+            .collect()
+    };
+    let json_name = format!("{}.json", args.name);
+    let mut names = sheet_names.clone();
+    names.push(json_name);
+    let targets: Vec<PathBuf> = match &args.out_dir {
+        Some(dir) => {
+            let files: Vec<PathBuf> = names.iter().map(PathBuf::from).collect();
+            let dest = Destinations {
+                out: None,
+                out_dir: Some(dir),
+                yes: args.yes,
+            };
+            plan_targets(&files, &dest, None)?
+                .into_iter()
+                .map(|(_, target)| target)
+                .collect()
+        }
+        None => names.iter().map(PathBuf::from).collect(),
+    };
+    let used: Vec<&Path> = cards
+        .iter()
+        .map(PathBuf::as_path)
+        .chain(args.hidden.as_deref())
+        .chain(args.list.as_deref())
+        .collect();
+    let clashes: Vec<String> = targets
+        .iter()
+        .filter(|t| used.iter().any(|input| same_file(input, t)))
+        .map(|t| format!("{} would overwrite an input of this run", t.display()))
+        .collect();
+    if !clashes.is_empty() {
+        return Err(clashes.join("\n"));
+    }
+
+    let mut report = DeckReport {
+        dry_run: args.dry_run,
+        description: None,
+        files: Vec::new(),
+        notes: Vec::new(),
+        errors: Vec::new(),
+    };
+    match ttskit_image::build_deck(&cards, &options) {
+        Err(error) => report.errors.push(error.to_string()),
+        Ok(deck) => {
+            let description = deck.description(&args.name, &sheet_names);
+            let mut json = serde_json::to_string_pretty(&description).map_err(|e| e.to_string())?;
+            json.push('\n');
+            let outputs = deck
+                .sheets
+                .iter()
+                .map(|s| ("sheet", s.bytes.as_slice()))
+                .chain(std::iter::once(("description", json.as_bytes())));
+            for ((kind, bytes), target) in outputs.zip(&targets) {
+                let overwrote = target.exists();
+                if !args.dry_run
+                    && let Err(error) = write_atomic(target, bytes)
+                {
+                    report.errors.push(format!("{}: {error}", target.display()));
+                    break;
+                }
+                report.files.push(DeckFile {
+                    kind,
+                    path: target.display().to_string(),
+                    bytes: bytes.len() as u64,
+                    overwrote,
+                    written: !args.dry_run,
+                });
+            }
+            report.notes = deck.notes;
+            report.description = Some(description);
+        }
+    }
+    report.write(args.json, out).map_err(|e| e.to_string())?;
+    Ok(report.errors.is_empty())
+}
+
+/// True when both paths name the same file: the same path as text, or the
+/// same file on disk.
+#[cfg(feature = "image")]
+fn same_file(a: &Path, b: &Path) -> bool {
+    let key = |p: &Path| p.to_string_lossy().to_lowercase().replace('\\', "/");
+    key(a) == key(b) || matches!((a.canonicalize(), b.canonicalize()), (Ok(a), Ok(b)) if a == b)
+}
+
+#[cfg(feature = "image")]
+#[derive(Serialize)]
+struct DeckFile {
+    /// `sheet` or `description`.
+    kind: &'static str,
+    path: String,
+    bytes: u64,
+    overwrote: bool,
+    written: bool,
+}
+
+#[cfg(feature = "image")]
+#[derive(Serialize)]
+struct DeckReport {
+    dry_run: bool,
+    /// The content of the description file; absent if no deck was built.
+    description: Option<ttskit_image::Description>,
+    files: Vec<DeckFile>,
+    notes: Vec<ttskit_image::Problem>,
+    errors: Vec<String>,
+}
+
+#[cfg(feature = "image")]
+impl DeckReport {
+    fn write(&self, json: bool, out: &mut dyn Write) -> std::io::Result<()> {
+        if json {
+            serde_json::to_writer(&mut *out, self)?;
+            return writeln!(out);
+        }
+        let mut sheets = self.description.iter().flat_map(|d| d.sheets.iter());
+        for file in &self.files {
+            let replaces = if file.overwrote { ", overwrites" } else { "" };
+            if file.kind == "sheet"
+                && let Some(s) = sheets.next()
+            {
+                writeln!(
+                    out,
+                    "{}: {}x{} grid, {} cards, {}x{} px, {} bytes{replaces}",
+                    file.path, s.columns, s.rows, s.card_count, s.width, s.height, file.bytes
+                )?;
+            } else {
+                writeln!(
+                    out,
+                    "{}: description, {} bytes{replaces}",
+                    file.path, file.bytes
+                )?;
+            }
+        }
+        for n in &self.notes {
+            writeln!(out, "  {}: {}", severity_label(n.severity), n.message)?;
+        }
+        for e in &self.errors {
+            writeln!(out, "error: {e}")?;
+        }
+        let verb = if self.dry_run {
+            "would be written (dry run, nothing written)"
+        } else {
+            "written"
+        };
+        match &self.description {
+            Some(d) => {
+                let cards: u32 = d.sheets.iter().map(|s| s.card_count).sum();
+                writeln!(
+                    out,
+                    "{cards} cards on {} sheet{} (card size {}x{} px), {} files {verb}, {} failed",
+                    d.sheets.len(),
+                    if d.sheets.len() == 1 { "" } else { "s" },
+                    d.card_width,
+                    d.card_height,
+                    self.files.len(),
+                    self.errors.len()
+                )
+            }
+            None => writeln!(out, "no deck built, {} failed", self.errors.len()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_card_size;
+
+    #[test]
+    fn card_size_is_width_x_height() {
+        assert_eq!(parse_card_size("300x420"), Ok((300, 420)));
+        assert_eq!(parse_card_size(" 3 X 4 "), Ok((3, 4)));
+        for bad in ["", "300", "0x4", "4x0", "-1x4", "axb", "3x4x5", "3x"] {
+            assert!(parse_card_size(bad).is_err(), "{bad}");
+        }
+    }
+}

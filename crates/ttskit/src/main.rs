@@ -30,7 +30,7 @@ enum Command {
         #[command(subcommand)]
         command: CloudCommand,
     },
-    /// Inspect, check, convert, resize, optimize and quantize image files (local only; needs a build with the `image` feature; unofficial)
+    /// Inspect, check, convert, resize, optimize and quantize image files, and build deck sheets from card images (local only; needs a build with the `image` feature; unofficial)
     Image {
         #[command(subcommand)]
         command: ImageCommand,
@@ -426,6 +426,14 @@ enum ImageCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Build the sheets of custom decks
+    ///
+    /// A custom deck is one or more grid sheets of card images. `deck build`
+    /// assembles single card images into such sheets.
+    Deck {
+        #[command(subcommand)]
+        command: DeckCommand,
+    },
     /// Reduce PNG files to at most 256 colours (lossy)
     ///
     /// Turns each PNG into an indexed PNG with a palette of at most --colors
@@ -483,6 +491,88 @@ enum ImageCommand {
         #[arg(long)]
         yes: bool,
         /// Quantize in memory and report the savings, but write nothing
+        #[arg(long)]
+        dry_run: bool,
+        /// Print one JSON object with all results
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum DeckCommand {
+    /// Assemble card images into the grid sheets of a custom deck
+    ///
+    /// Takes card files and directories (a directory gives its image files,
+    /// not those of subdirectories, in natural order: card2 before card10;
+    /// files keep the order you give them and may repeat) and/or --list FILE
+    /// (one path per line, blank lines and lines starting with # ignored,
+    /// relative paths relative to the list). Writes NAME.png (NAME_1.png,
+    /// NAME_2.png, ... for several sheets) and NAME.json into --out-dir; the
+    /// JSON describes the deck: sheet files, grids and the slot of every card
+    /// (unofficial; the rules are in docs/deck-sheets.md). Slots count from 0,
+    /// left to right and top to bottom. A sheet has at most 10 columns and 7
+    /// rows. Unless --no-hidden-slot is given, the last slot holds the
+    /// hidden-card image (--hidden FILE, else the --fill colour), so a 10x7
+    /// sheet holds 69 cards (70 with --no-hidden-slot); more cards go on
+    /// further sheets. The grid is the smallest square-ish one, at least 2x2,
+    /// unless --columns and/or --rows fix it. All cards must have the size of
+    /// the first card (or --card-size); other sizes are an error unless --fit
+    /// contain, cover or stretch says how to fit them. --max-sheet-side N
+    /// scales the cards down so no sheet side exceeds N px. PNG output is RGB
+    /// unless a pixel is transparent; JPEG output flattens transparency onto
+    /// --fill. The colour profile and EXIF data are dropped (an EXIF
+    /// orientation is applied first). Existing outputs are never overwritten
+    /// without --yes, and the run is refused up front if outputs collide or
+    /// overwrite an input. --dry-run builds in memory and writes nothing.
+    /// Output is deterministic. Exits with status 1 on any error.
+    Build {
+        /// Card image files or directories (not scanned recursively)
+        #[arg(value_name = "CARD")]
+        cards: Vec<PathBuf>,
+        /// Text file with one card file or directory per line (after the CARD arguments)
+        #[arg(long, value_name = "FILE")]
+        list: Option<PathBuf>,
+        /// Directory for the sheets and the description (created if missing)
+        #[arg(long, value_name = "DIR")]
+        out_dir: Option<PathBuf>,
+        /// File name of the output, without extension
+        #[arg(long, value_name = "NAME", default_value = "deck")]
+        name: String,
+        /// Output format of the sheets
+        #[arg(long, value_enum, default_value = "png")]
+        to: image::Target,
+        /// JPEG quality, 1 to 100 [default: 85]
+        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u8).range(1..=100))]
+        quality: Option<u8>,
+        /// Columns of every sheet, 1 to 10 (the limit of the game)
+        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..=10))]
+        columns: Option<u32>,
+        /// Rows of every sheet, 1 to 7 (the limit of the game)
+        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..=7))]
+        rows: Option<u32>,
+        /// Size of a card in pixels, e.g. 300x420 [default: the size of the first card]
+        #[arg(long, value_name = "WxH", value_parser = image::parse_card_size)]
+        card_size: Option<(u32, u32)>,
+        /// How a card of another size is fitted: contain, cover or stretch [default: refuse]
+        #[arg(long, value_enum)]
+        fit: Option<image::FitKind>,
+        /// Image for the hidden-card slot (the last slot of every sheet)
+        #[arg(long, value_name = "FILE")]
+        hidden: Option<PathBuf>,
+        /// Use the last slot for a card too (the deck must then use a separate back image)
+        #[arg(long)]
+        no_hidden_slot: bool,
+        /// Colour of unused slots, of --fit contain bands and of flattened transparency: #RRGGBB, #RGB, white or black
+        #[arg(long, value_name = "COLOR", default_value = "808080")]
+        fill: String,
+        /// Scale the cards down so that no sheet side exceeds this many pixels
+        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
+        max_sheet_side: Option<u32>,
+        /// Overwrite existing output files
+        #[arg(long)]
+        yes: bool,
+        /// Build in memory and report the plan, but write nothing
         #[arg(long)]
         dry_run: bool,
         /// Print one JSON object with all results
@@ -1542,6 +1632,61 @@ fn run(cli: Cli) -> Result<ExitCode, CliError> {
                     out,
                     out_dir,
                     in_place,
+                    yes,
+                    dry_run,
+                    json,
+                },
+                &mut stdout,
+            )?;
+            stdout.flush().map_err(|e| e.to_string())?;
+            Ok(if ok {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            })
+        }
+        Command::Image {
+            command:
+                ImageCommand::Deck {
+                    command:
+                        DeckCommand::Build {
+                            cards,
+                            list,
+                            out_dir,
+                            name,
+                            to,
+                            quality,
+                            columns,
+                            rows,
+                            card_size,
+                            fit,
+                            hidden,
+                            no_hidden_slot,
+                            fill,
+                            max_sheet_side,
+                            yes,
+                            dry_run,
+                            json,
+                        },
+                },
+        } => {
+            let mut stdout = std::io::stdout().lock();
+            let ok = image::deck_build(
+                &image::DeckBuildArgs {
+                    cards,
+                    list,
+                    out_dir,
+                    name,
+                    to,
+                    quality,
+                    columns,
+                    rows,
+                    card_size,
+                    fit,
+                    hidden,
+                    no_hidden_slot,
+                    fill,
+                    max_sheet_side,
                     yes,
                     dry_run,
                     json,

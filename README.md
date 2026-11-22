@@ -810,6 +810,80 @@ for skipped files such as `quality-too-low`, `not-png` or `animated`,
 error for that file only; the others still run, and the exit status is 1.
 Skipped files are not errors.
 
+### Building deck sheets
+
+```
+ttskit image deck build cards/ --out-dir deck
+ttskit image deck build front/*.png --hidden back.png --name mydeck --out-dir deck
+ttskit image deck build --list cards.txt --fit contain --max-sheet-side 4096 --out-dir deck
+ttskit image deck build cards/ --no-hidden-slot --dry-run
+```
+
+`image deck build [CARD...] --out-dir DIR` assembles single card images into the
+grid sheets of a custom deck and writes a description of them. A CARD is a file
+or a directory; a directory gives its image files (not those of subdirectories)
+in natural order (`card2` before `card10`). Files keep the order you give them,
+and a file may repeat, each time in its own slot. `--list FILE` adds more: one
+path per line, blank lines and lines starting with `#` ignored, relative paths
+relative to the list, after the CARD arguments. Output goes to `NAME.png` (or
+`NAME_1.png`, `NAME_2.png`, ... for several sheets) and `NAME.json`; `--name`
+defaults to `deck`, `--to jpg` (with `--quality`) writes JPEG.
+
+- **Slots and sheets.** A sheet has at most 10 columns and 7 rows. Slots are
+  numbered from 0, left to right and top to bottom, and card `n` of a sheet is
+  in slot `n`. The last slot is reserved for the hidden-card image (`--hidden
+  FILE`, or the `--fill` colour, default `808080`), so a 10x7 sheet holds **69**
+  cards; `--no-hidden-slot` gives **70** and sets `back_is_hidden`. More cards go
+  on further sheets, each full except the last. Why the last slot is special is
+  in [docs/deck-sheets.md](docs/deck-sheets.md).
+- **Grid.** The smallest roughly square grid that fits, but never below 2x2
+  (the in-game dialog takes no less), and 10x7 for every sheet but the last.
+  `--columns N` and `--rows N` fix a dimension (1 to 10 and 1 to 7); the last
+  sheet keeps it and takes the smallest value of the other. With both, every
+  sheet has that grid.
+- **Card size and fit.** All cards have the size of the first card, or
+  `--card-size WxH`. A card of another size is an error that lists every such
+  file, unless `--fit` says what to do: `contain` (scale to fit inside, centred
+  on the fill colour), `cover` (scale to cover, crop the centre) or `stretch`.
+  A card that already has the cell size is copied as it is; resampling is
+  Lanczos 3, premultiplied for transparency.
+- **Size limit.** `--max-sheet-side N` scales the cards down evenly until no
+  sheet side exceeds N pixels (never up; each card is resampled once, from the
+  original). Without it a warning is given for a sheet side over 4096 px, the
+  limit of `image check`.
+- **Pixels.** PNG sheets are RGB unless a pixel is transparent. A JPEG sheet
+  flattens transparency onto `--fill`. 16-bit input is reduced to 8-bit, the
+  colour profile and EXIF data are dropped (an orientation is applied first), an
+  animated image gives its first frame. PNG, JPEG and WebP are read.
+- **Output rules** as in the other image commands: existing files are never
+  overwritten without `--yes`, the run is refused before anything is written if
+  outputs collide or one is an input, `--dry-run` builds in memory and writes
+  nothing, files are written atomically, and the same input and options give the
+  same bytes. Exit status 1 on any error.
+
+The description `NAME.json` (also under `description` in the `--json` report,
+next to `dry_run`, `files`, `notes` and `errors`) says where everything is:
+
+```
+{
+  "format_version": 1,
+  "name": "deck",
+  "card_width": 300, "card_height": 420,
+  "back_is_hidden": false,
+  "sheets": [
+    { "file": "deck_1.png", "columns": 10, "rows": 7, "width": 3000, "height": 2940,
+      "card_count": 69, "hidden_slot": 69,
+      "cards": [ { "index": 0, "slot": 0, "column": 0, "row": 0, "source": "cards/a.png" } ] }
+  ]
+}
+```
+
+`hidden_slot` is `null` with `--no-hidden-slot`; `source` is the path as given
+(or, from a list, joined to the list's directory), with `/` separators.
+Notes have stable codes: `scaled-down`, `alpha-flattened`, `reduced-to-8-bit`,
+`orientation-applied`, `icc-dropped`, `exif-dropped`, and the warnings
+`sheet-too-large` and `animated-first-frame`.
+
 Which formats, animated images, 16-bit channels and colour profiles the image
 commands accept or produce follows what the game itself accepts; see
 [docs/image-formats.md](docs/image-formats.md).

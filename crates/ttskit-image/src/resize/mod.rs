@@ -155,7 +155,12 @@ fn note(code: &'static str, message: impl Into<String>) -> Problem {
 
 /// Resizes `img` with straight alpha handled correctly: colour is weighted by
 /// alpha while sampling, so transparent pixels do not bleed into the edge.
-fn resize_pixels(img: &DynamicImage, w: u32, h: u32, filter: FilterType) -> DynamicImage {
+pub(crate) fn resize_pixels(
+    img: &DynamicImage,
+    w: u32,
+    h: u32,
+    filter: FilterType,
+) -> DynamicImage {
     let color = img.color();
     if !color.has_alpha() {
         return img.resize_exact(w, h, filter);

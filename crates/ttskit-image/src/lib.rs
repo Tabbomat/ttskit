@@ -7,6 +7,7 @@
 
 mod check;
 mod convert;
+mod deck;
 mod optimize;
 mod quantize;
 mod resize;
@@ -14,6 +15,11 @@ mod resize;
 pub use check::{CheckOptions, CheckReport, DEFAULT_MAX_SIDE, Finding, check};
 pub use convert::{
     ConvertOptions, Converted, DEFAULT_JPEG_QUALITY, OutputFormat, convert, parse_color,
+};
+pub use deck::{
+    CardDescription, DESCRIPTION_VERSION, Deck, DeckOptions, Description, Fit, MAX_COLUMNS,
+    MAX_ROWS, MAX_SHEET_SIDE, PlacedCard, Sheet, SheetDescription, SheetPlan, build_deck,
+    expand_card_inputs, grid_for, natural_cmp, plan_sheets, read_card_list, slot_origin,
 };
 pub use optimize::{
     DEFAULT_LEVEL, MAX_LEVEL, OptimizeOptions, Optimized, Outcome, Skipped, StripMode, optimize,

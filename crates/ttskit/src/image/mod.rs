@@ -365,3 +365,5 @@ mod check;
 pub use check::{CheckArgs, CheckStatus, check, parse_bytes};
 mod resize;
 pub use resize::{FilterKind, ResizeArgs, parse_scale, resize};
+mod deck;
+pub use deck::{DeckBuildArgs, FitKind, deck_build, parse_card_size};
