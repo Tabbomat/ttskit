@@ -27,7 +27,8 @@ use self::change_tools::{
     ImageBuildApplyArgs, ImageBuildArgs, RewriteUrlsApplyArgs, RewriteUrlsArgs,
 };
 use self::cloud_change_tools::{
-    CloudSyncApplyArgs, CloudSyncArgs, CloudUploadApplyArgs, CloudUploadArgs,
+    CloudDeleteApplyArgs, CloudDeleteArgs, CloudSyncApplyArgs, CloudSyncArgs, CloudUploadApplyArgs,
+    CloudUploadArgs,
 };
 use self::cloud_tools::{CloudListArgs, CloudStatusArgs};
 use self::hub::{Hub, Replies};
@@ -58,7 +59,7 @@ nextSince as `since` next time to get only newer events. execute_lua and save_an
 lastSeq for the same purpose. The save_scan, save_lint, save_diff, save_check_urls and \
 manifest_show tools are read-only, work on files inside the server's root and need no game \
 (only save_check_urls uses the network); their results are the JSON of the matching ttskit \
-commands. The cloud tools (only in builds with Steam support) open Steam for each call, so Steam must be running and logged in; if it is not, they fail with the reason. cloud_list and cloud_status are read-only; cloud_upload, cloud_sync_push and cloud_sync_pull are plan and apply pairs. Sync push and pull only add files unless prune: true is given (then push replaces and deletes cloud files and pull recycles local files); the plan shows exactly what happens, and the apply must be given the same prune as the plan. image_check (only in builds with image support) is local and read-only too. Tools that change files come in pairs: save_rewrite_urls_plan and image_build_plan (only with image support) change nothing and return a fingerprint; the matching *_apply tool needs the same arguments, that fingerprint and confirm: true, and refuses if anything changed since the plan. Nothing is deleted.";
+commands. The cloud tools (only in builds with Steam support) open Steam for each call, so Steam must be running and logged in; if it is not, they fail with the reason. cloud_list and cloud_status are read-only; cloud_upload, cloud_delete, cloud_sync_push and cloud_sync_pull are plan and apply pairs. cloud_delete deletes a cloud file or folder for good (the index backup does not hold file contents). Sync push and pull only add files unless prune: true is given (then push replaces and deletes cloud files and pull recycles local files); the plan shows exactly what happens, and the apply must be given the same prune as the plan. image_check (only in builds with image support) is local and read-only too. Tools that change files come in pairs: save_rewrite_urls_plan and image_build_plan (only with image support) change nothing and return a fingerprint; the matching *_apply tool needs the same arguments, that fingerprint and confirm: true, and refuses if anything changed since the plan. Deleting (cloud_delete, and prune: true on image_build and the cloud syncs) happens only in an apply with the same arguments as its plan, which lists what is deleted.";
 
 #[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
@@ -813,7 +814,7 @@ impl EditorServer {
     }
 
     #[tool(
-        description = "Step 1 of building images from the project config's [[image.pipeline]] rules: show what `ttskit image build` would build (its dry-run JSON) and return a fingerprint. Changes nothing. Default config: ttskit.toml in the root. Then call image_build_apply. Only in builds with the `image` feature."
+        description = "Step 1 of building images from the project config's [[image.pipeline]] rules: show what `ttskit image build` would build (its dry-run JSON) and return a fingerprint. Changes nothing. Default config: ttskit.toml in the root. With prune: true the plan marks that the apply would also DELETE the output files the pipeline no longer produces (listed as plan.stale). Then call image_build_apply. Only in builds with the `image` feature."
     )]
     async fn image_build_plan(
         &self,
@@ -824,7 +825,7 @@ impl EditorServer {
     }
 
     #[tool(
-        description = "Step 2 of building images: with the same arguments as image_build_plan plus its fingerprint and confirm: true, build the outputs and update the cache file. Never deletes outputs. Refused, with nothing built, if confirm is not true, the fingerprint is missing or wrong, or the plan changed since (the result then holds the fresh plan). If some images fail the result is an error with ok: false; the images that were built stay. Only in builds with the `image` feature."
+        description = "Step 2 of building images: with the same arguments as image_build_plan plus its fingerprint and confirm: true, build the outputs and update the cache file. Pass the same prune value as the plan: with prune: true it also DELETES the outputs the pipeline no longer produces. Refused, with nothing built, if confirm is not true, the fingerprint is missing or wrong, or the plan changed since (the result then holds the fresh plan). If some images fail the result is an error with ok: false; the images that were built stay. Only in builds with the `image` feature."
     )]
     async fn image_build_apply(
         &self,
@@ -871,6 +872,30 @@ impl EditorServer {
     ) -> CallToolResult {
         let (root, backup) = (self.root.clone(), self.backup_dir.clone());
         self.with_cloud_value(move |f| cloud_change_tools::upload_apply(&root, f, &backup, &args))
+            .await
+    }
+
+    #[tool(
+        description = "Step 1 of deleting a file or a folder (with everything below it) from the Steam Cloud, as `ttskit cloud delete` does: give `name` (folder path and name, display name or cloud name) or `folder`. Returns the dry-run JSON (the files and folders that would go) and a fingerprint. Changes nothing. Deleted files cannot be restored: the index backup holds only the index, not file contents. Then call cloud_delete_apply. Opens Steam for this call."
+    )]
+    async fn cloud_delete_plan(
+        &self,
+        Parameters(args): Parameters<CloudDeleteArgs>,
+    ) -> CallToolResult {
+        let backup = self.backup_dir.clone();
+        self.with_cloud_value(move |f| cloud_change_tools::delete_plan(f, &backup, &args))
+            .await
+    }
+
+    #[tool(
+        description = "Step 2 of deleting from the Steam Cloud: with the same arguments as cloud_delete_plan plus its fingerprint and confirm: true, back up the cloud index to the CLI's backup directory, DELETE the files and remove them from the index. This cannot be undone for the file contents. Refused, with nothing done, if confirm is not true, the fingerprint is missing or wrong, or the files changed since the plan (the result then holds the fresh plan). Opens Steam for this call."
+    )]
+    async fn cloud_delete_apply(
+        &self,
+        Parameters(args): Parameters<CloudDeleteApplyArgs>,
+    ) -> CallToolResult {
+        let backup = self.backup_dir.clone();
+        self.with_cloud_value(move |f| cloud_change_tools::delete_apply(f, &backup, &args))
             .await
     }
 

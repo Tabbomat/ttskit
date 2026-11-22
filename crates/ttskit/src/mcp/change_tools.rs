@@ -72,6 +72,8 @@ pub(super) struct RewriteUrlsApplyArgs {
 pub(super) struct ImageBuildArgs {
     /// The project config with `[[image.pipeline]]` rules, relative to the server's root or absolute (must be inside the root). Default: ttskit.toml in the root.
     config: Option<String>,
+    /// Also DELETE output files that the pipeline no longer produces (the plan lists them as stale), as `--prune` does. Default false. Give the same value to the plan and the apply tool: a plan made without it cannot be applied with it.
+    prune: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
@@ -202,37 +204,45 @@ fn image_config(root: &Path, args: &ImageBuildArgs) -> Result<PathBuf, String> {
     resolve_in_root(root, Path::new(path))
 }
 
-fn image_plan(config: &Path) -> Result<Plan, String> {
+fn image_plan(config: &Path, prune: bool) -> Result<Plan, String> {
     let options = image::BuildArgs {
         config: config.to_owned(),
         dry_run: true,
-        prune: false,
+        prune,
         yes: false,
         json: true,
     };
-    let doc = json_of(|out| image::build(&options, out).map(|_| ()))?;
-    Ok(Plan {
-        hashed: doc.clone(),
-        body: doc,
-    })
+    let mut doc = json_of(|out| image::build(&options, out).map(|_| ()))?;
+    // The dry-run JSON lists the stale outputs (`plan.stale`) with or without
+    // prune; prune decides whether the apply deletes them.
+    let hashed = json!({ "prune": prune, "plan": doc });
+    if prune {
+        doc["warning"] = json!(
+            "This plan has prune: applying it DELETES the output files that the pipeline no longer produces (plan.stale)."
+        );
+    }
+    Ok(Plan { hashed, body: doc })
 }
 
 pub(super) fn image_build_plan(root: &Path, args: &ImageBuildArgs) -> Result<Value, Value> {
     let config = image_config(root, args).map_err(error)?;
-    Ok(image_plan(&config).map_err(error)?.result(IMAGE_BUILD))
+    let prune = args.prune.unwrap_or(false);
+    Ok(image_plan(&config, prune)
+        .map_err(error)?
+        .result(IMAGE_BUILD))
 }
 
 pub(super) fn image_build_apply(root: &Path, args: &ImageBuildApplyArgs) -> Result<Value, Value> {
     let given =
         plan_apply::require_confirmation(args.fingerprint.as_deref(), args.confirm, IMAGE_BUILD)?;
     let config = image_config(root, &args.plan).map_err(error)?;
-    let plan = image_plan(&config).map_err(error)?;
+    let prune = args.plan.prune.unwrap_or(false);
+    let plan = image_plan(&config, prune).map_err(error)?;
     plan_apply::verify(&given, &plan, IMAGE_BUILD)?;
-    // Never prunes: deleting outputs is not offered.
     let options = image::BuildArgs {
         config,
         dry_run: false,
-        prune: false,
+        prune,
         yes: true,
         json: true,
     };

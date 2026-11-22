@@ -21,6 +21,10 @@ pub(super) const UPLOAD: Pair = Pair {
     plan: "cloud_upload_plan",
     apply: "cloud_upload_apply",
 };
+pub(super) const DELETE: Pair = Pair {
+    plan: "cloud_delete_plan",
+    apply: "cloud_delete_apply",
+};
 pub(super) const SYNC_PUSH: Pair = Pair {
     plan: "cloud_sync_push_plan",
     apply: "cloud_sync_push_apply",
@@ -71,6 +75,26 @@ pub(super) struct CloudSyncApplyArgs {
     /// The fingerprint returned by the matching plan tool for these same arguments.
     fingerprint: Option<String>,
     /// Must be true: the sync is only done with it.
+    confirm: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub(super) struct CloudDeleteArgs {
+    /// The file to delete: folder path and name (`Decks/back.png`), display name, or cloud name. Give either `name` or `folder`.
+    name: Option<String>,
+    /// Delete this cloud folder with all its files and subfolders (separator `/`). Give either `name` or `folder`.
+    folder: Option<String>,
+}
+
+#[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub(super) struct CloudDeleteApplyArgs {
+    #[serde(flatten)]
+    plan: CloudDeleteArgs,
+    /// The fingerprint returned by cloud_delete_plan for these same arguments.
+    fingerprint: Option<String>,
+    /// Must be true: the deletion is only done with it.
     confirm: Option<bool>,
 }
 
@@ -329,6 +353,71 @@ pub(super) fn upload_apply(
     let plan = make_plan(ran, |doc| upload_hashed(&upload, doc))?;
     plan_apply::verify(&given, &plan, UPLOAD)?;
     finish(upload_run(&upload, backend.as_mut(), &store, false))
+}
+
+// ---- cloud delete ----
+
+const DELETE_WARNING: &str = "This deletes cloud files and cannot be undone. The index backup taken first (restorable with `ttskit cloud restore`, which is not an MCP tool) holds only the index files CloudInfo.bson and CloudFolder.bson, not the content of the deleted files. Saves that use a deleted file's download URL stop loading it.";
+
+fn delete_target(args: &CloudDeleteArgs) -> Result<ttskit_cloud::DeleteTarget<'_>, String> {
+    match (args.name.as_deref(), args.folder.as_deref()) {
+        (Some(name), None) => Ok(ttskit_cloud::DeleteTarget::File(name)),
+        (None, Some(folder)) => Ok(ttskit_cloud::DeleteTarget::Folder(folder)),
+        _ => Err("give exactly one of name (a file) and folder".to_owned()),
+    }
+}
+
+fn delete_run(
+    target: ttskit_cloud::DeleteTarget<'_>,
+    backend: &mut dyn CloudBackend,
+    store: &BackupStore,
+    yes: bool,
+) -> Ran {
+    run_cli(|out| cloud::delete_files(backend, store, target, yes, true, SystemTime::now(), out))
+}
+
+/// What a delete plan depends on: the files and folders it lists.
+fn delete_hashed(doc: &Value) -> Value {
+    json!({
+        "target": doc["target"],
+        "folder": doc["folder"],
+        "files": doc["files"],
+        "folders": doc["folders"],
+    })
+}
+
+fn delete_plan_of(ran: Ran) -> Result<Plan, Value> {
+    let mut plan = make_plan(ran, delete_hashed)?;
+    plan.body["warning"] = json!(DELETE_WARNING);
+    Ok(plan)
+}
+
+pub(super) fn delete_plan(
+    factory: &BackendFactory,
+    backup_dir: &Option<PathBuf>,
+    args: &CloudDeleteArgs,
+) -> Result<Value, Value> {
+    let target = delete_target(args).map_err(error)?;
+    let store = backup_store(backup_dir).map_err(error)?;
+    let mut backend = factory().map_err(error)?;
+    let ran = delete_run(target, backend.as_mut(), &store, false);
+    Ok(delete_plan_of(ran)?.result(DELETE))
+}
+
+pub(super) fn delete_apply(
+    factory: &BackendFactory,
+    backup_dir: &Option<PathBuf>,
+    args: &CloudDeleteApplyArgs,
+) -> Result<Value, Value> {
+    let given =
+        plan_apply::require_confirmation(args.fingerprint.as_deref(), args.confirm, DELETE)?;
+    let target = delete_target(&args.plan).map_err(error)?;
+    let store = backup_store(backup_dir).map_err(error)?;
+    let mut backend = factory().map_err(error)?;
+    let ran = delete_run(target, backend.as_mut(), &store, false);
+    let plan = delete_plan_of(ran)?;
+    plan_apply::verify(&given, &plan, DELETE)?;
+    finish(delete_run(target, backend.as_mut(), &store, true))
 }
 
 // ---- cloud sync ----

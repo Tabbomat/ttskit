@@ -1943,6 +1943,8 @@ async fn cloud_calls_do_not_overlap() {
 #[test]
 fn the_cloud_tools_are_dropped_without_a_backend() {
     let cloud = [
+        "cloud_delete_plan",
+        "cloud_delete_apply",
         "cloud_list",
         "cloud_status",
         "cloud_upload_plan",
@@ -1960,7 +1962,7 @@ fn the_cloud_tools_are_dropped_without_a_backend() {
     }
     // Everything else stays.
     assert!(without.has_route("save_scan") && without.has_route("get_status"));
-    assert_eq!(with.list_all().len(), without.list_all().len() + 8);
+    assert_eq!(with.list_all().len(), without.list_all().len() + 10);
 }
 
 #[tokio::test]
@@ -1986,7 +1988,7 @@ async fn the_cloud_tools_are_listed_with_a_backend() {
         .map(|t| t["name"].as_str().unwrap())
         .collect();
     assert!(names.contains(&"cloud_list") && names.contains(&"cloud_status"));
-    assert_eq!(names.len(), 21 + 3 * usize::from(cfg!(feature = "image")));
+    assert_eq!(names.len(), 23 + 3 * usize::from(cfg!(feature = "image")));
 }
 
 // ---- Image tool ----
@@ -3139,7 +3141,10 @@ async fn cloud_change_tools_report_a_failing_backend_and_limit_prune_to_sync() {
     let mut checked = 0;
     for tool in tools {
         let name = tool["name"].as_str().unwrap();
-        if name.starts_with("cloud_upload") || name.starts_with("cloud_sync") {
+        if name.starts_with("cloud_upload")
+            || name.starts_with("cloud_delete")
+            || name.starts_with("cloud_sync")
+        {
             checked += 1;
             let schema = tool["inputSchema"].to_string();
             // Only the sync tools can prune (delete); upload has no such option.
@@ -3152,7 +3157,7 @@ async fn cloud_change_tools_report_a_failing_backend_and_limit_prune_to_sync() {
             assert!(!schema.contains("yes"), "{name}: {schema}");
         }
     }
-    assert_eq!(checked, 6);
+    assert_eq!(checked, 8);
 
     let failing: cloud_tools::BackendFactory = Arc::new(|| Err("Steam is not running".to_owned()));
     let (mut client, root, _backups) = {
@@ -3488,4 +3493,284 @@ async fn pull_prune_apply_is_refused_after_the_cloud_changed() {
     assert!(error_text(&r).contains("state changed"));
     assert_unchanged(&before, &snapshot(&cloud, &root, &backups));
     assert!(!root.path().join(".trash").exists());
+}
+
+// ---- Cloud delete ----
+
+async fn delete_project() -> (SharedCloud, Client, tempfile::TempDir, tempfile::TempDir) {
+    let cloud = seeded_cloud(&[("keep.png", b"keep", "Game"), ("gone.png", b"gone", "Game")]);
+    let (client, root, backups) = cloud_project(&cloud).await;
+    (cloud, client, root, backups)
+}
+
+/// The cloud names of the index entries.
+fn indexed_names(cloud: &SharedCloud) -> Vec<String> {
+    let index = ttskit_cloud::CloudIndex::load(cloud).unwrap();
+    index.entries.iter().map(|e| e.name.clone()).collect()
+}
+
+#[tokio::test]
+async fn cloud_delete_plan_changes_nothing_and_apply_deletes() {
+    let (cloud, mut client, root, backups) = delete_project().await;
+    let before = snapshot(&cloud, &root, &backups);
+    let args = json!({"name": "Game/gone.png"});
+
+    let r = client.call("cloud_delete_plan", args.clone()).await;
+    assert!(!is_error(&r), "{r}");
+    let plan = body(&r);
+    assert_eq!(plan["target"], "file");
+    assert_eq!(plan["files"][0]["name"], "gone.png");
+    assert_eq!(plan["dry_run"], true);
+    let warning = plan["warning"].as_str().unwrap();
+    assert!(warning.contains("cannot be undone") && warning.contains("not the content"));
+    assert!(plan["next"].as_str().unwrap().contains("cannot be undone"));
+    assert_unchanged(&before, &snapshot(&cloud, &root, &backups));
+    let print = plan["fingerprint"].as_str().unwrap().to_owned();
+
+    let r = client
+        .call(
+            "cloud_delete_apply",
+            with_confirmation(args, &print, json!(true)),
+        )
+        .await;
+    assert!(!is_error(&r), "{r}");
+    let result = body(&r);
+    assert_eq!(result["applied"], true);
+    assert_eq!(result["done"], true);
+    assert!(result["backup"].is_string());
+    let names = cloud.names();
+    assert!(!names.contains(&key_of("gone.png", b"gone")), "{names:?}");
+    assert!(names.contains(&key_of("keep.png", b"keep")));
+    assert_eq!(indexed_names(&cloud), ["keep.png"]);
+    assert!(entries_of(&backups) > before.backups);
+}
+
+#[tokio::test]
+async fn cloud_delete_of_a_folder_removes_everything_below_it() {
+    let (cloud, mut client, _root, backups) = delete_project().await;
+    let args = json!({"folder": "Game"});
+    let r = client.call("cloud_delete_plan", args.clone()).await;
+    assert!(!is_error(&r), "{r}");
+    let plan = body(&r);
+    assert_eq!(plan["target"], "folder");
+    assert_eq!(plan["files"].as_array().unwrap().len(), 2);
+    let print = plan["fingerprint"].as_str().unwrap().to_owned();
+    assert_eq!(entries_of(&backups), 0);
+    let r = client
+        .call(
+            "cloud_delete_apply",
+            with_confirmation(args, &print, json!(true)),
+        )
+        .await;
+    assert!(!is_error(&r), "{r}");
+    assert!(indexed_names(&cloud).is_empty());
+    assert!(!cloud.names().iter().any(|n| n.ends_with(".png")));
+    assert!(entries_of(&backups) > 0);
+}
+
+#[tokio::test]
+async fn cloud_delete_apply_is_refused_without_confirmation_or_after_changes() {
+    let (cloud, mut client, root, backups) = delete_project().await;
+    let args = json!({"folder": "Game"});
+    let print = plan_print(&mut client, "cloud_delete_plan", args.clone()).await;
+    let before = snapshot(&cloud, &root, &backups);
+
+    let mut no_confirm = args.clone();
+    no_confirm["fingerprint"] = json!(print);
+    let mut no_print = args.clone();
+    no_print["confirm"] = json!(true);
+    for call in [
+        no_confirm,
+        no_print,
+        with_confirmation(args.clone(), &print, json!(false)),
+        with_confirmation(args.clone(), "0000000000000000", json!(true)),
+        with_confirmation(args.clone(), "", json!(true)),
+    ] {
+        let r = client.call("cloud_delete_apply", call.clone()).await;
+        assert!(is_error(&r), "{call}");
+    }
+    assert_unchanged(&before, &snapshot(&cloud, &root, &backups));
+
+    // A file is added to the folder after the plan.
+    add_cloud_file(&cloud, "extra.png", b"x", "Game");
+    let before = snapshot(&cloud, &root, &backups);
+    let r = client
+        .call(
+            "cloud_delete_apply",
+            with_confirmation(args, &print, json!(true)),
+        )
+        .await;
+    assert!(error_text(&r).contains("state changed"));
+    assert_eq!(body(&r)["plan"]["files"].as_array().unwrap().len(), 3);
+    assert_unchanged(&before, &snapshot(&cloud, &root, &backups));
+
+    // The planned file changes after the plan: it disappears from the cloud.
+    let args = json!({"name": "Game/gone.png"});
+    let print = plan_print(&mut client, "cloud_delete_plan", args.clone()).await;
+    let key = key_of("gone.png", b"gone");
+    cloud.with(|c| ttskit_cloud::CloudBackend::delete(c, &key).unwrap());
+    let before = snapshot(&cloud, &root, &backups);
+    let r = client
+        .call(
+            "cloud_delete_apply",
+            with_confirmation(args, &print, json!(true)),
+        )
+        .await;
+    assert!(error_text(&r).contains("state changed"));
+    assert_unchanged(&before, &snapshot(&cloud, &root, &backups));
+}
+
+#[tokio::test]
+async fn cloud_delete_rejects_bad_targets_and_a_failing_backend() {
+    let (cloud, mut client, root, backups) = delete_project().await;
+    let before = snapshot(&cloud, &root, &backups);
+    let r = client
+        .call("cloud_delete_plan", json!({"name": "Game/missing.png"}))
+        .await;
+    assert!(is_error(&r), "{r}");
+    for args in [json!({}), json!({"name": "a.png", "folder": "Game"})] {
+        let r = client.call("cloud_delete_plan", args.clone()).await;
+        assert!(error_text(&r).contains("exactly one"), "{args}");
+        let mut apply = args;
+        apply["fingerprint"] = json!("00");
+        apply["confirm"] = json!(true);
+        let r = client.call("cloud_delete_apply", apply).await;
+        assert!(is_error(&r));
+    }
+    let r = client
+        .call(
+            "cloud_delete_apply",
+            json!({"name": "Game/missing.png", "fingerprint": "00", "confirm": true}),
+        )
+        .await;
+    assert!(is_error(&r));
+    assert_unchanged(&before, &snapshot(&cloud, &root, &backups));
+
+    let failing: cloud_tools::BackendFactory = Arc::new(|| Err("Steam is not running".to_owned()));
+    let root = tempfile::tempdir().unwrap();
+    let ep = Endpoints::new(1, free_port());
+    let held = Listener::bind(ep.editor).await.unwrap();
+    std::mem::forget(held);
+    let server = EditorServer::start(ep, resolve_root(Some(root.path())).unwrap(), 10)
+        .await
+        .with_backend(failing)
+        .with_backup_dir(root.path().join("backups"));
+    let mut client = attach(server).await;
+    client.initialize().await;
+    for (tool, args) in [
+        ("cloud_delete_plan", json!({"name": "a.png"})),
+        (
+            "cloud_delete_apply",
+            json!({"name": "a.png", "fingerprint": "00", "confirm": true}),
+        ),
+    ] {
+        let r = client.call(tool, args).await;
+        assert_eq!(error_text(&r), "Steam is not running", "{tool}");
+    }
+}
+
+// Image build prune: only with image support.
+
+#[cfg(feature = "image")]
+#[tokio::test]
+async fn image_build_prune_deletes_stale_outputs_only_when_asked() {
+    let (mut client, root) = image_project().await;
+    // Build both boards, then drop one source: its output is stale.
+    let print = plan_print(&mut client, "image_build_plan", json!({})).await;
+    let r = client
+        .call(
+            "image_build_apply",
+            json!({"fingerprint": print, "confirm": true}),
+        )
+        .await;
+    assert!(!is_error(&r), "{r}");
+    std::fs::remove_file(root.path().join("art/boards/b.png")).unwrap();
+    let stale_output = root.path().join("assets/Boards/b.png");
+    assert!(stale_output.exists());
+
+    let r = client
+        .call("image_build_plan", json!({"prune": true}))
+        .await;
+    assert!(!is_error(&r), "{r}");
+    let pruning_plan = body(&r);
+    let stale = pruning_plan["plan"]["stale"].as_array().unwrap();
+    assert_eq!(stale.len(), 1, "{pruning_plan}");
+    assert!(stale[0]["path"].as_str().unwrap().ends_with("b.png"));
+    assert!(
+        pruning_plan["warning"]
+            .as_str()
+            .unwrap()
+            .contains("DELETES")
+    );
+    assert!(pruning_plan["next"].as_str().unwrap().contains("DELETES"));
+    assert!(stale_output.exists());
+    let pruning = pruning_plan["fingerprint"].as_str().unwrap().to_owned();
+    let plain = plan_print(&mut client, "image_build_plan", json!({})).await;
+    assert_ne!(plain, pruning);
+
+    // Cross-prune applies are refused with the fresh plan; nothing is deleted.
+    let r = client
+        .call(
+            "image_build_apply",
+            json!({"prune": true, "fingerprint": plain, "confirm": true}),
+        )
+        .await;
+    assert!(error_text(&r).contains("state changed"));
+    assert_eq!(body(&r)["plan"]["fingerprint"], json!(pruning));
+    let r = client
+        .call(
+            "image_build_apply",
+            json!({"fingerprint": pruning, "confirm": true}),
+        )
+        .await;
+    assert!(error_text(&r).contains("state changed"));
+    assert_eq!(body(&r)["plan"]["fingerprint"], json!(plain));
+    for call in [
+        json!({"prune": true, "fingerprint": pruning}),
+        json!({"prune": true, "fingerprint": pruning, "confirm": false}),
+        json!({"prune": true, "fingerprint": "0000000000000000", "confirm": true}),
+    ] {
+        let r = client.call("image_build_apply", call.clone()).await;
+        assert!(is_error(&r), "{call}");
+    }
+    assert!(stale_output.exists());
+
+    // Without prune the stale output stays.
+    let r = client
+        .call(
+            "image_build_apply",
+            json!({"fingerprint": plain, "confirm": true}),
+        )
+        .await;
+    assert!(!is_error(&r), "{r}");
+    assert!(stale_output.exists());
+
+    // With prune it is deleted, and the result carries the prune report.
+    let print = plan_print(&mut client, "image_build_plan", json!({"prune": true})).await;
+    let r = client
+        .call(
+            "image_build_apply",
+            json!({"prune": true, "fingerprint": print, "confirm": true}),
+        )
+        .await;
+    assert!(!is_error(&r), "{r}");
+    let result = body(&r);
+    assert_eq!(result["applied"], true);
+    assert_eq!(result["ok"], true);
+    assert!(result["prune"].is_object(), "{result}");
+    assert!(!stale_output.exists());
+    assert!(root.path().join("assets/Boards/a.png").exists());
+}
+
+#[cfg(feature = "image")]
+#[tokio::test]
+async fn image_build_tools_offer_prune() {
+    let (mut client, _root) = without_editor(None).await;
+    let r = client.request("tools/list", json!({})).await;
+    for tool in r["result"]["tools"].as_array().unwrap() {
+        let name = tool["name"].as_str().unwrap();
+        if name.starts_with("image_build") {
+            assert!(tool["inputSchema"].to_string().contains("prune"), "{name}");
+        }
+    }
 }

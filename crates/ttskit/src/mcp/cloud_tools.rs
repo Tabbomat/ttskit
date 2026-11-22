@@ -25,7 +25,9 @@ pub(super) type BackendFactory =
     Arc<dyn Fn() -> Result<Box<dyn CloudBackend>, String> + Send + Sync>;
 
 /// The names of the tools that need a backend.
-const CLOUD_TOOLS: [&str; 8] = [
+const CLOUD_TOOLS: [&str; 10] = [
+    "cloud_delete_plan",
+    "cloud_delete_apply",
     "cloud_list",
     "cloud_status",
     "cloud_upload_plan",

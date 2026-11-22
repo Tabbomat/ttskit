@@ -1034,7 +1034,7 @@ fn mcp_serves_on_stdio_and_exits_zero_when_stdin_closes() {
     send(serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}));
     assert_eq!(
         response(2)["result"]["tools"].as_array().unwrap().len(),
-        13 + 8 * usize::from(cfg!(feature = "steam")) + 3 * usize::from(cfg!(feature = "image"))
+        13 + 10 * usize::from(cfg!(feature = "steam")) + 3 * usize::from(cfg!(feature = "image"))
     );
     send(serde_json::json!({
         "jsonrpc": "2.0", "id": 3, "method": "tools/call",
