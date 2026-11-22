@@ -315,3 +315,39 @@ fn nicknames_from_file_names() {
     assert_eq!(deck["ContainedObjects"][0]["Nickname"], "card00");
     assert_eq!(deck["ContainedObjects"][2]["Nickname"], "card02");
 }
+
+#[test]
+fn meta_file_sets_text_of_deck_and_cards() {
+    let p = Project::new(3);
+    std::fs::write(
+        p.root.join("meta.json"),
+        r#"{"deck": {"nickname": "My deck", "description": "About", "gm_notes": "Secret"},
+            "cards": {"card01.png": {"nickname": "Second", "gm_notes": "n"}}}"#,
+    )
+    .unwrap();
+    let o = p.object(&[
+        "--out",
+        "o.json",
+        "--back-url",
+        BACK,
+        "--meta",
+        "meta.json",
+        "--nicknames-from-files",
+    ]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    let deck = read_json(&p.root.join("o.json"))["ObjectStates"][0].clone();
+    assert_eq!(deck["Nickname"], "My deck");
+    assert_eq!(deck["Description"], "About");
+    assert_eq!(deck["GMNotes"], "Secret");
+    let cards = &deck["ContainedObjects"];
+    // The metadata wins over the file name; other cards get the file name.
+    assert_eq!(cards[1]["Nickname"], "Second");
+    assert_eq!(cards[1]["GMNotes"], "n");
+    assert_eq!(cards[0]["Nickname"], "card00");
+
+    std::fs::write(p.root.join("bad.json"), r#"{"cards": {"zzz.png": {}}}"#).unwrap();
+    let o = p.object(&["--out", "o2.json", "--back-url", BACK, "--meta", "bad.json"]);
+    assert!(!o.status.success());
+    assert!(stderr(&o).contains("bad.json"), "{}", stderr(&o));
+    assert!(!p.root.join("o2.json").exists());
+}

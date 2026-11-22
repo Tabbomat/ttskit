@@ -595,8 +595,13 @@ enum DeckCommand {
     /// after its upload is refused. --back-url is a URL or the local path of
     /// an uploaded back image; with --unique-backs give one per sheet.
     /// BackIsHidden comes from the description (`deck build --no-hidden-slot`
-    /// sets it). Card nicknames are empty unless --nicknames-from-files
-    /// names each card after its source file. GUIDs are derived from the
+    /// sets it). --meta FILE sets the Nickname, Description and GMNotes of
+    /// the deck and of each card: JSON {"deck": {"nickname", "description",
+    /// "gm_notes"}, "cards": [...]}, where cards is a list in deck order
+    /// (null for none) or an object keyed by the card's source path in the
+    /// description or by its file name; every key is optional. Without a
+    /// nickname there, --nicknames-from-files names a card after its source
+    /// file, otherwise the nickname is empty. GUIDs are derived from the
     /// content, so output is identical between runs. An existing FILE is
     /// not overwritten without --yes. --dry-run writes nothing. Exits with
     /// status 1 on any error.
@@ -619,6 +624,9 @@ enum DeckCommand {
         /// The project config for the manifest lookup [default: ttskit.toml in the current directory if it exists]
         #[arg(long, value_name = "PATH")]
         config: Option<PathBuf>,
+        /// JSON file with the name, description and GM notes of the deck and its cards
+        #[arg(long, value_name = "FILE")]
+        meta: Option<PathBuf>,
         /// Name each card after its source file (without extension)
         #[arg(long)]
         nicknames_from_files: bool,
@@ -1897,6 +1905,7 @@ fn run(cli: Cli) -> Result<ExitCode, CliError> {
                             back_urls,
                             unique_backs,
                             config,
+                            meta,
                             nicknames_from_files,
                             yes,
                             dry_run,
@@ -1913,6 +1922,7 @@ fn run(cli: Cli) -> Result<ExitCode, CliError> {
                     back_urls,
                     unique_backs,
                     config,
+                    meta,
                     nicknames_from_files,
                     yes,
                     dry_run,

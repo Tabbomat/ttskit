@@ -280,3 +280,70 @@ fn source_stems() {
     assert_eq!(source_stem("a.b.png"), "a.b");
     assert_eq!(source_stem("noext"), "noext");
 }
+
+fn meta_description() -> Description {
+    description(
+        vec![
+            sheet("deck_1.png", 2, 2, 3, 0),
+            sheet("deck_2.png", 2, 2, 1, 3),
+        ],
+        false,
+    )
+}
+
+#[test]
+fn meta_with_a_card_list() {
+    let d = meta_description();
+    let meta = parse_meta(
+        r#"{"format_version": 1,
+            "deck": {"nickname": "D", "gm_notes": "G"},
+            "cards": [{"nickname": "A", "description": "a"}, null, {"gm_notes": "n"}]}"#,
+        &d,
+    )
+    .unwrap();
+    assert_eq!(meta.deck.nickname.as_deref(), Some("D"));
+    assert_eq!(meta.deck.gm_notes.as_deref(), Some("G"));
+    assert_eq!(meta.deck.description, None);
+    assert_eq!(meta.cards.len(), 3);
+    assert_eq!(meta.cards[0].description.as_deref(), Some("a"));
+    assert_eq!(meta.cards[1], Text::default());
+    assert_eq!(meta.cards[2].gm_notes.as_deref(), Some("n"));
+}
+
+#[test]
+fn meta_with_cards_by_source_or_file_name() {
+    let d = meta_description();
+    let meta = parse_meta(
+        r#"{"cards": {"cards/card01.png": {"nickname": "One"}, "card03.png": {"nickname": "Four"}}}"#,
+        &d,
+    )
+    .unwrap();
+    assert_eq!(meta.cards.len(), 4);
+    assert_eq!(meta.cards[1].nickname.as_deref(), Some("One"));
+    assert_eq!(meta.cards[3].nickname.as_deref(), Some("Four"));
+    assert_eq!(meta.cards[0], Text::default());
+}
+
+#[test]
+fn meta_is_checked() {
+    let d = meta_description();
+    for (text, expect) in [
+        ("{", "not valid"),
+        (r#"{"format_version": 2}"#, "format_version 2"),
+        (r#"{"deck": {"name": "x"}}"#, "unknown field"),
+        (r#"{"cards": [null, null, null, null, null]}"#, "5 cards"),
+        (r#"{"cards": {"nothing.png": {}}}"#, "matches no card"),
+        (
+            r#"{"cards": {"card01.png": {}, "cards/card01.png": {}}}"#,
+            "both set",
+        ),
+    ] {
+        let err = parse_meta(text, &d).unwrap_err();
+        assert!(err.contains(expect), "{text}: {err}");
+    }
+    // The same file name in two folders is ambiguous by name alone.
+    let mut d = meta_description();
+    d.sheets[1].cards[0].source = "other/card01.png".to_owned();
+    let err = parse_meta(r#"{"cards": {"card01.png": {}}}"#, &d).unwrap_err();
+    assert!(err.contains("ambiguous"), "{err}");
+}

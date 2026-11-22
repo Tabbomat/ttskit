@@ -225,5 +225,134 @@ impl Guids {
     }
 }
 
+/// The text of one object in the metadata file.
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TextFile {
+    nickname: Option<String>,
+    description: Option<String>,
+    gm_notes: Option<String>,
+}
+
+impl From<TextFile> for Text {
+    fn from(t: TextFile) -> Text {
+        Text {
+            nickname: t.nickname,
+            description: t.description,
+            gm_notes: t.gm_notes,
+        }
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MetaFile {
+    format_version: Option<u32>,
+    #[serde(default)]
+    deck: TextFile,
+    #[serde(default)]
+    cards: Option<CardsFile>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(untagged)]
+enum CardsFile {
+    /// One entry per card in deck order (`null` for no text).
+    List(Vec<Option<TextFile>>),
+    /// Entries by card source, as in the description (`cards/ace.png`) or by
+    /// its file name alone (`ace.png`).
+    Map(std::collections::BTreeMap<String, TextFile>),
+}
+
+/// Parses the metadata file: the name, description and GM notes of the deck
+/// and of its cards.
+///
+/// ```json
+/// {
+///   "deck": { "nickname": "My deck", "description": "...", "gm_notes": "..." },
+///   "cards": [ { "nickname": "Ace" }, null, { "description": "..." } ]
+/// }
+/// ```
+///
+/// `cards` is a list in deck order, or an object keyed by the `source` of a
+/// card in the description or by its file name. Every key is optional.
+pub fn parse_meta(text: &str, description: &Description) -> Result<Meta, String> {
+    let file: MetaFile = serde_json::from_str(text.trim_start_matches('\u{feff}'))
+        .map_err(|e| format!("the metadata is not valid: {e}"))?;
+    if let Some(v) = file.format_version
+        && v != 1
+    {
+        return Err(format!(
+            "the metadata has format_version {v}; this ttskit reads version 1"
+        ));
+    }
+    let sources: Vec<&str> = description
+        .sheets
+        .iter()
+        .flat_map(|s| s.cards.iter().map(|c| c.source.as_str()))
+        .collect();
+    let cards = match file.cards {
+        None => Vec::new(),
+        Some(CardsFile::List(list)) => {
+            if list.len() > sources.len() {
+                return Err(format!(
+                    "the metadata has text for {} cards, but the deck has {}",
+                    list.len(),
+                    sources.len()
+                ));
+            }
+            list.into_iter()
+                .map(|t| t.unwrap_or_default().into())
+                .collect()
+        }
+        Some(CardsFile::Map(map)) => {
+            let mut cards = vec![Text::default(); sources.len()];
+            let mut claimed: Vec<Option<String>> = vec![None; sources.len()];
+            for (key, text) in map {
+                let exact: Vec<usize> = (0..sources.len()).filter(|&i| sources[i] == key).collect();
+                let hits = if exact.is_empty() {
+                    let by_name: Vec<usize> = (0..sources.len())
+                        .filter(|&i| sources[i].rsplit('/').next() == Some(key.as_str()))
+                        .collect();
+                    let mut distinct: Vec<&str> = by_name.iter().map(|&i| sources[i]).collect();
+                    distinct.sort_unstable();
+                    distinct.dedup();
+                    if distinct.len() > 1 {
+                        return Err(format!(
+                            "'{key}' is ambiguous: it matches {}; use the full source path",
+                            distinct.join(", ")
+                        ));
+                    }
+                    by_name
+                } else {
+                    exact
+                };
+                if hits.is_empty() {
+                    return Err(format!(
+                        "'{key}' in the metadata matches no card of the deck (sources look like '{}')",
+                        sources.first().copied().unwrap_or("")
+                    ));
+                }
+                let text: Text = text.into();
+                for i in hits {
+                    if let Some(other) = &claimed[i] {
+                        return Err(format!(
+                            "'{key}' and '{other}' in the metadata both set the text of {}",
+                            sources[i]
+                        ));
+                    }
+                    claimed[i] = Some(key.clone());
+                    cards[i] = text.clone();
+                }
+            }
+            cards
+        }
+    };
+    Ok(Meta {
+        deck: file.deck.into(),
+        cards,
+    })
+}
+
 #[cfg(test)]
 mod tests;

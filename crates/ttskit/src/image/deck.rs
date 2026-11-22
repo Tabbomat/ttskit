@@ -68,6 +68,7 @@ pub struct DeckObjectArgs {
     pub back_urls: Vec<String>,
     pub unique_backs: bool,
     pub config: Option<PathBuf>,
+    pub meta: Option<PathBuf>,
     pub nicknames_from_files: bool,
     pub yes: bool,
     pub dry_run: bool,
@@ -497,7 +498,7 @@ fn is_url(text: &str) -> bool {
 
 #[cfg(feature = "image")]
 pub fn deck_object(args: &DeckObjectArgs, out: &mut dyn Write) -> Result<bool, String> {
-    use super::deck_object::{Meta, ObjectInput, build_object};
+    use super::deck_object::{ObjectInput, build_object, parse_meta};
 
     if args.out.is_none() && !args.dry_run {
         return Err(
@@ -579,7 +580,14 @@ pub fn deck_object(args: &DeckObjectArgs, out: &mut dyn Write) -> Result<bool, S
         ));
     }
 
-    let meta = Meta::default();
+    let meta = match &args.meta {
+        Some(path) => {
+            let text = std::fs::read_to_string(path)
+                .map_err(|e| format!("{}: cannot read the metadata: {e}", path.display()))?;
+            parse_meta(&text, &description).map_err(|e| format!("{}: {e}", path.display()))?
+        }
+        None => super::deck_object::Meta::default(),
+    };
     let value = build_object(&ObjectInput {
         description: &description,
         face_urls: &face_urls,
