@@ -4,10 +4,11 @@ An unofficial command line toolkit (and MCP server) for developing
 [Tabletop Simulator](https://store.steampowered.com/app/286160/Tabletop_Simulator/)
 mods. Not affiliated with or endorsed by Berserk Games.
 
-> **Status:** early development. The `cloud`, `save`, `editor`, `watch` and
+> **Status:** early development (v0.x); commands and output may change.
+> The `cloud`, `save`, `image`, `editor`, `watch` and
 > `mcp` commands work; see the issue tracker for the roadmap.
 
-## Planned features
+## Features
 
 - **Save pack/unpack:** split a save into readable, diff-friendly files and
   assemble it again, byte-exact, with `require` / `<Include/>` bundling.
@@ -29,14 +30,105 @@ mods. Not affiliated with or endorsed by Berserk Games.
   scripts, run Lua and capture console output; `watch` pushes edits on save.
 - **MCP server (done):** expose the editor API to AI assistants.
 
+## Install
+
+Download a zip from the [releases page](https://github.com/Tabbomat/ttskit/releases),
+unpack it anywhere and put the folder on your `PATH`. Windows x64 only for now.
+Two downloads exist:
+
+| Zip | Contains | Use it for |
+| --- | --- | --- |
+| `ttskit-vX.Y.Z-windows-x64.zip` | `ttskit.exe` | everything except the Steam Cloud commands |
+| `ttskit-vX.Y.Z-windows-x64-steam.zip` | `ttskit.exe` and `steam_api64.dll` | everything, including `cloud` |
+
+Both include the `image` tools. Keep `steam_api64.dll` next to `ttskit.exe` in
+the Steam zip; without it Windows refuses to start the program. Verify a
+download against `SHA256SUMS.txt` from the same release:
+
+```powershell
+(Get-FileHash .\ttskit-vX.Y.Z-windows-x64.zip -Algorithm SHA256).Hash
+```
+
+To build it yourself, see [Building](#building).
+
+## Quick start
+
+The commands below are a first taste; each feature has its own section further
+down. Every command has `--help`.
+
+**Save files** (no game, no Steam needed): split a save into readable files,
+check it, and pack it again.
+
+```
+ttskit save unpack mysave.json -o mymod
+ttskit save lint mysave.json
+ttskit save pack mymod -o mysave.json
+```
+
+**Editor tools** (the game must be running with a save loaded): push scripts
+to the game as you edit them.
+
+```
+ttskit editor get-scripts
+ttskit watch mymod --include lib
+ttskit editor console --follow
+```
+
+**Steam Cloud** (Steam build; Steam must be running): see what is in your
+cloud, upload an asset and get its URL.
+
+```
+ttskit cloud list
+ttskit cloud upload card.png
+```
+
+**Images** (no game, no Steam needed): check and shrink images before using
+them in the game.
+
+```
+ttskit image check deck/
+ttskit image optimize deck/ --out-dir deck-small/
+```
+
+**MCP server**: `ttskit mcp` lets an AI assistant use the editor and project
+tools; see [MCP server](#mcp-server) for how to register it.
+
+## Requirements
+
+| Feature | Needs |
+| --- | --- |
+| `save`, `image` | nothing but the executable |
+| `editor`, `watch`, `mcp` editor tools | Tabletop Simulator running with a save loaded (it serves the External Editor API on localhost) |
+| `cloud` | the Steam zip; Steam running and logged in as an account that owns Tabletop Simulator, same Windows user and elevation as Steam, Steam Cloud enabled |
+| `save check-urls`, `fetch-assets` | network access |
+
+## Known limits
+
+- Windows x64 only. Other platforms are untested.
+- Re-uploading a changed file to the Steam Cloud always gives a **new** URL;
+  saves that use the old URL keep pointing at the old file. Use
+  `save rewrite-urls` to update them. See [Upload and URLs](#upload-and-urls).
+- `cloud` connects to Steam as Tabletop Simulator, so Steam may show you as
+  playing it, and the Steam library prints your Steam ID to stderr. See
+  [Known limitations](#known-limitations).
+- Whether the game picks up cloud index changes made while it runs has been
+  checked only for upload and delete. Close the game before `cloud url
+  --share` or `cloud restore --yes`.
+- Watch mode and Save & Play reload the game, so unsaved changes in it are lost.
+- Unofficial: ttskit uses undocumented parts of the game's cloud storage, which
+  a game update could change. Back up before write commands (ttskit backs up the
+  cloud index itself).
+
 ## Building
 
 ```
-cargo build
-cargo test
+cargo build --release --features image          # plain build
+cargo build --release --features image,steam    # with Steam Cloud support
+cargo test --workspace
 ```
 
-Windows is the primary platform at first.
+The `steam` build needs `steam_api64.dll` next to the executable; see
+[Steam Cloud](#steam-cloud). Windows is the primary platform at first.
 
 See [CONTRIBUTING](CONTRIBUTING.md) for the checks to run, the test fixture
 policy and how to test against real saves locally.
@@ -908,7 +1000,7 @@ which bundles the SDK's redistributable files. The
 (section 1.1) allows distributing the files in the SDK's `redistributable_bin`
 folder together with the software that uses them.
 
-Releases will therefore ship two downloads:
+Releases ship two downloads (see [Install](#install)):
 
 - a plain build without Steam support, which needs no DLL;
 - a Steam build: a zip with `ttskit.exe` and `steam_api64.dll` side by side.
