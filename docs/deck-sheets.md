@@ -96,5 +96,7 @@ verified against the game's own output.
   spawned as a deck of type `Deck` with 5 cards; the nicknames were the file
   names and every card had its own GUID.
 - A one-card object spawned as a `Card` with the nickname of its file.
-- Whether the cards show the right images, and the hand view with
-  `BackIsHidden` on and off, still needs to be looked at in the game.
+- Looked at in the game: the 5 card deck shows the sheet's cards correctly. The one-card object shows slot 0 of the
+  sheet it points at (the image of its own sheet, whatever the file name in the nickname says).
+- Not checked in the game: the hand view with `BackIsHidden` on and off for generated objects, and
+  `UniqueBack: true`.
