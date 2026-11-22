@@ -6,7 +6,7 @@ use serde_json::{Map, Value};
 use ttskit_core::Save;
 
 use crate::config::LintConfig;
-use crate::ctx::{Ctx, Finding, Owner, SceneObject};
+use crate::ctx::{Ctx, Field, Finding, Owner, SceneObject};
 use crate::rules;
 
 /// What the walker knows about the value it is visiting.
@@ -22,6 +22,10 @@ enum Role {
     TopList,
     /// An entry of the top-level `ObjectStates`.
     TopScene,
+    /// A `CustomUIAssets` array.
+    UiList,
+    /// An item of a `CustomUIAssets` array.
+    UiItem,
 }
 
 pub(crate) fn run(save: &Save, config: &LintConfig) -> Vec<Finding> {
@@ -38,6 +42,7 @@ fn walk<'a>(value: &'a Value, role: Role, path: &mut String, owner: Owner<'a>, c
             let item_role = match role {
                 Role::SceneList => Role::Scene,
                 Role::TopList => Role::TopScene,
+                Role::UiList => Role::UiItem,
                 _ => Role::Plain,
             };
             for (i, item) in items.iter().enumerate() {
@@ -85,6 +90,7 @@ fn walk_map<'a>(
             "ObjectStates" if is_root => Role::TopList,
             "ContainedObjects" => Role::SceneList,
             "States" => Role::SceneMap,
+            "CustomUIAssets" => Role::UiList,
             _ => Role::Plain,
         };
         let len = path.len();
@@ -92,6 +98,18 @@ fn walk_map<'a>(
             path.push('.');
         }
         path.push_str(key);
+        if ctx.url_rules_active
+            && let Value::String(value) = child
+        {
+            let field = Field {
+                key,
+                value,
+                path,
+                owner,
+                ui_asset_item: role == Role::UiItem,
+            };
+            rules::check_field(ctx, &field);
+        }
         walk(child, child_role, path, owner, ctx);
         path.truncate(len);
     }

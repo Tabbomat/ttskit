@@ -423,3 +423,341 @@ fn non_finite_number_negative() {
     );
     assert!(f.is_empty(), "{f:?}");
 }
+
+// --- URL rules ---
+
+fn url_save(fields: Value) -> Value {
+    let mut o = json!({ "GUID": "g1", "Nickname": "Card" });
+    for (k, v) in fields.as_object().unwrap() {
+        o[k] = v.clone();
+    }
+    json!({ "ObjectStates": [o] })
+}
+
+fn rules_of(f: &[Finding]) -> Vec<&str> {
+    f.iter().map(|f| f.rule).collect()
+}
+
+#[test]
+fn empty_url_positive() {
+    let f = run_rule(
+        json!({
+            "CustomUIAssets": [ { "Name": "a", "URL": " " } ],
+            "ObjectStates": [ {
+                "GUID": "g",
+                "CustomDeck": { "1": { "FaceURL": "", "BackURL": "  	", "NumWidth": 1 } },
+                "CustomImage": { "ImageURL": "" },
+                "CustomMesh": { "MeshURL": "" },
+                "CustomAssetbundle": { "AssetbundleURL": "" },
+                "CustomPDF": { "PDFUrl": "" }
+            } ]
+        }),
+        "empty-url",
+    );
+    let paths: Vec<_> = f.iter().map(|f| f.path.as_str()).collect();
+    assert_eq!(
+        paths,
+        [
+            "CustomUIAssets[0].URL",
+            "ObjectStates[0].CustomDeck.1.FaceURL",
+            "ObjectStates[0].CustomDeck.1.BackURL",
+            "ObjectStates[0].CustomImage.ImageURL",
+            "ObjectStates[0].CustomMesh.MeshURL",
+            "ObjectStates[0].CustomAssetbundle.AssetbundleURL",
+            "ObjectStates[0].CustomPDF.PDFUrl",
+        ]
+    );
+    assert!(f[1].message.contains("FaceURL"));
+    assert_eq!(f[1].guid.as_deref(), Some("g"));
+    assert_eq!(f[0].severity, Severity::Error);
+}
+
+#[test]
+fn empty_url_negative() {
+    let f = run_rule(
+        json!({
+            "Other": { "URL": "" },
+            "ObjectStates": [ {
+                "GUID": "g",
+                "Custom": { "DiffuseURL": "", "NormalURL": "", "ColliderURL": "", "ImageSecondaryURL": "",
+                            "AssetbundleSecondaryURL": "", "LutURL": "", "FaceURL": "https://a.b/c.png",
+                            "Name": "", "Count": 0 }
+            } ]
+        }),
+        "empty-url",
+    );
+    assert!(f.is_empty(), "{f:?}");
+}
+
+#[test]
+fn invalid_url_positive() {
+    for bad in [
+        "ftp://example.com/a.png",
+        "data:image/png;base64,AAAA",
+        "example.com/a.png",
+        "https://",
+        "https:///a.png",
+        "https://user@:80/a",
+        "https://exa mple.com/a.png",
+        "https://example.com/a
+b",
+        " https://example.com/a.png",
+    ] {
+        let f = run(url_save(json!({ "FaceURL": bad })));
+        assert_eq!(rules_of(&f), ["invalid-url"], "{bad}");
+        assert!(f[0].message.contains("FaceURL"));
+    }
+}
+
+#[test]
+fn invalid_url_negative() {
+    for good in [
+        "https://example.com/a.png",
+        "HTTPS://Example.com:8080/a?b#c",
+        "https://user:pw@example.com/a",
+        "https://[::1]:80/a",
+        "https://i.imgur.com/x.png",
+    ] {
+        let f = run(url_save(json!({ "FaceURL": good })));
+        assert!(f.is_empty(), "{good}: {f:?}");
+    }
+    // Local paths are reported by local-url, not here.
+    let f = run(url_save(json!({ "FaceURL": r"C:\x\a.png" })));
+    assert_eq!(rules_of(&f), ["local-url"]);
+}
+
+#[test]
+fn insecure_url_positive() {
+    for v in ["http://example.com/a.png", "HTTP://example.com/a.png"] {
+        let f = run(url_save(json!({ "ImageURL": v })));
+        assert_eq!(rules_of(&f), ["insecure-url"], "{v}");
+        assert_eq!(f[0].severity, Severity::Warning);
+        assert_eq!(f[0].path, "ObjectStates[0].ImageURL");
+    }
+}
+
+#[test]
+fn insecure_url_negative() {
+    let f = run(url_save(
+        json!({ "ImageURL": "https://example.com/http://x", "Note": "http://example.com" }),
+    ));
+    assert!(f.is_empty(), "{f:?}");
+}
+
+#[test]
+fn local_url_positive() {
+    for v in [
+        "file:///x/a.png",
+        "FILE:///x/a.png",
+        r"C:\Users\x\a.png",
+        "d:/images/a.png",
+        r"\\host\share\a.png",
+        "/home/x/a.png",
+        "~/a.png",
+        r"Documents\Tabletop Simulator\a.png",
+        "x/Tabletop Simulator/a.png",
+        r"Mods\Images\a.png",
+        "mods/models/a.obj",
+        "MODS/ASSETBUNDLES/a",
+        "Mods/PDF/a.pdf",
+    ] {
+        let f = run(url_save(json!({ "FaceURL": v })));
+        assert_eq!(rules_of(&f), ["local-url"], "{v}");
+        assert_eq!(f[0].severity, Severity::Error);
+    }
+}
+
+#[test]
+fn local_url_negative() {
+    for v in [
+        "https://example.com/a.png",
+        "Tabletop Simulator",
+        "https://example.com/Mods/Other/a.png",
+        "x:y",
+    ] {
+        let f = run_rule(url_save(json!({ "FaceURL": v })), "local-url");
+        assert!(f.is_empty(), "{v}: {f:?}");
+    }
+}
+
+#[test]
+fn url_fields_are_found_once_in_nested_objects_and_deck_sheets() {
+    let f = run_rule(
+        json!({
+            "ObjectStates": [ {
+                "GUID": "deck",
+                "CustomDeck": { "1": { "FaceURL": "", "BackURL": "https://a.b/b.png" },
+                                "2": { "FaceURL": "", "BackURL": "" } },
+                "ContainedObjects": [ {
+                    "GUID": "card",
+                    "CustomImage": { "ImageURL": "" },
+                    "States": { "2": { "GUID": "s", "CustomMesh": { "MeshURL": "" } } },
+                    "ContainedObjects": [ { "GUID": "deep", "CustomPDF": { "PDFUrl": "" } } ]
+                } ]
+            } ]
+        }),
+        "empty-url",
+    );
+    let got: Vec<_> = f
+        .iter()
+        .map(|f| (f.path.as_str(), f.guid.as_deref().unwrap()))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            ("ObjectStates[0].CustomDeck.1.FaceURL", "deck"),
+            ("ObjectStates[0].CustomDeck.2.FaceURL", "deck"),
+            ("ObjectStates[0].CustomDeck.2.BackURL", "deck"),
+            (
+                "ObjectStates[0].ContainedObjects[0].CustomImage.ImageURL",
+                "card"
+            ),
+            (
+                "ObjectStates[0].ContainedObjects[0].States.2.CustomMesh.MeshURL",
+                "s"
+            ),
+            (
+                "ObjectStates[0].ContainedObjects[0].ContainedObjects[0].CustomPDF.PDFUrl",
+                "deep"
+            ),
+        ]
+    );
+}
+
+#[test]
+fn url_rules_are_independent() {
+    let v = json!({ "ObjectStates": [ {
+        "GUID": "g",
+        "A": { "FaceURL": "" },
+        "B": { "FaceURL": "http://a.b/c" },
+        "C": { "FaceURL": "ftp://a.b/c" },
+        "D": { "FaceURL": "file:///a" }
+    } ] });
+    let all = rules_of(&run(v.clone())).len();
+    assert_eq!(all, 4);
+    for id in ["empty-url", "insecure-url", "invalid-url", "local-url"] {
+        let mut c = LintConfig::default();
+        c.set(id, Setting::Off).unwrap();
+        let f = lint(&save(v.clone()), &c);
+        assert_eq!(f.len(), 3, "{id}");
+        assert!(f.iter().all(|f| f.rule != id));
+    }
+    let mut c = LintConfig::default();
+    for id in ["empty-url", "insecure-url", "invalid-url", "local-url"] {
+        c.set(id, Setting::Off).unwrap();
+    }
+    assert!(lint(&save(v), &c).is_empty());
+}
+
+#[test]
+fn legacy_steam_url_positive() {
+    for v in [
+        "http://cloud-3.steamusercontent.com/ugc/1/ABC/",
+        "HTTP://Cloud-3.SteamUserContent.com:80/ugc/1/",
+    ] {
+        let f = run(url_save(json!({ "MeshURL": v })));
+        assert_eq!(rules_of(&f), ["legacy-steam-url"], "{v}");
+        assert_eq!(f[0].severity, Severity::Info);
+    }
+}
+
+#[test]
+fn legacy_steam_url_negative() {
+    let f = run(url_save(json!({
+        "A": { "MeshURL": "https://cloud-3.steamusercontent.com/ugc/1/" },
+        "B": { "MeshURL": "http://cloud-2.steamusercontent.com/ugc/1/" },
+        "C": { "MeshURL": "http://example.com/cloud-3.steamusercontent.com" }
+    })));
+    assert_eq!(rules_of(&f), ["insecure-url", "insecure-url"]);
+}
+
+#[test]
+fn placeholders_are_skipped() {
+    for v in [
+        "<Scythe>scythetablemain",
+        "<Scythe>ScytheEncounterCards1.png",
+        "{de}<Scythe>a{en}<Scythe>b",
+    ] {
+        let f = run(url_save(json!({ "FaceURL": v })));
+        assert!(f.is_empty(), "{v}: {f:?}");
+    }
+    // Not placeholders.
+    for v in ["<>x", "< a>x", "<a b>x", "<a"] {
+        let f = run(url_save(json!({ "FaceURL": v })));
+        assert_eq!(rules_of(&f), ["invalid-url"], "{v}");
+    }
+}
+
+#[test]
+fn localized_value_with_one_bad_segment() {
+    let f = run(url_save(
+        json!({ "FaceURL": "{de}https://a.b/x.png{en}ftp://a.b/x.png{fr}https://a.b/y.png" }),
+    ));
+    assert_eq!(rules_of(&f), ["invalid-url"]);
+    assert!(f[0].message.contains("{en}"), "{}", f[0].message);
+    assert!(!f[0].message.contains("{de}"));
+}
+
+#[test]
+fn localized_all_good_and_braces_in_urls() {
+    for v in [
+        "{de}https://a.b/x.png{en}https://a.b/y.png",
+        "{pt}https://a.b/x.png",
+        "https://a.b/x?q={de}",
+        "https://a.b/{en}x.png",
+    ] {
+        let f = run(url_save(json!({ "FaceURL": v })));
+        assert!(f.is_empty(), "{v}: {f:?}");
+    }
+    // A brace group that is not a marker does not make a value localized.
+    let f = run(url_save(json!({ "FaceURL": "{x}https://a.b/x.png" })));
+    assert_eq!(rules_of(&f), ["invalid-url"]);
+}
+
+#[test]
+fn localized_segments_use_every_rule() {
+    let f = run(url_save(json!({
+        "FaceURL": r"{de}http://a.b/x.png{en}http://cloud-3.steamusercontent.com/ugc/1/{fr}{es}C:\x.png{it}https://ok.b/x"
+    })));
+    assert_eq!(
+        rules_of(&f),
+        ["insecure-url", "legacy-steam-url", "empty-url", "local-url"]
+    );
+    assert!(f[0].message.contains("{de}"));
+    assert!(f[1].message.contains("{en}"));
+    assert!(f[2].message.contains("{fr}"));
+    assert!(f[3].message.contains("{es}"));
+    // An empty segment of an optional key is ignored.
+    let f = run(url_save(json!({ "DiffuseURL": "{de}{en}https://a.b/x" })));
+    assert!(f.is_empty(), "{f:?}");
+}
+
+#[test]
+fn verifycache_prefix_is_stripped() {
+    for v in [
+        "{verifycache}https://a.b/x.unity3d",
+        "{VerifyCache}https://a.b/x.unity3d",
+        "{verifycache}{de}https://a.b/x{en}https://a.b/y",
+        "{de}{verifycache}https://a.b/x{en}{verifycache}https://a.b/y",
+    ] {
+        let f = run(url_save(json!({ "AssetbundleURL": v })));
+        assert!(f.is_empty(), "{v}: {f:?}");
+    }
+    // The remainder is still classified.
+    let f = run(url_save(
+        json!({ "AssetbundleURL": "{verifycache}{de}http://a.b/x{en}ftp://a.b/y" }),
+    ));
+    assert_eq!(rules_of(&f), ["insecure-url", "invalid-url"]);
+    let f = run(url_save(json!({ "AssetbundleURL": "{verifycache}" })));
+    assert_eq!(rules_of(&f), ["empty-url"]);
+    let f = run(url_save(json!({ "DiffuseURL": "{verifycache}" })));
+    assert!(f.is_empty());
+}
+
+#[test]
+fn verifycache_only_counts_at_the_start() {
+    let f = run(url_save(
+        json!({ "AssetbundleURL": "https://a.b/{verifycache}x", "FaceURL": "x{verifycache}https://a.b/y" }),
+    ));
+    assert_eq!(rules_of(&f), ["invalid-url"]);
+}

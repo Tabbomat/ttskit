@@ -39,10 +39,24 @@ pub(crate) struct SceneObject<'a, 'p> {
     pub owner: Owner<'a>,
 }
 
+/// A string-valued key/value pair of any JSON object in the save.
+pub(crate) struct Field<'a, 'p> {
+    pub key: &'a str,
+    pub value: &'a str,
+    /// JSON path of the field itself (ends with the key).
+    pub path: &'p str,
+    /// Nearest enclosing object with a string GUID.
+    pub owner: Owner<'a>,
+    /// Whether the field belongs to an item of a `CustomUIAssets` array.
+    pub ui_asset_item: bool,
+}
+
 /// Shared state of one lint run.
 pub(crate) struct Ctx<'a> {
     config: &'a LintConfig,
     pub root: &'a Value,
+    /// Whether any rule that looks at URL fields is on.
+    pub url_rules_active: bool,
     findings: Vec<Finding>,
     /// First scene object seen per non-empty GUID, at any level.
     pub seen_guids: HashMap<&'a str, &'a Map<String, Value>>,
@@ -59,6 +73,7 @@ impl<'a> Ctx<'a> {
         Ctx {
             config,
             root,
+            url_rules_active: crate::rules::url_rules().any(|id| config.severity(id).is_some()),
             findings: Vec::new(),
             seen_guids: HashMap::new(),
             seen_top_guids: HashMap::new(),
