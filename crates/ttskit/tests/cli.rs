@@ -1207,3 +1207,21 @@ fn image_build_without_the_feature_says_so() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+fn completions_prints_a_script_for_every_shell() {
+    for shell in ["bash", "zsh", "fish", "powershell", "elvish"] {
+        let output = ttskit(&["completions", shell]);
+        assert_eq!(output.status.code(), Some(0), "{shell}");
+        let script = String::from_utf8_lossy(&output.stdout);
+        assert!(script.contains("ttskit"), "{shell}: {script}");
+        assert!(script.contains("completions"), "{shell}");
+        assert!(output.stderr.is_empty(), "{shell}");
+    }
+}
+
+#[test]
+fn completions_rejects_an_unknown_shell() {
+    let output = ttskit(&["completions", "nushell"]);
+    assert_ne!(output.status.code(), Some(0));
+}

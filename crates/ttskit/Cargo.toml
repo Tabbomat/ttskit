@@ -19,6 +19,7 @@ image = ["dep:ttskit-image"]
 
 [dependencies]
 clap = { version = "4", features = ["derive", "env"] }
+clap_complete = "4"
 dirs = "6"
 jiff = "0.2"
 notify = "8"

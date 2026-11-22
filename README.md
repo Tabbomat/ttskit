@@ -41,6 +41,28 @@ Windows is the primary platform at first.
 See [CONTRIBUTING](CONTRIBUTING.md) for the checks to run, the test fixture
 policy and how to test against real saves locally.
 
+## Shell completions
+
+`ttskit completions <shell>` prints a tab-completion script for subcommands and
+options to stdout. Supported shells: `powershell`, `bash`, `zsh`, `fish` and
+`elvish`.
+
+PowerShell: add this line to your profile (`notepad $PROFILE`):
+
+```powershell
+ttskit completions powershell | Out-String | Invoke-Expression
+```
+
+bash: add this line to `~/.bashrc`, or save the output to a file in
+`~/.local/share/bash-completion/completions/ttskit`:
+
+```sh
+source <(ttskit completions bash)
+```
+
+zsh and fish: save the output as `_ttskit` in a directory on your `fpath`, or
+as `~/.config/fish/completions/ttskit.fish`.
+
 ## Editor commands
 
 `ttskit editor` talks to a running game through its External Editor API: `get-scripts`, `save-and-play`, `exec`, `send` and `console`. The game must be running; nothing here needs Steam. For example, watch the game's console while you work:

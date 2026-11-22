@@ -20,7 +20,8 @@ use std::process::ExitCode;
 use editor::CliError;
 use std::time::SystemTime;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::Shell;
 use ttskit_cloud::{BackupStore, CloudBackend};
 
 /// Unofficial command line toolkit for Tabletop Simulator mod development.
@@ -71,6 +72,17 @@ enum Command {
     /// Errors are printed and the watch keeps running. The game's `print`
     /// output and Lua errors are shown. Ctrl+C stops.
     Watch(WatchCli),
+    /// Print a shell completion script to stdout
+    ///
+    /// See the README for how to install it for your shell.
+    Completions(CompletionsCli),
+}
+
+#[derive(clap::Args)]
+struct CompletionsCli {
+    /// The shell to generate the script for
+    #[arg(value_enum)]
+    shell: Shell,
 }
 
 #[derive(clap::Args)]
@@ -1492,6 +1504,12 @@ fn config_dir_of(config: &Path) -> &Path {
 
 fn run_simple(command: Command) -> Result<(), CliError> {
     match command {
+        Command::Completions(CompletionsCli { shell }) => {
+            let mut out = std::io::stdout().lock();
+            clap_complete::generate(shell, &mut Cli::command(), "ttskit", &mut out);
+            out.flush().map_err(|e| e.to_string())?;
+            Ok(())
+        }
         Command::Mcp(McpCli {
             root,
             console_buffer,
