@@ -1,0 +1,77 @@
+name: Release
+
+# Pushing a tag like v0.2.0 builds the Windows binaries and publishes a GitHub
+# release with the zips and a SHA256SUMS.txt file. The tag must match the
+# workspace version in Cargo.toml.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check that the tag matches the version
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $line = Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1
+          $version = $line.Matches[0].Groups[1].Value
+          if ($tag -ne "v$version") {
+            throw "Tag $tag does not match the workspace version $version in Cargo.toml"
+          }
+
+      - name: Build (plain)
+        run: cargo build --release --locked -p ttskit --features image
+
+      - name: Package (plain)
+        shell: pwsh
+        run: |
+          $name = "ttskit-${{ github.ref_name }}-windows-x64"
+          New-Item -ItemType Directory -Path "dist/$name" | Out-Null
+          Copy-Item target/release/ttskit.exe, README.md, LICENSE "dist/$name"
+          Compress-Archive -Path "dist/$name" -DestinationPath "dist/$name.zip"
+
+      - name: Build (Steam)
+        run: cargo build --release --locked -p ttskit --features image,steam
+
+      - name: Package (Steam)
+        shell: pwsh
+        run: |
+          $name = "ttskit-${{ github.ref_name }}-windows-x64-steam"
+          New-Item -ItemType Directory -Path "dist/$name" | Out-Null
+          $dll = Get-ChildItem target/release/build -Recurse -Filter steam_api64.dll |
+            Where-Object { $_.FullName -match 'steamworks-sys' } | Select-Object -First 1
+          if (-not $dll) { throw "steam_api64.dll not found in the build output" }
+          Copy-Item target/release/ttskit.exe, $dll.FullName, README.md, LICENSE "dist/$name"
+          Compress-Archive -Path "dist/$name" -DestinationPath "dist/$name.zip"
+
+      - name: Checksums
+        shell: pwsh
+        working-directory: dist
+        run: |
+          Get-ChildItem *.zip | ForEach-Object {
+            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
+            "$hash  $($_.Name)"
+          } | Set-Content -Encoding ascii SHA256SUMS.txt
+          Get-Content SHA256SUMS.txt
+
+      - name: Publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" dist/*.zip dist/SHA256SUMS.txt `
+            --title "${{ github.ref_name }}" --generate-notes --verify-tag
