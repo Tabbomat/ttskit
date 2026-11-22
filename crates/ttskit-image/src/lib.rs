@@ -9,6 +9,7 @@ mod check;
 mod convert;
 mod optimize;
 mod quantize;
+mod resize;
 
 pub use check::{CheckOptions, CheckReport, DEFAULT_MAX_SIDE, Finding, check};
 pub use convert::{
@@ -20,6 +21,10 @@ pub use optimize::{
 pub use quantize::{
     DEFAULT_COLORS, Engine, MAX_COLORS, MIN_COLORS, QuantizeOptions, QuantizeOutcome, Quantized,
     quantize,
+};
+pub use resize::{
+    Filter, MAX_RESULT_SIDE, Outcome as ResizeOutcome, ResizeOptions, Resized,
+    Target as ResizeTarget, Unchanged, resize, target_size,
 };
 
 use std::fs::File;

@@ -30,7 +30,7 @@ enum Command {
         #[command(subcommand)]
         command: CloudCommand,
     },
-    /// Inspect, check, convert, optimize and quantize image files (local only; needs a build with the `image` feature; unofficial)
+    /// Inspect, check, convert, resize, optimize and quantize image files (local only; needs a build with the `image` feature; unofficial)
     Image {
         #[command(subcommand)]
         command: ImageCommand,
@@ -356,6 +356,70 @@ enum ImageCommand {
         #[arg(long)]
         yes: bool,
         /// Optimize in memory and report the savings, but write nothing
+        #[arg(long)]
+        dry_run: bool,
+        /// Print one JSON object with all results
+        #[arg(long)]
+        json: bool,
+    },
+    /// Scale PNG and JPEG images down, keeping the aspect ratio
+    ///
+    /// Give exactly one size: --max-side N (the longer side becomes N),
+    /// --width N, --height N (the other side follows) or --scale F. An image
+    /// is never enlarged unless --allow-enlarge is given: one that would grow
+    /// is left as it is (a copy of the original goes to --out or --out-dir),
+    /// and so is one that already has the target size. The default filter is
+    /// lanczos3; --filter picks another (nearest keeps pixel art sharp).
+    /// Transparency is resampled without dark or light fringes, and 16-bit
+    /// PNG stays 16-bit. PNG stays PNG and JPEG stays JPEG (re-encoded at
+    /// --quality, default 85, so a resized JPEG loses a little more quality);
+    /// any other format is skipped with a note, run `image convert` first. The
+    /// colour profile and EXIF data are dropped (the game ignores them; an
+    /// EXIF orientation is applied to the pixels first); an animated PNG is
+    /// resized by its first frame, with a warning. You must say where results
+    /// go: --out FILE (one input), --out-dir DIR, or --in-place with --yes;
+    /// --dry-run alone runs in memory and only reports the new sizes.
+    /// Existing outputs are never overwritten without --yes. Output is
+    /// deterministic. Exits with status 1 if any file failed.
+    #[command(group(clap::ArgGroup::new("size").required(true).multiple(false).args(["max_side", "width", "height", "scale"])))]
+    Resize {
+        /// Image files or directories (scanned recursively)
+        #[arg(required = true, value_name = "INPUT")]
+        inputs: Vec<PathBuf>,
+        /// Make the longer side this many pixels
+        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
+        max_side: Option<u32>,
+        /// Make the width this many pixels
+        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
+        width: Option<u32>,
+        /// Make the height this many pixels
+        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
+        height: Option<u32>,
+        /// Multiply both sides by this factor, e.g. 0.5
+        #[arg(long, value_name = "F", value_parser = image::parse_scale)]
+        scale: Option<f64>,
+        /// Allow results larger than the input
+        #[arg(long)]
+        allow_enlarge: bool,
+        /// Resampling filter
+        #[arg(long, value_enum, default_value = "lanczos3")]
+        filter: image::FilterKind,
+        /// JPEG quality, 1 to 100 [default: 85]
+        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u8).range(1..=100))]
+        quality: Option<u8>,
+        /// Output file (for exactly one input)
+        #[arg(long, value_name = "FILE", conflicts_with_all = ["out_dir", "in_place"])]
+        out: Option<PathBuf>,
+        /// Output directory (created if missing); files are named like their input
+        #[arg(long, value_name = "DIR", conflicts_with = "in_place")]
+        out_dir: Option<PathBuf>,
+        /// Replace the input files (needs --yes)
+        #[arg(long)]
+        in_place: bool,
+        /// Confirm --in-place, or overwrite existing output files
+        #[arg(long)]
+        yes: bool,
+        /// Resize in memory and report the new sizes, but write nothing
         #[arg(long)]
         dry_run: bool,
         /// Print one JSON object with all results
@@ -1383,6 +1447,52 @@ fn run(cli: Cli) -> Result<ExitCode, CliError> {
                     inputs,
                     level,
                     strip,
+                    out,
+                    out_dir,
+                    in_place,
+                    yes,
+                    dry_run,
+                    json,
+                },
+                &mut stdout,
+            )?;
+            stdout.flush().map_err(|e| e.to_string())?;
+            Ok(if ok {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            })
+        }
+        Command::Image {
+            command:
+                ImageCommand::Resize {
+                    inputs,
+                    max_side,
+                    width,
+                    height,
+                    scale,
+                    allow_enlarge,
+                    filter,
+                    quality,
+                    out,
+                    out_dir,
+                    in_place,
+                    yes,
+                    dry_run,
+                    json,
+                },
+        } => {
+            let mut stdout = std::io::stdout().lock();
+            let ok = image::resize(
+                &image::ResizeArgs {
+                    inputs,
+                    max_side,
+                    width,
+                    height,
+                    scale,
+                    allow_enlarge,
+                    filter,
+                    quality,
                     out,
                     out_dir,
                     in_place,

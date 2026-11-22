@@ -96,4 +96,7 @@ game:
 | `extension-mismatch` | always | The game decides the format by content, so a wrong extension still loads. Other tools may go by the extension, so the file is flagged. |
 | `alpha-opaque` | always | A PNG or WebP with an alpha channel in which every pixel is fully opaque stores a channel that does nothing. `ttskit image optimize` removes it without changing the picture. |
 
+`ttskit image resize` is the fix for `side-too-long`: it scales PNG and JPEG
+images down and never enlarges unless asked.
+
 The `very-large` warning of `image info` (8192 px) is separate and unchanged.

@@ -624,6 +624,33 @@ read. `--json` prints one object with `max_side`, `max_bytes`, `images` (each
 with `findings`) and `errors`. Where the limits come from is in
 [docs/image-formats.md](docs/image-formats.md).
 
+### Resizing images
+
+```
+ttskit image resize deck/ --max-side 4096 --out-dir resized
+ttskit image resize card.png --width 1024 --out card.small.png
+ttskit image resize deck/ --scale 0.5 --dry-run
+ttskit image resize deck/ --max-side 2048 --in-place --yes
+```
+
+`image resize INPUT...` scales PNG and JPEG images down and keeps the aspect
+ratio. Give exactly one of `--max-side N` (the longer side), `--width N`,
+`--height N` or `--scale F`. The default filter is Lanczos 3 (`--filter` picks
+`catmull-rom`, `triangle` or `nearest`); transparency is resampled without
+fringes and 16-bit PNG stays 16-bit.
+
+- An image is never enlarged unless you pass `--allow-enlarge`. One that would
+  grow, or that already has the target size, is left as it is (with `--out` or
+  `--out-dir` a copy of the original goes to the output).
+- PNG stays PNG and JPEG stays JPEG; a JPEG is re-encoded at `--quality`
+  (default 85). Other formats are skipped with a note: run `image convert`
+  first.
+- The colour profile and EXIF data are dropped, as in `image convert`.
+- Output rules are those of the other image commands: say where results go
+  (`--out`, `--out-dir`, or `--in-place --yes`), existing files are never
+  overwritten without `--yes`, `--dry-run` writes nothing, and the same input
+  and options give the same bytes.
+
 ### Converting images
 
 ```
