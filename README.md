@@ -729,7 +729,7 @@ note saying so. The result is then run through the same lossless optimizer as
   Animated PNGs and files that are not PNG are skipped with a note.
 - The quality score is a number from 0 to 100. With the built-in engine it is
   derived from the PSNR between the original and the result, computed on
-  alpha-premultiplied pixels: 20 dB or less is 0, 50 dB or more is 100. With
+  alpha-premultiplied pixels: 20 dB or less is 0, 45 dB or more is 100. With
   pngquant, `--quality` is passed to it and uses its own scale; the score shown
   is still the built-in one, measured against the original.
 

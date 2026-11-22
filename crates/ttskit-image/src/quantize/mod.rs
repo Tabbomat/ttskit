@@ -42,10 +42,10 @@
 //!
 //! ```text
 //! psnr  = 10 * log10(255^2 / mse)           (infinite when mse == 0)
-//! score = floor(clamp((psnr - 20) * 100 / 30, 0, 100))
+//! score = floor(clamp((psnr - 20) * 100 / 25, 0, 100))
 //! ```
 //!
-//! so 20 dB or less is 0, 50 dB or more is 100, and identical images are 100.
+//! so 20 dB or less is 0, 45 dB or more is 100, and identical images are 100.
 //!
 //! With `quality = (min, max)`: a result scoring below `min` is skipped
 //! (`quality-too-low`). Colours are then reduced further (halving `colors`
@@ -72,7 +72,7 @@ pub const MAX_COLORS: u16 = 256;
 
 /// PSNR (dB) that maps to score 0 and to score 100.
 const PSNR_FLOOR: f64 = 20.0;
-const PSNR_CEIL: f64 = 50.0;
+const PSNR_CEIL: f64 = 45.0;
 
 /// Which quantizer produces the palette image.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
