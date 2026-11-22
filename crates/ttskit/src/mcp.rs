@@ -23,6 +23,9 @@ use sha2::{Digest, Sha256};
 use ttskit_editor::{EditorError, FieldChange, MessageSource, ScriptPlan};
 
 use self::buffer::{EventKind, Query};
+use self::change_tools::{
+    ImageBuildApplyArgs, ImageBuildArgs, RewriteUrlsApplyArgs, RewriteUrlsArgs,
+};
 use self::cloud_tools::{CloudListArgs, CloudStatusArgs};
 use self::hub::{Hub, Replies};
 use self::image_tools::ImageCheckArgs;
@@ -52,7 +55,7 @@ nextSince as `since` next time to get only newer events. execute_lua and save_an
 lastSeq for the same purpose. The save_scan, save_lint, save_diff, save_check_urls and \
 manifest_show tools are read-only, work on files inside the server's root and need no game \
 (only save_check_urls uses the network); their results are the JSON of the matching ttskit \
-commands. The cloud_list and cloud_status tools (only in builds with Steam support) are read-only and open Steam for each call, so Steam must be running and logged in; if it is not, they fail with the reason. image_check (only in builds with image support) is local and read-only too.";
+commands. The cloud_list and cloud_status tools (only in builds with Steam support) are read-only and open Steam for each call, so Steam must be running and logged in; if it is not, they fail with the reason. image_check (only in builds with image support) is local and read-only too. Tools that change files come in pairs: save_rewrite_urls_plan and image_build_plan (only with image support) change nothing and return a fingerprint; the matching *_apply tool needs the same arguments, that fingerprint and confirm: true, and refuses if anything changed since the plan. Nothing is deleted.";
 
 #[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
@@ -552,6 +555,34 @@ fn resolve_in_root(root: &Path, path: &Path) -> Result<PathBuf, String> {
     Ok(canonical)
 }
 
+/// Resolve a path to write: the file need not exist, but its directory must,
+/// and it must be inside `root` (also through symlinks, for the directory and
+/// for an existing file). The file name must be a plain name.
+fn resolve_output_in_root(root: &Path, path: &Path) -> Result<PathBuf, String> {
+    let name = match path.components().next_back() {
+        Some(Component::Normal(name)) => name.to_owned(),
+        _ => {
+            return Err(format!(
+                "path {} must name a file inside the project root {}",
+                path.display(),
+                root.display()
+            ));
+        }
+    };
+    let parent = match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    // Checks `..`, existence of the directory and containment.
+    let dir = resolve_in_root(root, parent)?;
+    let target = dir.join(name);
+    if target.exists() {
+        // An existing file (or a symlink to one) must also be inside.
+        return resolve_in_root(root, &target);
+    }
+    Ok(target)
+}
+
 fn field_json(change: &FieldChange) -> Value {
     match change {
         FieldChange::Unchanged => json!(["unchanged", null, null]),
@@ -725,6 +756,50 @@ impl EditorServer {
     }
 
     #[tool(
+        description = "Step 1 of rewriting asset URLs in a save: show what `ttskit save rewrite-urls` would replace (its dry-run JSON) and return a fingerprint. Changes nothing. Give `map` (old/new URL file), `from_manifest` and/or `normalize_steam_hosts`, and `out` or `in_place` for where the result goes; the result says whether the output exists and would be overwritten. Paths must be inside the server's root. Then call save_rewrite_urls_apply."
+    )]
+    async fn save_rewrite_urls_plan(
+        &self,
+        Parameters(args): Parameters<RewriteUrlsArgs>,
+    ) -> CallToolResult {
+        let root = self.root.clone();
+        change_tools::run(move || change_tools::rewrite_urls_plan(&root, &args)).await
+    }
+
+    #[tool(
+        description = "Step 2 of rewriting asset URLs: with the same arguments as save_rewrite_urls_plan plus its fingerprint and confirm: true, write the new save (to `out`, overwriting an existing file, or in place). Refused, with nothing written, if confirm is not true, the fingerprint is missing or wrong, the inputs changed since the plan (the result then holds the fresh plan), or there is no `out` or `in_place`."
+    )]
+    async fn save_rewrite_urls_apply(
+        &self,
+        Parameters(args): Parameters<RewriteUrlsApplyArgs>,
+    ) -> CallToolResult {
+        let root = self.root.clone();
+        change_tools::run(move || change_tools::rewrite_urls_apply(&root, &args)).await
+    }
+
+    #[tool(
+        description = "Step 1 of building images from the project config's [[image.pipeline]] rules: show what `ttskit image build` would build (its dry-run JSON) and return a fingerprint. Changes nothing. Default config: ttskit.toml in the root. Then call image_build_apply. Only in builds with the `image` feature."
+    )]
+    async fn image_build_plan(
+        &self,
+        Parameters(args): Parameters<ImageBuildArgs>,
+    ) -> CallToolResult {
+        let root = self.root.clone();
+        change_tools::run(move || change_tools::image_build_plan(&root, &args)).await
+    }
+
+    #[tool(
+        description = "Step 2 of building images: with the same arguments as image_build_plan plus its fingerprint and confirm: true, build the outputs and update the cache file. Never deletes outputs. Refused, with nothing built, if confirm is not true, the fingerprint is missing or wrong, or the plan changed since (the result then holds the fresh plan). If some images fail the result is an error with ok: false; the images that were built stay. Only in builds with the `image` feature."
+    )]
+    async fn image_build_apply(
+        &self,
+        Parameters(args): Parameters<ImageBuildApplyArgs>,
+    ) -> CallToolResult {
+        let root = self.root.clone();
+        change_tools::run(move || change_tools::image_build_apply(&root, &args)).await
+    }
+
+    #[tool(
         description = "Report images that are larger than the game can use well (same JSON as `ttskit image check --json`): for each image its format, size and findings such as side-too-long, plus an `errors` list of files that could not be read. Findings are a normal result. Local, read-only, needs no game; inputs (files or directories) must be inside the server's root. Only in builds with the `image` feature."
     )]
     async fn image_check(&self, Parameters(args): Parameters<ImageCheckArgs>) -> CallToolResult {
@@ -796,7 +871,9 @@ pub fn run(root: Option<&Path>, ep: Endpoints, max_events: usize) -> Result<(), 
 mod tests;
 
 mod buffer;
+mod change_tools;
 mod cloud_tools;
 mod hub;
 mod image_tools;
+mod plan_apply;
 mod save_tools;

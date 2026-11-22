@@ -11,6 +11,9 @@ use super::resolve_in_root;
 use super::save_tools::json_of;
 use crate::image;
 
+/// The tools that need the `image` feature.
+const IMAGE_TOOLS: [&str; 3] = ["image_check", "image_build_plan", "image_build_apply"];
+
 /// Whether this build has image support.
 pub(super) fn available() -> bool {
     cfg!(feature = "image")
@@ -23,7 +26,9 @@ where
     S: Send + Sync + 'static,
 {
     if !available {
-        router.remove_route("image_check");
+        for name in IMAGE_TOOLS {
+            router.remove_route(name);
+        }
     }
     router
 }

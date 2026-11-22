@@ -382,11 +382,13 @@ the game and check that the images load, run `ttskit cloud status` and look at
 | `save_diff` | Compare two saves semantically (`save diff --json`) |
 | `save_check_urls` | Request every asset URL of a save and report dead ones (`save check-urls --json`; uses the network) |
 | `manifest_show` | Show the asset manifest (`cloud manifest --json`) |
+| `save_rewrite_urls_plan` / `save_rewrite_urls_apply` | Replace asset URLs in a save from a mapping or manifest, in two steps (`save rewrite-urls`) |
+| `image_build_plan` / `image_build_apply` | Build the images of the project config's pipeline, in two steps (`image build`) |
 | `image_check` | Report images that are too large for the game (`image check --json`) |
 | `cloud_list` | List the Steam Cloud files, optionally of one folder (`cloud list --json`) |
 | `cloud_status` | Compare a local directory with a cloud folder (`cloud status --json`) |
 
-`image_check` exists only in builds with the `image` feature; its findings, and the files it could not read (`errors`), are in the JSON result, not tool errors. Inputs may be files or directories inside the root.
+`image_check`, `image_build_plan` and `image_build_apply` exist only in builds with the `image` feature; its findings, and the files it could not read (`errors`), are in the JSON result, not tool errors. Inputs may be files or directories inside the root.
 
 `cloud_list` and `cloud_status` exist only in builds with the `steam` feature (other builds do not list them). They are read-only and open Steam for each call, never at server start: Steam must be running and logged in, otherwise the call fails with the reason. Cloud calls run one at a time. `cloud_status` reads the project config (`ttskit.toml` in the root by default) for its ignore patterns; "not in sync" is a normal result, see `in_sync` in the JSON.
 
@@ -395,6 +397,7 @@ The last five tools are read-only, work on local files and need no running game.
 Safeguards and limits:
 
 - `save_and_play` never sends on the first call: it returns the diff and a fingerprint of the plan. Only a second call with `confirm` set to that fingerprint sends, and only if the plan is still the same. Deleting a script or UI that the tree lacks also needs `allow_delete`.
+- Tools that change files come in pairs. The `*_plan` tool returns the CLI's dry-run JSON plus a `fingerprint` and changes nothing. The `*_apply` tool takes the same arguments plus that `fingerprint` and `confirm: true`; it recomputes the plan and refuses, with nothing done, if `confirm` is not true, the fingerprint is missing or wrong, or the inputs changed since the plan (the refusal carries the fresh plan). Overwriting an existing output or the input itself (`in_place`) is only possible this way. Deleting is not offered: `image_build_apply` never prunes.
 - Every path argument of every tool (`save_and_play`, and the save tools above) must be inside the server's root: the working directory, or `--root DIR`. Paths with `..`, absolute paths outside the root and symlinks leading out of it are refused. The save tools write no files.
 - The server holds the editor port (39998) for its whole life and buffers what the game sends, also between tool calls (1000 events and 4 MiB by default; `--console-buffer` changes the count). Every event has a sequence number, so `get_console` with `since` returns only what is new. While the server runs, `ttskit watch`, `ttskit editor console` and other editor integrations cannot receive from the game; if one of them already listens, the server still starts, but the editor tools fail with that reason (`get_status` shows `editorAvailable: false`) while the save tools keep working. See [docs/editor-api.md](docs/editor-api.md#ttskit-mcp) for integrations that listen on the wildcard address.
 - `--game-port`, `--editor-port` and `--timeout` work as for the `editor` commands.

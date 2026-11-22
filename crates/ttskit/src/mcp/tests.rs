@@ -211,7 +211,7 @@ async fn tools_list_has_the_editor_and_save_tools() {
     let tools = r["result"]["tools"].as_array().unwrap();
     let mut names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     // The cloud tools exist only in builds with Steam support.
-    names.retain(|n| !n.starts_with("cloud_") && *n != "image_check");
+    names.retain(|n| !n.starts_with("cloud_") && !n.starts_with("image_"));
     names.sort_unstable();
     assert_eq!(
         names,
@@ -225,6 +225,8 @@ async fn tools_list_has_the_editor_and_save_tools() {
             "save_check_urls",
             "save_diff",
             "save_lint",
+            "save_rewrite_urls_apply",
+            "save_rewrite_urls_plan",
             "save_scan",
             "send_custom_message"
         ]
@@ -1975,7 +1977,7 @@ async fn the_cloud_tools_are_listed_with_a_backend() {
         .map(|t| t["name"].as_str().unwrap())
         .collect();
     assert!(names.contains(&"cloud_list") && names.contains(&"cloud_status"));
-    assert_eq!(names.len(), 13 + usize::from(cfg!(feature = "image")));
+    assert_eq!(names.len(), 15 + 3 * usize::from(cfg!(feature = "image")));
 }
 
 // ---- Image tool ----
@@ -1984,10 +1986,12 @@ async fn the_cloud_tools_are_listed_with_a_backend() {
 fn the_image_tool_is_dropped_without_image_support() {
     let with = image_tools::with_image_tools(EditorServer::tool_router(), true);
     let without = image_tools::with_image_tools(EditorServer::tool_router(), false);
-    assert!(with.has_route("image_check"));
-    assert!(!without.has_route("image_check"));
+    for name in ["image_check", "image_build_plan", "image_build_apply"] {
+        assert!(with.has_route(name), "{name}");
+        assert!(!without.has_route(name), "{name}");
+    }
     assert!(without.has_route("save_scan") && without.has_route("get_status"));
-    assert_eq!(with.list_all().len(), without.list_all().len() + 1);
+    assert_eq!(with.list_all().len(), without.list_all().len() + 3);
     // The server gates on the build's feature.
     assert_eq!(image_tools::available(), cfg!(feature = "image"));
 }
@@ -2150,4 +2154,477 @@ async fn a_build_without_image_support_has_no_image_check() {
         r.get("error").is_some() || r["result"]["isError"] == true,
         "{r}"
     );
+}
+
+// ---- Plan/apply tools ----
+
+const OLD_URL: &str = "https://old.example/a.png";
+const NEW_URL: &str = "https://new.example/a.png";
+
+const URL_SAVE: &str = r#"{
+  "SaveName": "T",
+  "ObjectStates": [
+    { "GUID": "aaaaaa", "Nickname": "Deck", "CustomImage": { "ImageURL": "https://old.example/a.png" } }
+  ]
+}"#;
+
+async fn rewrite_project() -> (Client, tempfile::TempDir) {
+    let (client, root) = without_editor(None).await;
+    write(&root, "save.json", URL_SAVE);
+    write(&root, "map.tsv", &format!("{OLD_URL}\t{NEW_URL}\n"));
+    (client, root)
+}
+
+fn read(root: &tempfile::TempDir, name: &str) -> String {
+    std::fs::read_to_string(root.path().join(name)).unwrap()
+}
+
+fn rewrite_args(extra: Value) -> Value {
+    let mut args = json!({"save": "save.json", "map": "map.tsv"});
+    for (k, v) in extra.as_object().unwrap() {
+        args[k] = v.clone();
+    }
+    args
+}
+
+/// The fingerprint of a successful plan call.
+async fn plan_print(client: &mut Client, tool: &str, args: Value) -> String {
+    let r = client.call(tool, args).await;
+    assert!(!is_error(&r), "{r}");
+    let print = body(&r)["fingerprint"].as_str().unwrap().to_owned();
+    assert_eq!(print.len(), 16);
+    print
+}
+
+fn with_confirmation(mut args: Value, print: &str, confirm: Value) -> Value {
+    args["fingerprint"] = json!(print);
+    args["confirm"] = confirm;
+    args
+}
+
+#[tokio::test]
+async fn rewrite_plan_changes_nothing_and_apply_writes_the_new_save() {
+    let (mut client, root) = rewrite_project().await;
+    let args = rewrite_args(json!({"out": "new.json"}));
+
+    let r = client.call("save_rewrite_urls_plan", args.clone()).await;
+    assert!(!is_error(&r), "{r}");
+    let plan = body(&r);
+    assert_eq!(plan["values_changed"], 1, "{plan}");
+    assert_eq!(plan["output_exists"], false);
+    assert_eq!(plan["written"], false);
+    assert!(
+        plan["next"]
+            .as_str()
+            .unwrap()
+            .contains("save_rewrite_urls_apply")
+    );
+    assert!(!root.path().join("new.json").exists());
+    assert_eq!(read(&root, "save.json"), URL_SAVE);
+    let print = plan["fingerprint"].as_str().unwrap().to_owned();
+
+    let r = client
+        .call(
+            "save_rewrite_urls_apply",
+            with_confirmation(args, &print, json!(true)),
+        )
+        .await;
+    assert!(!is_error(&r), "{r}");
+    let result = body(&r);
+    assert_eq!(result["applied"], true);
+    assert_eq!(result["written"], true);
+    let written = read(&root, "new.json");
+    assert!(written.contains(NEW_URL) && !written.contains(OLD_URL));
+    assert_eq!(read(&root, "save.json"), URL_SAVE);
+}
+
+#[tokio::test]
+async fn rewrite_apply_refuses_without_confirmation_or_with_a_wrong_fingerprint() {
+    let (mut client, root) = rewrite_project().await;
+    let args = rewrite_args(json!({"out": "new.json"}));
+    let print = plan_print(&mut client, "save_rewrite_urls_plan", args.clone()).await;
+
+    let mut no_confirm = args.clone();
+    no_confirm["fingerprint"] = json!(print);
+    let mut no_print = args.clone();
+    no_print["confirm"] = json!(true);
+    let refused = [
+        no_confirm,
+        no_print,
+        with_confirmation(args.clone(), &print, json!(false)),
+        with_confirmation(args.clone(), &print, json!("true")),
+        with_confirmation(args.clone(), "0000000000000000", json!(true)),
+        with_confirmation(args.clone(), "", json!(true)),
+    ];
+    for call in refused {
+        let r = client.call("save_rewrite_urls_apply", call.clone()).await;
+        assert!(is_error(&r), "{call}: {r}");
+        assert!(!root.path().join("new.json").exists(), "{call}");
+    }
+}
+
+#[tokio::test]
+async fn rewrite_apply_refuses_when_the_state_changed_since_the_plan() {
+    let (mut client, root) = rewrite_project().await;
+    let args = rewrite_args(json!({"out": "new.json"}));
+    let print = plan_print(&mut client, "save_rewrite_urls_plan", args.clone()).await;
+
+    // Another mapping, so the plan differs.
+    write(
+        &root,
+        "map.tsv",
+        &format!("{OLD_URL}\thttps://other.example/a.png\n"),
+    );
+    let r = client
+        .call(
+            "save_rewrite_urls_apply",
+            with_confirmation(args.clone(), &print, json!(true)),
+        )
+        .await;
+    assert!(error_text(&r).contains("state changed"));
+    let doc = body(&r);
+    assert_eq!(doc["applied"], false);
+    let fresh = doc["plan"]["fingerprint"].as_str().unwrap();
+    assert_ne!(fresh, print);
+    assert!(!root.path().join("new.json").exists());
+
+    // With the fresh fingerprint it goes through.
+    let r = client
+        .call(
+            "save_rewrite_urls_apply",
+            with_confirmation(args, fresh, json!(true)),
+        )
+        .await;
+    assert!(!is_error(&r), "{r}");
+    assert!(read(&root, "new.json").contains("other.example"));
+}
+
+#[tokio::test]
+async fn rewrite_apply_refuses_when_the_save_changed_even_if_the_plan_text_is_equal() {
+    let (mut client, root) = rewrite_project().await;
+    let args = rewrite_args(json!({"out": "new.json"}));
+    let print = plan_print(&mut client, "save_rewrite_urls_plan", args.clone()).await;
+    // Same URL, other nickname: the counts in the plan do not change.
+    write(
+        &root,
+        "save.json",
+        &URL_SAVE.replace("\"Deck\"", "\"Deck2\""),
+    );
+    let r = client
+        .call(
+            "save_rewrite_urls_apply",
+            with_confirmation(args, &print, json!(true)),
+        )
+        .await;
+    assert!(is_error(&r));
+    assert!(!root.path().join("new.json").exists());
+}
+
+#[tokio::test]
+async fn rewrite_without_an_output_is_a_plan_but_cannot_be_applied() {
+    let (mut client, root) = rewrite_project().await;
+    let args = rewrite_args(json!({}));
+    let r = client.call("save_rewrite_urls_plan", args.clone()).await;
+    assert!(!is_error(&r), "{r}");
+    assert_eq!(body(&r)["will_write"], false);
+    let print = body(&r)["fingerprint"].as_str().unwrap().to_owned();
+    let r = client
+        .call(
+            "save_rewrite_urls_apply",
+            with_confirmation(args, &print, json!(true)),
+        )
+        .await;
+    assert!(error_text(&r).contains("nothing to write"));
+    assert_eq!(read(&root, "save.json"), URL_SAVE);
+
+    // Both out and in_place is a mistake.
+    let both = rewrite_args(json!({"out": "x.json", "in_place": true}));
+    let r = client.call("save_rewrite_urls_plan", both).await;
+    assert!(is_error(&r));
+}
+
+#[tokio::test]
+async fn rewrite_in_place_and_overwriting_an_output_need_confirmation() {
+    let (mut client, root) = rewrite_project().await;
+    let args = rewrite_args(json!({"in_place": true}));
+    let r = client.call("save_rewrite_urls_plan", args.clone()).await;
+    assert_eq!(body(&r)["would_overwrite"], true);
+    let print = body(&r)["fingerprint"].as_str().unwrap().to_owned();
+    assert_eq!(read(&root, "save.json"), URL_SAVE);
+    let r = client
+        .call(
+            "save_rewrite_urls_apply",
+            with_confirmation(args.clone(), &print, json!(false)),
+        )
+        .await;
+    assert!(is_error(&r));
+    assert_eq!(read(&root, "save.json"), URL_SAVE);
+    let r = client
+        .call(
+            "save_rewrite_urls_apply",
+            with_confirmation(args, &print, json!(true)),
+        )
+        .await;
+    assert!(!is_error(&r), "{r}");
+    assert!(read(&root, "save.json").contains(NEW_URL));
+
+    // An existing --out is overwritten, but only on apply.
+    write(&root, "save.json", URL_SAVE);
+    write(&root, "existing.json", "old content");
+    let args = rewrite_args(json!({"out": "existing.json"}));
+    let r = client.call("save_rewrite_urls_plan", args.clone()).await;
+    assert_eq!(body(&r)["output_exists"], true);
+    assert_eq!(body(&r)["would_overwrite"], true);
+    assert_eq!(read(&root, "existing.json"), "old content");
+    let print = body(&r)["fingerprint"].as_str().unwrap().to_owned();
+    let r = client
+        .call(
+            "save_rewrite_urls_apply",
+            with_confirmation(args, &print, json!(true)),
+        )
+        .await;
+    assert!(!is_error(&r), "{r}");
+    assert!(read(&root, "existing.json").contains(NEW_URL));
+
+    // The input itself as --out is refused by the command.
+    let args = rewrite_args(json!({"out": "save.json"}));
+    let r = client.call("save_rewrite_urls_plan", args).await;
+    assert!(is_error(&r));
+}
+
+#[tokio::test]
+async fn rewrite_tools_refuse_paths_outside_the_root() {
+    let (mut client, root) = rewrite_project().await;
+    let outside = tempfile::tempdir().unwrap();
+    let outside_save = outside.path().join("save.json");
+    std::fs::write(&outside_save, URL_SAVE).unwrap();
+    std::fs::write(outside.path().join("map.tsv"), "").unwrap();
+    std::fs::write(outside.path().join("m.json"), "{}").unwrap();
+    let outside_dir = outside.path().to_str().unwrap().to_owned();
+    let outside_file = |name: &str| outside.path().join(name).to_str().unwrap().to_owned();
+    let cases = [
+        rewrite_args(json!({"save": "../save.json"})),
+        rewrite_args(json!({"save": outside_save.to_str().unwrap()})),
+        rewrite_args(json!({"map": "../map.tsv"})),
+        rewrite_args(json!({"map": outside_file("map.tsv")})),
+        rewrite_args(json!({"from_manifest": "../m.json"})),
+        rewrite_args(json!({"from_manifest": outside_file("m.json")})),
+        rewrite_args(json!({"out": "../new.json"})),
+        rewrite_args(json!({"out": "sub/../../new.json"})),
+        rewrite_args(json!({"out": outside_file("new.json")})),
+        rewrite_args(json!({"out": outside_dir})),
+    ];
+    for args in cases {
+        for tool in ["save_rewrite_urls_plan", "save_rewrite_urls_apply"] {
+            let mut call = args.clone();
+            if tool.ends_with("apply") {
+                call = with_confirmation(call, "0000000000000000", json!(true));
+            }
+            let r = client.call(tool, call.clone()).await;
+            let error = error_text(&r);
+            assert!(
+                error.contains("`..`")
+                    || error.contains("outside the project root")
+                    || error.contains("must name a file"),
+                "{tool} {args}: {error}"
+            );
+        }
+    }
+    assert!(!outside.path().join("new.json").exists());
+    assert!(!root.path().join("new.json").exists());
+
+    // A directory that does not exist, and a plain failure.
+    let r = client
+        .call(
+            "save_rewrite_urls_plan",
+            rewrite_args(json!({"out": "nodir/new.json"})),
+        )
+        .await;
+    assert!(is_error(&r));
+    let r = client
+        .call(
+            "save_rewrite_urls_plan",
+            json!({"save": "save.json", "out": "o.json"}),
+        )
+        .await;
+    assert!(error_text(&r).contains("nothing to do"));
+}
+
+#[test]
+fn output_paths_are_resolved_inside_the_root() {
+    let root = tempfile::tempdir().unwrap();
+    let base = resolve_root(Some(root.path())).unwrap();
+    std::fs::create_dir(base.join("sub")).unwrap();
+    let ok = resolve_output_in_root(&base, Path::new("sub/new.json")).unwrap();
+    assert_eq!(ok, base.join("sub").join("new.json"));
+    assert!(resolve_output_in_root(&base, Path::new("new.json")).is_ok());
+    assert!(resolve_output_in_root(&base, &base.join("abs.json")).is_ok());
+    for bad in ["..", "../x.json", "sub/..", "", "."] {
+        assert!(
+            resolve_output_in_root(&base, Path::new(bad)).is_err(),
+            "{bad}"
+        );
+    }
+}
+
+// Image build pair: only listed (and testable) with image support.
+
+#[cfg(feature = "image")]
+const BOARDS: &str = r#"
+[[image.pipeline]]
+src = "art/boards/*.png"
+out = "assets/Boards"
+steps = [{ op = "resize", max-side = 32 }, { op = "optimize" }]
+"#;
+
+#[cfg(feature = "image")]
+fn board(root: &tempfile::TempDir, name: &str, seed: u8) {
+    let path = root.path().join("art/boards").join(name);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    ::image::RgbaImage::from_fn(64, 64, |x, y| {
+        if (x / 8 + y / 8) % 2 == 0 {
+            ::image::Rgba([200, seed, 30, 255])
+        } else {
+            ::image::Rgba([10, 10, seed, 255])
+        }
+    })
+    .save(path)
+    .unwrap();
+}
+
+#[cfg(feature = "image")]
+async fn image_project() -> (Client, tempfile::TempDir) {
+    let (client, root) = without_editor(None).await;
+    board(&root, "a.png", 100);
+    board(&root, "b.png", 150);
+    write(&root, "ttskit.toml", BOARDS);
+    (client, root)
+}
+
+#[cfg(feature = "image")]
+#[tokio::test]
+async fn image_build_plan_writes_nothing_and_apply_builds() {
+    let (mut client, root) = image_project().await;
+    let r = client.call("image_build_plan", json!({})).await;
+    assert!(!is_error(&r), "{r}");
+    let plan = body(&r);
+    assert_eq!(plan["dry_run"], true);
+    assert_eq!(plan["plan"]["jobs"].as_array().unwrap().len(), 2);
+    assert!(plan["next"].as_str().unwrap().contains("image_build_apply"));
+    assert!(!root.path().join("assets").exists());
+    assert!(!root.path().join("ttskit-image.lock.json").exists());
+    let print = plan["fingerprint"].as_str().unwrap().to_owned();
+
+    let r = client
+        .call(
+            "image_build_apply",
+            json!({"fingerprint": print, "confirm": true}),
+        )
+        .await;
+    assert!(!is_error(&r), "{r}");
+    let result = body(&r);
+    assert_eq!(result["applied"], true);
+    assert_eq!(result["ok"], true);
+    assert_eq!(result["dry_run"], false);
+    let built = root.path().join("assets/Boards/a.png");
+    assert_eq!(::image::open(&built).unwrap().width(), 32);
+    assert!(root.path().join("assets/Boards/b.png").exists());
+    assert!(root.path().join("ttskit-image.lock.json").exists());
+
+    // Nothing left to build: the new plan differs from the old one.
+    let again = client.call("image_build_plan", json!({})).await;
+    assert_ne!(body(&again)["fingerprint"], json!(print));
+}
+
+#[cfg(feature = "image")]
+#[tokio::test]
+async fn image_build_apply_refuses_without_confirmation_or_after_changes() {
+    let (mut client, root) = image_project().await;
+    let print = plan_print(&mut client, "image_build_plan", json!({})).await;
+    for call in [
+        json!({"fingerprint": print}),
+        json!({"fingerprint": print, "confirm": false}),
+        json!({"confirm": true}),
+        json!({"fingerprint": "0000000000000000", "confirm": true}),
+    ] {
+        let r = client.call("image_build_apply", call.clone()).await;
+        assert!(is_error(&r), "{call}");
+    }
+    assert!(!root.path().join("assets").exists());
+
+    // A new source image after the plan changes the plan.
+    board(&root, "c.png", 200);
+    let r = client
+        .call(
+            "image_build_apply",
+            json!({"fingerprint": print, "confirm": true}),
+        )
+        .await;
+    assert!(error_text(&r).contains("state changed"));
+    assert_eq!(
+        body(&r)["plan"]["plan"]["jobs"].as_array().unwrap().len(),
+        3
+    );
+    assert!(!root.path().join("assets").exists());
+    assert!(!root.path().join("ttskit-image.lock.json").exists());
+}
+
+#[cfg(feature = "image")]
+#[tokio::test]
+async fn image_build_failures_and_paths() {
+    let (mut client, root) = image_project().await;
+    // A broken source: the build fails for it, the other image is built.
+    write(&root, "art/boards/broken.png", "not an image");
+    let print = plan_print(&mut client, "image_build_plan", json!({})).await;
+    let r = client
+        .call(
+            "image_build_apply",
+            json!({"fingerprint": print, "confirm": true}),
+        )
+        .await;
+    assert!(is_error(&r), "{r}");
+    let doc = body(&r);
+    assert_eq!(doc["ok"], false);
+    assert_eq!(doc["applied"], true);
+    assert!(root.path().join("assets/Boards/a.png").exists());
+
+    // The config must be inside the root and exist.
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("ttskit.toml"), BOARDS).unwrap();
+    let absolute = outside.path().join("ttskit.toml");
+    for config in ["../ttskit.toml", absolute.to_str().unwrap()] {
+        for tool in ["image_build_plan", "image_build_apply"] {
+            let r = client
+                .call(
+                    tool,
+                    json!({"config": config, "fingerprint": "00", "confirm": true}),
+                )
+                .await;
+            let error = error_text(&r);
+            assert!(
+                error.contains("`..`") || error.contains("outside the project root"),
+                "{tool} {config}: {error}"
+            );
+        }
+    }
+    let r = client
+        .call("image_build_plan", json!({"config": "missing.toml"}))
+        .await;
+    assert!(is_error(&r));
+}
+
+#[cfg(not(feature = "image"))]
+#[tokio::test]
+async fn the_image_build_tools_are_not_listed_without_image_support() {
+    let (mut client, _root) = without_editor(None).await;
+    let r = client.request("tools/list", json!({})).await;
+    let names: Vec<&str> = r["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"save_rewrite_urls_plan"));
+    assert!(names.contains(&"save_rewrite_urls_apply"));
+    assert!(!names.iter().any(|n| n.starts_with("image_")));
 }
