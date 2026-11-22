@@ -388,8 +388,8 @@ the game and check that the images load, run `ttskit cloud status` and look at
 | `cloud_list` | List the Steam Cloud files, optionally of one folder (`cloud list --json`) |
 | `cloud_status` | Compare a local directory with a cloud folder (`cloud status --json`) |
 | `cloud_upload_plan` / `_apply` | Upload one local file to the cloud and record it in the manifest (`cloud upload`) |
-| `cloud_sync_push_plan` / `_apply` | Upload the new local files of the project config's folder (`cloud sync push`) |
-| `cloud_sync_pull_plan` / `_apply` | Download the cloud folder's files into the project's local directory (`cloud sync pull`) |
+| `cloud_sync_push_plan` / `_apply` | Upload the new local files of the project config's folder; with `prune`, also replace changed and delete cloud-only files (`cloud sync push [--prune]`) |
+| `cloud_sync_pull_plan` / `_apply` | Download the cloud folder's files into the project's local directory; with `prune`, also recycle local-only files (`cloud sync pull [--prune]`) |
 
 Which tools exist depends on the build:
 
@@ -404,7 +404,7 @@ Every tool that changes something works in two steps, so that nothing happens wi
 1. The `*_plan` tool (for Save & Play: the first `save_and_play` call) shows what would happen, as the CLI's dry-run JSON, and returns a `fingerprint`. It changes nothing.
 2. The `*_apply` tool takes the same arguments plus that `fingerprint` and `confirm: true`. It computes the plan again from the current state and only acts if the fingerprint still matches. Otherwise it refuses, with nothing done, and returns the fresh plan; so a file or cloud change in between, a missing `confirm` or a wrong fingerprint all stop it. Plans with conflicts (sync) are never applied.
 
-Overwriting an existing output (`out`, `in_place`, a cloud file of the same name) is only possible through apply. Deleting is not offered: there is no `prune` option, `image_build_apply` never prunes, and sync push and pull never delete or replace files.
+Overwriting an existing output (`out`, `in_place`, a cloud file of the same name) is only possible through apply. Sync push and pull only add files unless `prune: true` is given to the plan and again to the apply: push then also replaces changed cloud files and deletes cloud files that are not local (the cloud index is backed up first), and pull moves local files that are not in the cloud folder to the recycle bin. The plan lists every such step and the fingerprint covers `prune`, so a plan made without it cannot be applied with it, or the other way round. Deleting cloud files directly (`cloud delete`) and `image build --prune` are not offered.
 
 Safeguards and limits:
 

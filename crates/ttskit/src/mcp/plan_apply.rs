@@ -53,8 +53,16 @@ impl Plan {
         let print = fingerprint(&self.hashed);
         let mut doc = self.body.clone();
         doc["fingerprint"] = json!(print);
+        // A plan can carry a warning (such as "this deletes files"), which is
+        // repeated in the hint.
+        let warning = self
+            .body
+            .get("warning")
+            .and_then(Value::as_str)
+            .map(|w| format!("{w} "))
+            .unwrap_or_default();
         doc["next"] = json!(format!(
-            "Nothing was changed. To apply this plan, call {} with the same arguments plus fingerprint \"{print}\" and confirm: true.",
+            "Nothing was changed. {warning}To apply this plan, call {} with the same arguments plus fingerprint \"{print}\" and confirm: true.",
             pair.apply
         ));
         doc

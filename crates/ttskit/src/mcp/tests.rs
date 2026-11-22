@@ -2715,6 +2715,7 @@ async fn cloud_project(cloud: &SharedCloud) -> (Client, tempfile::TempDir, tempf
     let server = EditorServer::start(ep, resolve_root(Some(root.path())).unwrap(), 10)
         .await
         .with_backend(cloud.factory())
+        .with_local_dir(test_local_dir())
         .with_backup_dir(backups.path().to_owned());
     let mut client = attach(server).await;
     client.initialize().await;
@@ -3128,7 +3129,7 @@ async fn cloud_change_tools_refuse_paths_outside_the_root() {
 }
 
 #[tokio::test]
-async fn cloud_change_tools_report_a_failing_backend_and_offer_no_prune() {
+async fn cloud_change_tools_report_a_failing_backend_and_limit_prune_to_sync() {
     let cloud = seeded_cloud(&[]);
     let (mut client, root, _backups) = cloud_project(&cloud).await;
     write(&root, "src/a.png", "aaa");
@@ -3141,7 +3142,12 @@ async fn cloud_change_tools_report_a_failing_backend_and_offer_no_prune() {
         if name.starts_with("cloud_upload") || name.starts_with("cloud_sync") {
             checked += 1;
             let schema = tool["inputSchema"].to_string();
-            assert!(!schema.contains("prune"), "{name}: {schema}");
+            // Only the sync tools can prune (delete); upload has no such option.
+            assert_eq!(
+                schema.contains("prune"),
+                name.starts_with("cloud_sync"),
+                "{name}: {schema}"
+            );
             assert!(!schema.contains("backup"), "{name}: {schema}");
             assert!(!schema.contains("yes"), "{name}: {schema}");
         }
@@ -3197,4 +3203,289 @@ fn the_backup_directory_comes_from_the_server_setting() {
     let dir = tempfile::tempdir().unwrap();
     let store = cloud_change_tools::backup_store(&Some(dir.path().to_owned())).unwrap();
     assert_eq!(store.root(), dir.path());
+}
+
+// ---- Prune ----
+
+/// A local directory for pull tests: files go to `<root>/.trash` instead of
+/// the real recycle bin.
+struct TestDir(ttskit_cloud::FsDir, PathBuf);
+
+impl ttskit_cloud::LocalDir for TestDir {
+    fn read(&self, path: &str) -> std::io::Result<Vec<u8>> {
+        self.0.read(path)
+    }
+    fn write(&mut self, path: &str, data: &[u8]) -> std::io::Result<()> {
+        self.0.write(path, data)
+    }
+    fn trash(&mut self, path: &str) -> std::io::Result<()> {
+        let to = self.1.parent().unwrap().join(".trash").join(path);
+        std::fs::create_dir_all(to.parent().unwrap())?;
+        std::fs::rename(self.1.join(path), to)
+    }
+}
+
+fn test_local_dir() -> cloud_change_tools::LocalDirFactory {
+    Arc::new(|dir| {
+        Box::new(TestDir(ttskit_cloud::FsDir::new(dir.clone()), dir))
+            as Box<dyn ttskit_cloud::LocalDir>
+    })
+}
+
+fn key_of(name: &str, data: &[u8]) -> String {
+    format!("{}_{name}", ttskit_cloud::sha1_hex(data))
+}
+
+/// The cloud has `old.png` ("old") and the cloud-only `gone.png`; locally
+/// `old.png` differs and `new.png` is new.
+async fn push_prune_project() -> (SharedCloud, Client, tempfile::TempDir, tempfile::TempDir) {
+    let cloud = seeded_cloud(&[("old.png", b"old", "Game"), ("gone.png", b"gone", "Game")]);
+    let (client, root, backups) = cloud_project(&cloud).await;
+    write(&root, "src/old.png", "different");
+    write(&root, "src/new.png", "fresh");
+    (cloud, client, root, backups)
+}
+
+#[tokio::test]
+async fn push_prune_plan_shows_deletions_and_changes_nothing() {
+    let (cloud, mut client, root, backups) = push_prune_project().await;
+    let before = snapshot(&cloud, &root, &backups);
+    let r = client
+        .call("cloud_sync_push_plan", json!({"prune": true}))
+        .await;
+    assert!(!is_error(&r), "{r}");
+    let plan = body(&r);
+    assert_eq!(plan["plan"]["prune"], true);
+    let steps = plan["plan"]["steps"].as_array().unwrap();
+    assert!(
+        steps
+            .iter()
+            .any(|s| s["path"] == "gone.png" && s["action"] == "delete"),
+        "{plan}"
+    );
+    assert!(
+        steps
+            .iter()
+            .any(|s| s["path"] == "old.png" && s["action"] == "upload" && s["reason"] == "changed"),
+        "{plan}"
+    );
+    assert!(plan["warning"].as_str().unwrap().contains("DELETES"));
+    assert!(plan["next"].as_str().unwrap().contains("DELETES"));
+    assert_unchanged(&before, &snapshot(&cloud, &root, &backups));
+}
+
+#[tokio::test]
+async fn push_prune_apply_replaces_and_deletes_and_backs_up() {
+    let (cloud, mut client, root, backups) = push_prune_project().await;
+    let args = json!({"prune": true});
+    let print = plan_print(&mut client, "cloud_sync_push_plan", args.clone()).await;
+    let backups_before = entries_of(&backups);
+    let r = client
+        .call(
+            "cloud_sync_push_apply",
+            with_confirmation(args, &print, json!(true)),
+        )
+        .await;
+    assert!(!is_error(&r), "{r}");
+    let result = body(&r);
+    assert_eq!(result["applied"], true);
+    assert_eq!(result["plan"]["prune"], true);
+    let names = cloud.names();
+    assert!(!names.contains(&key_of("gone.png", b"gone")), "{names:?}");
+    assert!(!names.contains(&key_of("old.png", b"old")), "{names:?}");
+    assert_eq!(
+        cloud
+            .with(|c| c.contents(&key_of("old.png", b"different")))
+            .unwrap(),
+        b"different"
+    );
+    assert!(names.contains(&key_of("new.png", b"fresh")));
+    assert!(entries_of(&backups) > backups_before);
+    let manifest = read(&root, "ttskit.manifest.json");
+    assert!(manifest.contains("new.png") && manifest.contains("old.png"));
+}
+
+#[tokio::test]
+async fn push_without_prune_on_the_same_state_deletes_nothing() {
+    let (cloud, mut client, _root, _backups) = push_prune_project().await;
+    let print = plan_print(&mut client, "cloud_sync_push_plan", json!({})).await;
+    let r = client
+        .call(
+            "cloud_sync_push_apply",
+            json!({"fingerprint": print, "confirm": true}),
+        )
+        .await;
+    assert!(!is_error(&r), "{r}");
+    let names = cloud.names();
+    assert!(names.contains(&key_of("gone.png", b"gone")));
+    assert!(names.contains(&key_of("old.png", b"old")));
+    assert!(names.contains(&key_of("new.png", b"fresh")));
+}
+
+#[tokio::test]
+async fn push_a_plan_cannot_be_applied_with_another_prune_value() {
+    let (cloud, mut client, root, backups) = push_prune_project().await;
+    let plain = plan_print(&mut client, "cloud_sync_push_plan", json!({})).await;
+    let pruning = plan_print(&mut client, "cloud_sync_push_plan", json!({"prune": true})).await;
+    assert_ne!(plain, pruning);
+    let before = snapshot(&cloud, &root, &backups);
+
+    // Without prune, applied with prune.
+    let r = client
+        .call(
+            "cloud_sync_push_apply",
+            json!({"prune": true, "fingerprint": plain, "confirm": true}),
+        )
+        .await;
+    assert!(error_text(&r).contains("state changed"));
+    assert_eq!(body(&r)["plan"]["plan"]["prune"], true);
+    assert_eq!(body(&r)["plan"]["fingerprint"], json!(pruning));
+    // With prune, applied without it.
+    let r = client
+        .call(
+            "cloud_sync_push_apply",
+            json!({"fingerprint": pruning, "confirm": true}),
+        )
+        .await;
+    assert!(error_text(&r).contains("state changed"));
+    assert_eq!(body(&r)["plan"]["plan"]["prune"], false);
+    assert_eq!(body(&r)["plan"]["fingerprint"], json!(plain));
+    // Explicit false is the same as omitted.
+    let r = client
+        .call("cloud_sync_push_plan", json!({"prune": false}))
+        .await;
+    assert_eq!(body(&r)["fingerprint"], json!(plain));
+    assert_unchanged(&before, &snapshot(&cloud, &root, &backups));
+}
+
+#[tokio::test]
+async fn push_prune_apply_is_refused_without_confirmation_or_after_changes() {
+    let (cloud, mut client, root, backups) = push_prune_project().await;
+    let args = json!({"prune": true});
+    let print = plan_print(&mut client, "cloud_sync_push_plan", args.clone()).await;
+    let before = snapshot(&cloud, &root, &backups);
+    for call in [
+        json!({"prune": true, "fingerprint": print}),
+        json!({"prune": true, "fingerprint": print, "confirm": false}),
+        json!({"prune": true, "confirm": true}),
+        json!({"prune": true, "fingerprint": "0000000000000000", "confirm": true}),
+    ] {
+        let r = client.call("cloud_sync_push_apply", call.clone()).await;
+        assert!(is_error(&r), "{call}");
+    }
+    assert_unchanged(&before, &snapshot(&cloud, &root, &backups));
+
+    // Another client adds a cloud file after the plan.
+    add_cloud_file(&cloud, "extra.png", b"x", "Game");
+    let before = snapshot(&cloud, &root, &backups);
+    let r = client
+        .call(
+            "cloud_sync_push_apply",
+            with_confirmation(args, &print, json!(true)),
+        )
+        .await;
+    assert!(error_text(&r).contains("state changed"));
+    assert_unchanged(&before, &snapshot(&cloud, &root, &backups));
+}
+
+#[tokio::test]
+async fn pull_prune_recycles_local_only_files_only_when_asked() {
+    let cloud = seeded_cloud(&[("b.png", b"bbbb", "Game")]);
+    let (mut client, root, backups) = cloud_project(&cloud).await;
+    write(&root, "src/local-only.txt", "mine");
+    let before = snapshot(&cloud, &root, &backups);
+
+    let r = client
+        .call("cloud_sync_pull_plan", json!({"prune": true}))
+        .await;
+    assert!(!is_error(&r), "{r}");
+    let plan = body(&r);
+    assert!(
+        plan["plan"]["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["path"] == "local-only.txt" && s["action"] == "delete"),
+        "{plan}"
+    );
+    assert!(plan["warning"].as_str().unwrap().contains("recycle bin"));
+    assert!(plan["next"].as_str().unwrap().contains("recycle bin"));
+    assert_unchanged(&before, &snapshot(&cloud, &root, &backups));
+    let pruning = plan["fingerprint"].as_str().unwrap().to_owned();
+    let plain = plan_print(&mut client, "cloud_sync_pull_plan", json!({})).await;
+    assert_ne!(plain, pruning);
+
+    // Cross-prune applies are refused with the fresh plan, nothing changes.
+    let r = client
+        .call(
+            "cloud_sync_pull_apply",
+            json!({"prune": true, "fingerprint": plain, "confirm": true}),
+        )
+        .await;
+    assert_eq!(body(&r)["plan"]["fingerprint"], json!(pruning));
+    assert!(is_error(&r));
+    let r = client
+        .call(
+            "cloud_sync_pull_apply",
+            json!({"fingerprint": pruning, "confirm": true}),
+        )
+        .await;
+    assert_eq!(body(&r)["plan"]["fingerprint"], json!(plain));
+    assert!(is_error(&r));
+    assert_unchanged(&before, &snapshot(&cloud, &root, &backups));
+
+    // Missing confirmation or a wrong fingerprint, prune set.
+    for call in [
+        json!({"prune": true, "fingerprint": pruning}),
+        json!({"prune": true, "fingerprint": pruning, "confirm": false}),
+        json!({"prune": true, "fingerprint": "0000000000000000", "confirm": true}),
+    ] {
+        let r = client.call("cloud_sync_pull_apply", call.clone()).await;
+        assert!(is_error(&r), "{call}");
+    }
+    assert_unchanged(&before, &snapshot(&cloud, &root, &backups));
+
+    // Without prune the local-only file stays.
+    let r = client
+        .call(
+            "cloud_sync_pull_apply",
+            json!({"fingerprint": plain, "confirm": true}),
+        )
+        .await;
+    assert!(!is_error(&r), "{r}");
+    assert_eq!(read(&root, "src/local-only.txt"), "mine");
+    assert_eq!(read(&root, "src/b.png"), "bbbb");
+
+    // With prune it goes to the (test) recycle bin.
+    let print = plan_print(&mut client, "cloud_sync_pull_plan", json!({"prune": true})).await;
+    let r = client
+        .call(
+            "cloud_sync_pull_apply",
+            json!({"prune": true, "fingerprint": print, "confirm": true}),
+        )
+        .await;
+    assert!(!is_error(&r), "{r}");
+    assert_eq!(body(&r)["applied"], true);
+    assert!(!root.path().join("src/local-only.txt").exists());
+    assert_eq!(read(&root, ".trash/local-only.txt"), "mine");
+    assert_eq!(read(&root, "src/b.png"), "bbbb");
+}
+
+#[tokio::test]
+async fn pull_prune_apply_is_refused_after_the_cloud_changed() {
+    let cloud = seeded_cloud(&[("b.png", b"bbbb", "Game")]);
+    let (mut client, root, backups) = cloud_project(&cloud).await;
+    write(&root, "src/local-only.txt", "mine");
+    let print = plan_print(&mut client, "cloud_sync_pull_plan", json!({"prune": true})).await;
+    add_cloud_file(&cloud, "c.png", b"cc", "Game");
+    let before = snapshot(&cloud, &root, &backups);
+    let r = client
+        .call(
+            "cloud_sync_pull_apply",
+            json!({"prune": true, "fingerprint": print, "confirm": true}),
+        )
+        .await;
+    assert!(error_text(&r).contains("state changed"));
+    assert_unchanged(&before, &snapshot(&cloud, &root, &backups));
+    assert!(!root.path().join(".trash").exists());
 }

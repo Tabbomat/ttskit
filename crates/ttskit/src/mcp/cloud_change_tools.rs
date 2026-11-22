@@ -59,6 +59,8 @@ pub(super) struct CloudUploadApplyArgs {
 pub(super) struct CloudSyncArgs {
     /// The project config with the [cloud] folder and [local] directory (must be inside the root). Default: ttskit.toml in the root.
     config: Option<String>,
+    /// Also act on the differences the plain sync leaves alone, as `--prune` does. Push: replace changed cloud files and DELETE cloud files that are not local (files matching [local] ignore are left alone). Pull: move local files that are not in the cloud folder to the recycle bin. Default false. Give the same value to the plan and the apply tool: a plan made without it cannot be applied with it.
+    prune: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
@@ -85,6 +87,22 @@ pub(super) fn backup_store(setting: &Option<PathBuf>) -> Result<BackupStore, Str
     cloud::backup_dir(dir)
         .map(BackupStore::new)
         .map_err(|e| e.to_string())
+}
+
+/// Makes the [`ttskit_cloud::LocalDir`] a pull writes to; the argument is the
+/// directory. The real one moves pruned files to the recycle bin; tests
+/// replace it.
+pub(super) type LocalDirFactory =
+    std::sync::Arc<dyn Fn(PathBuf) -> Box<dyn ttskit_cloud::LocalDir> + Send + Sync>;
+
+/// The real local directory.
+pub(super) fn fs_dir() -> LocalDirFactory {
+    std::sync::Arc::new(|dir| Box::new(ttskit_cloud::FsDir::new(dir)))
+}
+
+/// The warning of a plan with prune.
+fn prune_warning(prune: bool, what: &str) -> Option<String> {
+    prune.then(|| format!("This plan has prune: applying it {what}."))
 }
 
 /// What a CLI function printed and how it ended.
@@ -145,6 +163,16 @@ fn finish(ran: Ran) -> Result<Value, Value> {
                 }
             }
         }
+    }
+}
+
+const PUSH_PRUNE: &str = "replaces changed cloud files and DELETES cloud files that are not local (the cloud index is backed up first)";
+const PULL_PRUNE: &str = "moves local files that are not in the cloud folder to the recycle bin";
+
+/// Adds the warning to the plan body (not to what is hashed).
+fn set_warning(plan: &mut Plan, warning: Option<String>) {
+    if let Some(w) = warning {
+        plan.body["warning"] = json!(w);
     }
 }
 
@@ -362,6 +390,7 @@ fn push_run(
     backend: &mut dyn CloudBackend,
     store: &BackupStore,
     dry_run: bool,
+    prune: bool,
 ) -> Ran {
     let manifest = push
         .project
@@ -374,8 +403,7 @@ fn push_run(
             &push.local,
             &|rel| std::fs::read(push.project.dir.join(rel)),
             &push.project.project.cloud_folder,
-            // Never prunes.
-            false,
+            prune,
             &push.ignore,
             push.ignored,
             Some(&manifest),
@@ -405,7 +433,7 @@ fn push_hashed(push: &Push, doc: &Value) -> Value {
             (path.to_owned(), hash)
         })
         .collect();
-    json!({ "plan": doc["plan"], "files": files })
+    json!({ "prune": doc["plan"]["prune"], "plan": doc["plan"], "files": files })
 }
 
 pub(super) fn push_plan(
@@ -417,8 +445,11 @@ pub(super) fn push_plan(
     let push = push_prepare(root, args).map_err(error)?;
     let store = backup_store(backup_dir).map_err(error)?;
     let mut backend = factory().map_err(error)?;
-    let ran = push_run(&push, backend.as_mut(), &store, true);
-    Ok(make_plan(ran, |doc| push_hashed(&push, doc))?.result(SYNC_PUSH))
+    let prune = args.prune.unwrap_or(false);
+    let ran = push_run(&push, backend.as_mut(), &store, true, prune);
+    let mut plan = make_plan(ran, |doc| push_hashed(&push, doc))?;
+    set_warning(&mut plan, prune_warning(prune, PUSH_PRUNE));
+    Ok(plan.result(SYNC_PUSH))
 }
 
 pub(super) fn push_apply(
@@ -432,11 +463,13 @@ pub(super) fn push_apply(
     let push = push_prepare(root, &args.plan).map_err(error)?;
     let store = backup_store(backup_dir).map_err(error)?;
     let mut backend = factory().map_err(error)?;
-    let ran = push_run(&push, backend.as_mut(), &store, true);
-    let plan = make_plan(ran, |doc| push_hashed(&push, doc))?;
+    let prune = args.plan.prune.unwrap_or(false);
+    let ran = push_run(&push, backend.as_mut(), &store, true, prune);
+    let mut plan = make_plan(ran, |doc| push_hashed(&push, doc))?;
+    set_warning(&mut plan, prune_warning(prune, PUSH_PRUNE));
     plan_apply::verify(&given, &plan, SYNC_PUSH)?;
     // A plan with conflicts is refused by the command itself.
-    finish(push_run(&push, backend.as_mut(), &store, false))
+    finish(push_run(&push, backend.as_mut(), &store, false, prune))
 }
 
 // pull
@@ -467,16 +500,21 @@ fn pull_prepare(root: &Path, args: &CloudSyncArgs) -> Result<Pull, String> {
     })
 }
 
-fn pull_run(pull: &Pull, backend: &dyn CloudBackend, dry_run: bool) -> Ran {
-    let mut dir = ttskit_cloud::FsDir::new(pull.project.dir.clone());
+fn pull_run(
+    pull: &Pull,
+    backend: &dyn CloudBackend,
+    local_dir: &LocalDirFactory,
+    dry_run: bool,
+    prune: bool,
+) -> Ran {
+    let mut dir = local_dir(pull.project.dir.clone());
     run_cli(|out| {
         cloud::sync_pull(
             backend,
-            &mut dir,
+            dir.as_mut(),
             &pull.local,
             &pull.project.project.cloud_folder,
-            // Never prunes.
-            false,
+            prune,
             &pull.ignore,
             pull.ignored,
             RunMode {
@@ -491,31 +529,38 @@ fn pull_run(pull: &Pull, backend: &dyn CloudBackend, dry_run: bool) -> Ran {
 }
 
 fn pull_hashed(doc: &Value) -> Value {
-    json!({ "plan": doc["plan"] })
+    json!({ "prune": doc["plan"]["prune"], "plan": doc["plan"] })
 }
 
 pub(super) fn pull_plan(
     root: &Path,
     factory: &BackendFactory,
+    local_dir: &LocalDirFactory,
     args: &CloudSyncArgs,
 ) -> Result<Value, Value> {
     let pull = pull_prepare(root, args).map_err(error)?;
     let backend = factory().map_err(error)?;
-    let ran = pull_run(&pull, backend.as_ref(), true);
-    Ok(make_plan(ran, pull_hashed)?.result(SYNC_PULL))
+    let prune = args.prune.unwrap_or(false);
+    let ran = pull_run(&pull, backend.as_ref(), local_dir, true, prune);
+    let mut plan = make_plan(ran, pull_hashed)?;
+    set_warning(&mut plan, prune_warning(prune, PULL_PRUNE));
+    Ok(plan.result(SYNC_PULL))
 }
 
 pub(super) fn pull_apply(
     root: &Path,
     factory: &BackendFactory,
+    local_dir: &LocalDirFactory,
     args: &CloudSyncApplyArgs,
 ) -> Result<Value, Value> {
     let given =
         plan_apply::require_confirmation(args.fingerprint.as_deref(), args.confirm, SYNC_PULL)?;
     let pull = pull_prepare(root, &args.plan).map_err(error)?;
     let backend = factory().map_err(error)?;
-    let ran = pull_run(&pull, backend.as_ref(), true);
-    let plan = make_plan(ran, pull_hashed)?;
+    let prune = args.plan.prune.unwrap_or(false);
+    let ran = pull_run(&pull, backend.as_ref(), local_dir, true, prune);
+    let mut plan = make_plan(ran, pull_hashed)?;
+    set_warning(&mut plan, prune_warning(prune, PULL_PRUNE));
     plan_apply::verify(&given, &plan, SYNC_PULL)?;
-    finish(pull_run(&pull, backend.as_ref(), false))
+    finish(pull_run(&pull, backend.as_ref(), local_dir, false, prune))
 }
