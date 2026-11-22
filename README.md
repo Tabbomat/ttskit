@@ -588,8 +588,8 @@ ICC profile for each, plus a summary. It exits with status 1 if a file could
 not be read. `--json` prints one JSON object with `images` and `errors`.
 
 Which formats, animated images, 16-bit channels and colour profiles the future
-conversion and optimization commands will accept or produce is not decided yet;
-it depends on what the game itself accepts and is still to be tested.
+conversion and optimization commands will accept or produce follows what the
+game itself accepts; see [docs/image-formats.md](docs/image-formats.md).
 
 ## License
 
