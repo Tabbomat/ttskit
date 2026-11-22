@@ -97,5 +97,8 @@ verified against the game's own output.
   names and every card had its own GUID.
 - A one-card object spawned as a `Card` with the nickname of its file.
 - The first check used a deck with a 10x7 grid over a sheet image that is really 9x7, so
-  the cards showed two card parts and the check proved nothing about the images. It is being
-  repeated with the 9x7 grid, with `BackIsHidden` on and off (result pending).
+  the cards showed two card parts and the check proved nothing about the images. It was repeated
+  with the 9x7 grid: a 5 card deck and a one-card object, each with `BackIsHidden` off (hidden-card
+  slot 62) and on (no hidden-card slot). The faces were whole cards, and the hand view matched the
+  rules above: the last face slot with `BackIsHidden: false`, the separate back with `true`.
+- Not checked in the game: `UniqueBack: true`.
