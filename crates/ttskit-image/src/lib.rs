@@ -6,9 +6,13 @@
 //! `docs/image-formats.md`.
 
 mod convert;
+mod optimize;
 
 pub use convert::{
     ConvertOptions, Converted, DEFAULT_JPEG_QUALITY, OutputFormat, convert, parse_color,
+};
+pub use optimize::{
+    DEFAULT_LEVEL, MAX_LEVEL, OptimizeOptions, Optimized, Outcome, Skipped, StripMode, optimize,
 };
 
 use std::fs::File;
@@ -65,6 +69,8 @@ pub enum ImageError {
         pixels: u64,
         total: u64,
     },
+    #[error("{}: {message}", path.display())]
+    Optimize { path: PathBuf, message: String },
     #[error("{0}")]
     Options(String),
 }
