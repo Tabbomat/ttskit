@@ -141,7 +141,7 @@ fn sha(data: &[u8]) -> String {
 
 fn run(dir: &Path, urls: &[&str], mock: &Mock, config: &FetchConfig) -> FetchReport {
     let store = Store::open(dir).unwrap();
-    fetch_assets(assets(urls), mock, &store, config)
+    fetch_assets(assets(urls), mock, None, &store, config)
 }
 
 fn index_text(dir: &Path) -> String {
@@ -409,7 +409,7 @@ fn engine_enforces_the_size_limit_on_a_client_that_does_not() {
         max_size: 10,
         ..config()
     };
-    let report = fetch_assets(assets(&["http://a.test/x"]), &Greedy, &store, &cfg);
+    let report = fetch_assets(assets(&["http://a.test/x"]), &Greedy, None, &store, &cfg);
     assert!(reason(&report, "http://a.test/x").contains("size limit of 10 bytes"));
     assert!(!dir.path().join(".partial").exists());
     assert!(files_in(dir.path()).is_empty());
@@ -540,7 +540,7 @@ fn per_host_limit_is_respected() {
         per_host: 2,
         ..config()
     };
-    let report = fetch_assets(urls, &client, &store, &cfg);
+    let report = fetch_assets(urls, &client, None, &store, &cfg);
     assert_eq!(report.downloaded.len(), 12);
     assert!(client.peak.load(Ordering::SeqCst) <= 2);
 }
@@ -648,7 +648,7 @@ fn index_is_saved_every_fifty_downloads() {
         concurrency: 1,
         ..config()
     };
-    let report = fetch_assets(list, &client, &store, &cfg);
+    let report = fetch_assets(list, &client, None, &store, &cfg);
     assert_eq!(report.downloaded.len(), 60);
     assert_eq!(client.seen.load(Ordering::SeqCst), 50);
     let index = Index::parse(&index_text(dir.path())).unwrap();
@@ -708,8 +708,259 @@ fn running_a_precomputed_plan_matches_fetch_assets() {
     let store = Store::open(dir.path()).unwrap();
     let p = plan(assets(&["http://a.test/1"]), &store, &config());
     assert_eq!(p.to_download.len(), 1);
-    let report = fetch_assets_with_plan(p.clone(), &mock, &store, &config());
+    let report = fetch_assets_with_plan(p.clone(), &mock, None, &store, &config());
     assert_eq!(report.plan, p);
     assert_eq!(report.downloaded.len(), 1);
     assert!(index_text(dir.path()).contains("http://a.test/1"));
+}
+
+// ---- cache ----
+
+fn put(root: &Path, folder: &str, name: &str, body: &[u8]) {
+    let dir = root.join(folder);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(name), body).unwrap();
+}
+
+fn run_cached(
+    dir: &Path,
+    cache: &CacheDir,
+    urls: &[&str],
+    mock: &Mock,
+    config: &FetchConfig,
+) -> FetchReport {
+    let store = Store::open(dir).unwrap();
+    fetch_assets(assets(urls), mock, Some(cache), &store, config)
+}
+
+fn offline() -> FetchConfig {
+    FetchConfig {
+        offline: true,
+        ..config()
+    }
+}
+
+#[test]
+fn cache_keys() {
+    let cases = [
+        ("http://i.imgur.com/0FCZSpL.jpg", "httpiimgurcom0FCZSpLjpg"),
+        (
+            "https://i.imgur.com/0FCZSpL.jpg",
+            "httpsiimgurcom0FCZSpLjpg",
+        ),
+        (
+            "http://cloud-3.steamusercontent.com/ugc/848217372548692243/051DB8C7ABCD/",
+            "httpcloud3steamusercontentcomugc848217372548692243051DB8C7ABCD",
+        ),
+        ("http://a.test/x/", "httpatestx"),
+        ("http://a.test/x", "httpatestx"),
+        ("http://a.test/x?v=2&w=3", "httpatestxv2w3"),
+        ("http://A.test/X", "httpAtestX"),
+    ];
+    for (url, key) in cases {
+        assert_eq!(cache_key(url), key, "{url}");
+    }
+    assert_ne!(cache_key("http://a.test/x"), cache_key("https://a.test/x"));
+}
+
+#[test]
+fn lookup_ignores_extension_and_folder() {
+    let dir = tempfile::tempdir().unwrap();
+    put(dir.path(), "Images", "httpatestxpng.png", PNG);
+    put(dir.path(), "Models", "httpatesty.OBJ", b"v 1 2 3");
+    put(dir.path(), "Audio", "httpatestzmp3.MP3", b"ID3");
+    put(dir.path(), "Text", "noextension", b"t");
+    let cache = CacheDir::open(dir.path()).unwrap();
+    assert_eq!(cache.len(), 4);
+    let hit = cache.lookup("http://a.test/x.png").unwrap();
+    assert!(hit.ends_with("httpatestxpng.png"));
+    assert!(cache.lookup("http://a.test/y").is_some());
+    assert!(cache.lookup("http://a.test/z.mp3").is_some());
+    assert!(cache.lookup("noextension").is_some());
+    assert!(cache.lookup("https://a.test/x.png").is_none());
+}
+
+#[test]
+fn duplicate_stems_resolve_deterministically() {
+    let dir = tempfile::tempdir().unwrap();
+    put(dir.path(), "Models", "httpatestx.obj", b"models");
+    put(dir.path(), "Images", "httpatestx.png", b"png");
+    put(dir.path(), "Images", "httpatestx.jpg", b"jpg");
+    let cache = CacheDir::open(dir.path()).unwrap();
+    let hit = cache.lookup("http://a.test/x").unwrap();
+    assert_eq!(hit.file_name().unwrap(), "httpatestx.jpg");
+    assert_eq!(hit.parent().unwrap().file_name().unwrap(), "Images");
+}
+
+#[test]
+fn raw_and_other_folders_are_ignored() {
+    let dir = tempfile::tempdir().unwrap();
+    put(dir.path(), "Images", "httpatesta.png", PNG);
+    put(dir.path(), "Images Raw", "httpatestb.png", PNG);
+    put(dir.path(), "Models Raw", "httpatestc.obj", b"v");
+    std::fs::create_dir_all(dir.path().join("Images").join("httpatestd.png")).unwrap();
+    let cache = CacheDir::open(dir.path()).unwrap();
+    assert_eq!(cache.len(), 1);
+    assert!(cache.lookup("http://a.test/b").is_none());
+    assert!(cache.lookup("http://a.test/c").is_none());
+    assert!(cache.lookup("http://a.test/d").is_none());
+}
+
+#[test]
+fn not_a_mods_folder_is_an_error() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("Workshop")).unwrap();
+    let err = CacheDir::open(dir.path()).unwrap_err();
+    assert!(err.to_string().contains("Mods folder"), "{err}");
+    assert!(err.to_string().contains("Images"), "{err}");
+    let missing = CacheDir::open(&dir.path().join("nope")).unwrap_err();
+    assert!(missing.to_string().contains("not a directory"), "{missing}");
+}
+
+#[test]
+fn cache_hit_is_stored_by_hash_without_a_request() {
+    let cache_dir = tempfile::tempdir().unwrap();
+    put(cache_dir.path(), "Images", "httpatestapng.png", PNG);
+    let cache = CacheDir::open(cache_dir.path()).unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let mock = Mock::default();
+    let url = "http://a.test/a.png";
+    let report = run_cached(out.path(), &cache, &[url], &mock, &config());
+    assert!(!report.has_failures(), "{:?}", report.failed);
+    assert_eq!(mock.total(), 0);
+    assert_eq!(report.from_cache(), 1);
+    let f = &report.downloaded[0];
+    assert_eq!(f.source, Source::Cache);
+    assert_eq!(f.file, format!("files/{}.png", sha(PNG)));
+    assert_eq!(std::fs::read(out.path().join(&f.file)).unwrap(), PNG);
+    let index = Index::parse(&index_text(out.path())).unwrap();
+    assert_eq!(index.files[url].sha256, sha(PNG));
+    assert!(!out.path().join(".partial").exists());
+    // The cache file is untouched.
+    let cached = cache_dir.path().join("Images").join("httpatestapng.png");
+    assert_eq!(std::fs::read(cached).unwrap(), PNG);
+}
+
+#[test]
+fn cache_wins_over_a_live_url() {
+    let cache_dir = tempfile::tempdir().unwrap();
+    put(cache_dir.path(), "Images", "httpatestapng.png", PNG);
+    let cache = CacheDir::open(cache_dir.path()).unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let url = "http://a.test/a.png";
+    let mock = Mock::default().on(url, vec![ok(b"%PDF-other")]);
+    let report = run_cached(out.path(), &cache, &[url], &mock, &config());
+    assert_eq!(mock.total(), 0);
+    assert_eq!(report.downloaded[0].sha256, sha(PNG));
+}
+
+#[test]
+fn a_miss_falls_back_to_the_client() {
+    let cache_dir = tempfile::tempdir().unwrap();
+    put(cache_dir.path(), "Images", "httpatestapng.png", PNG);
+    let cache = CacheDir::open(cache_dir.path()).unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let mock = Mock::default().on("http://a.test/b.png", vec![ok(b"%PDF-1.4 doc")]);
+    let urls = ["http://a.test/a.png", "http://a.test/b.png"];
+    let report = run_cached(out.path(), &cache, &urls, &mock, &config());
+    assert!(!report.has_failures());
+    assert_eq!(mock.total(), 1);
+    assert_eq!(mock.count("http://a.test/b.png"), 1);
+    assert_eq!(report.from_cache(), 1);
+    assert_eq!(report.downloaded[1].source, Source::Network);
+}
+
+#[test]
+fn offline_fails_misses_and_never_calls_the_client() {
+    let cache_dir = tempfile::tempdir().unwrap();
+    put(cache_dir.path(), "Images", "httpatestapng.png", PNG);
+    let cache = CacheDir::open(cache_dir.path()).unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let mock = Mock::default();
+    let urls = ["http://a.test/a.png", "http://a.test/b.png"];
+    let report = run_cached(out.path(), &cache, &urls, &mock, &offline());
+    assert_eq!(mock.total(), 0);
+    assert_eq!(report.downloaded.len(), 1);
+    assert_eq!(
+        reason(&report, "http://a.test/b.png"),
+        "not in the cache (offline)"
+    );
+    assert!(report.has_failures());
+}
+
+#[test]
+fn cache_files_obey_the_size_limit() {
+    let cache_dir = tempfile::tempdir().unwrap();
+    put(cache_dir.path(), "Images", "httpatestapng.png", PNG);
+    let cache = CacheDir::open(cache_dir.path()).unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let cfg = FetchConfig {
+        max_size: 4,
+        ..offline()
+    };
+    let url = "http://a.test/a.png";
+    let report = run_cached(out.path(), &cache, &[url], &Mock::default(), &cfg);
+    assert!(reason(&report, url).starts_with("larger than the size limit"));
+    assert!(files_in(out.path()).is_empty());
+    assert!(!out.path().join(".partial").exists());
+}
+
+#[test]
+fn html_and_empty_cache_files_are_rejected() {
+    let cache_dir = tempfile::tempdir().unwrap();
+    let html = b"<!DOCTYPE html><p>error";
+    put(cache_dir.path(), "Images", "httpatesthpng.png", html);
+    put(cache_dir.path(), "Images", "httpatestepng.png", b"");
+    let cache = CacheDir::open(cache_dir.path()).unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let urls = ["http://a.test/h.png", "http://a.test/e.png"];
+    let report = run_cached(out.path(), &cache, &urls, &Mock::default(), &offline());
+    assert_eq!(
+        reason(&report, "http://a.test/h.png"),
+        "cached file is an HTML page"
+    );
+    assert_eq!(
+        reason(&report, "http://a.test/e.png"),
+        "cache file is empty"
+    );
+    assert!(files_in(out.path()).is_empty());
+}
+
+#[test]
+fn cache_and_network_give_the_same_index_entry() {
+    let cache_dir = tempfile::tempdir().unwrap();
+    put(cache_dir.path(), "Images", "httpatestapng.png", PNG);
+    let cache = CacheDir::open(cache_dir.path()).unwrap();
+    let url = "http://a.test/a.png";
+    let from_cache = tempfile::tempdir().unwrap();
+    run_cached(
+        from_cache.path(),
+        &cache,
+        &[url],
+        &Mock::default(),
+        &config(),
+    );
+    let from_net = tempfile::tempdir().unwrap();
+    let mock = Mock::default().on(url, vec![ok(PNG)]);
+    run(from_net.path(), &[url], &mock, &config());
+    assert_eq!(index_text(from_cache.path()), index_text(from_net.path()));
+    assert_eq!(files_in(from_cache.path()), files_in(from_net.path()));
+}
+
+#[test]
+fn cache_file_type_falls_back_to_its_extension() {
+    let cache_dir = tempfile::tempdir().unwrap();
+    put(
+        cache_dir.path(),
+        "Models",
+        "httpatestm.OBJ",
+        b"v 1 2 3\nf 1 1 1\n",
+    );
+    put(cache_dir.path(), "Models", "httpatestn.xyz", b"some data");
+    let cache = CacheDir::open(cache_dir.path()).unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let urls = ["http://a.test/m", "http://a.test/n"];
+    let report = run_cached(out.path(), &cache, &urls, &Mock::default(), &offline());
+    assert_eq!(report.downloaded[0].file_type, "obj");
+    assert_eq!(report.downloaded[1].file_type, "bin");
 }

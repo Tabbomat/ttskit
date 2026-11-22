@@ -833,8 +833,10 @@ enum SaveCommand {
     /// records it in <out>/index.json; files are stored as
     /// <out>/files/<sha256>.<type>. Rerunning downloads only what is missing
     /// (--verify rehashes the files already there). HTML pages answered
-    /// instead of a file are rejected. The save is not modified. Exit status:
-    /// 0 when everything is present, 2 when a URL failed (the rest is still
+    /// instead of a file are rejected. With --cache-dir (the game's Mods
+    /// folder) files found there are copied first and only the rest is
+    /// downloaded; --offline then never uses the network. The save is not
+    /// modified. Exit status: 0 when everything is present, 2 when a URL failed (the rest is still
     /// downloaded) or the index could not be written, 1 on errors.
     FetchAssets(SaveFetchAssetsCli),
 }
@@ -852,6 +854,13 @@ struct SaveFetchAssetsCli {
     /// Rehash the files already present instead of only comparing their size
     #[arg(long)]
     verify: bool,
+    /// The game's Mods folder (with the Images, Models, ... subfolders): files found there are
+    /// copied instead of downloaded
+    #[arg(long, value_name = "DIR")]
+    cache_dir: Option<PathBuf>,
+    /// Never use the network: only take files from --cache-dir; others fail
+    #[arg(long, requires = "cache_dir")]
+    offline: bool,
     /// Largest accepted file: bytes, optionally with a k, m or g suffix (binary multiples)
     #[arg(long, value_name = "SIZE", default_value = "512m", value_parser = |s: &str| fetch_assets::parse_size(s))]
     max_size: u64,
@@ -2224,6 +2233,7 @@ fn run_fetch_assets(args: SaveFetchAssetsCli) -> Result<ExitCode, CliError> {
         out: &args.out,
         dry_run: args.dry_run,
         json: args.json,
+        cache_dir: args.cache_dir.as_deref(),
         config: ttskit_core::FetchConfig {
             concurrency: args.concurrency as usize,
             per_host: args.per_host as usize,
@@ -2232,6 +2242,7 @@ fn run_fetch_assets(args: SaveFetchAssetsCli) -> Result<ExitCode, CliError> {
             only_hosts: args.host,
             skip_hosts: args.skip_host,
             verify: args.verify,
+            offline: args.offline,
             ..ttskit_core::FetchConfig::default()
         },
     };

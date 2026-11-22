@@ -2,15 +2,19 @@
 //! atomic file placement.
 
 use std::fs::File;
-use std::io::{self, BufWriter, Write};
-use std::path::PathBuf;
+use std::io::{self, BufWriter, Read, Write};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, PoisonError};
 
 use sha2::{Digest, Sha256};
 
+use super::detect::type_from_extension;
 use super::store::{self, IndexEntry, Store};
-use super::{Download, DownloadError, DownloadResponse, FetchConfig, Fetched, detect_type, hex};
+use super::{
+    CacheDir, Download, DownloadError, DownloadResponse, FetchConfig, Fetched, Source, detect_type,
+    hex,
+};
 use crate::check::{HostGate, html_reason, is_redirect, is_retryable, resolve_location};
 use crate::save::assets::host_of;
 
@@ -21,6 +25,7 @@ const INDEX_FLUSH_EVERY: usize = 50;
 
 pub(super) struct Engine<'a> {
     client: &'a dyn Download,
+    cache: Option<&'a CacheDir>,
     store: &'a Store,
     config: &'a FetchConfig,
     gate: HostGate,
@@ -77,15 +82,28 @@ struct Written {
     prefix: Vec<u8>,
 }
 
+enum CacheTry {
+    Stored(Fetched),
+    Failed(String),
+    /// The cache file could not be read; the network may still work.
+    Unreadable(String),
+}
+
 enum Attempt {
     Response(DownloadResponse, Written),
     Failed(String),
 }
 
 impl<'a> Engine<'a> {
-    pub(super) fn new(client: &'a dyn Download, store: &'a Store, config: &'a FetchConfig) -> Self {
+    pub(super) fn new(
+        client: &'a dyn Download,
+        cache: Option<&'a CacheDir>,
+        store: &'a Store,
+        config: &'a FetchConfig,
+    ) -> Self {
         Engine {
             client,
+            cache,
             store,
             config,
             gate: HostGate::new(config.per_host.max(1)),
@@ -100,8 +118,23 @@ impl<'a> Engine<'a> {
         self.index_error.into_inner().unwrap_or(None)
     }
 
-    /// Downloads one URL (following redirects) into `files/`.
+    /// Stores one URL in `files/`: from the cache if it is there, else
+    /// downloaded (following redirects).
     pub(super) fn download_one(&self, url: &str) -> Result<Fetched, String> {
+        let mut unreadable = None;
+        if let Some(path) = self.cache.and_then(|c| c.lookup(url)) {
+            match self.copy_from_cache(url, path) {
+                CacheTry::Stored(f) => return Ok(f),
+                CacheTry::Failed(reason) => return Err(reason),
+                CacheTry::Unreadable(e) => unreadable = Some(e),
+            }
+        }
+        if self.config.offline {
+            return Err(match unreadable {
+                Some(e) => format!("cannot read the cache file: {e} (offline)"),
+                None => "not in the cache (offline)".into(),
+            });
+        }
         let _permit = self.gate.acquire(&host_of(url));
         let mut current = url.to_owned();
         let mut hops = 0;
@@ -140,6 +173,17 @@ impl<'a> Engine<'a> {
             return Err("empty response body".into());
         }
         let file_type = detect_type(&written.prefix, response.content_type.as_deref(), url);
+        self.place(url, &written, file_type, Source::Network)
+    }
+
+    /// Moves a finished temporary file to `files/<sha256>.<type>`.
+    fn place(
+        &self,
+        url: &str,
+        written: &Written,
+        file_type: &str,
+        source: Source,
+    ) -> Result<Fetched, String> {
         let file = format!("{}/{}.{file_type}", store::FILES_DIR, written.sha256);
         let target = self.store.root().join(&file);
         std::fs::create_dir_all(self.store.files_dir())
@@ -154,7 +198,71 @@ impl<'a> Engine<'a> {
             size: written.size,
             sha256: written.sha256.clone(),
             file_type: file_type.to_owned(),
+            source,
         })
+    }
+
+    /// Copies a cache file through the hashing writer and stores it.
+    fn copy_from_cache(&self, url: &str, path: &Path) -> CacheTry {
+        let mut src = match File::open(path) {
+            Ok(f) => f,
+            Err(e) => return CacheTry::Unreadable(e.to_string()),
+        };
+        let fail = |e: io::Error| CacheTry::Failed(format!("cannot create a temporary file: {e}"));
+        let partial = match self.new_partial() {
+            Ok(p) => p,
+            Err(e) => return fail(e),
+        };
+        let file = match File::create(&partial.path) {
+            Ok(f) => f,
+            Err(e) => return fail(e),
+        };
+        let mut writer = HashingWriter {
+            file: BufWriter::new(file),
+            hasher: Sha256::new(),
+            size: 0,
+            prefix: Vec::new(),
+            max_size: self.config.max_size,
+            exceeded: false,
+        };
+        let mut buf = vec![0u8; 64 * 1024];
+        loop {
+            let n = match src.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(e) => return CacheTry::Unreadable(e.to_string()),
+            };
+            if let Err(e) = writer.write_all(&buf[..n]) {
+                return CacheTry::Failed(if writer.exceeded {
+                    format!(
+                        "larger than the size limit of {} bytes",
+                        self.config.max_size
+                    )
+                } else {
+                    format!("cannot write the file: {e}")
+                });
+            }
+        }
+        let written = match finish(writer, partial) {
+            Ok(w) => w,
+            Err(e) => return CacheTry::Failed(format!("cannot write the file: {e}")),
+        };
+        if written.size == 0 {
+            return CacheTry::Failed("cache file is empty".into());
+        }
+        if html_reason(None, &written.prefix).is_some() {
+            return CacheTry::Failed("cached file is an HTML page".into());
+        }
+        let mut file_type = detect_type(&written.prefix, None, url);
+        if file_type == "bin"
+            && let Some(t) = CacheDir::extension_of(path).and_then(|e| type_from_extension(&e))
+        {
+            file_type = t;
+        }
+        match self.place(url, &written, file_type, Source::Cache) {
+            Ok(f) => CacheTry::Stored(f),
+            Err(e) => CacheTry::Failed(e),
+        }
     }
 
     /// One request with retries, written to a fresh temporary file.

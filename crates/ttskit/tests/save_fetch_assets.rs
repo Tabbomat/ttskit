@@ -358,8 +358,20 @@ fn json_output_shape() {
     keys.sort_unstable();
     assert_eq!(
         keys,
-        ["downloaded", "failed", "index_error", "out", "plan", "save"]
+        [
+            "cache_dir",
+            "downloaded",
+            "failed",
+            "index_error",
+            "offline",
+            "out",
+            "plan",
+            "save"
+        ]
     );
+    assert!(report["cache_dir"].is_null());
+    assert_eq!(report["offline"], false);
+    assert!(report["plan"].get("in_cache").is_none());
     let plan = &report["plan"];
     assert_eq!(plan["total"], 4);
     assert_eq!(plan["present"], 0);
@@ -374,6 +386,7 @@ fn json_output_shape() {
     assert_eq!(downloaded[0]["size"], PNG_A.len());
     assert_eq!(downloaded[0]["sha256"], sha(PNG_A));
     assert_eq!(downloaded[0]["type"], "png");
+    assert_eq!(downloaded[0]["source"], "network");
     let failed = report["failed"].as_array().unwrap();
     assert_eq!(failed.len(), 2);
     let urls: Vec<&str> = failed.iter().map(|f| f["url"].as_str().unwrap()).collect();
@@ -438,4 +451,182 @@ fn unreadable_save_exits_1() {
     let output = run(&dir.path().join("missing.json"), &dir.path().join("o"), &[]);
     assert_eq!(output.status.code(), Some(1));
     assert!(!dir.path().join("o").exists());
+}
+
+/// Puts `body` into `<mods>/<folder>/` named like the game names the cache
+/// file of `url` (the URL's letters and digits, then an extension).
+fn cache_file(mods: &Path, folder: &str, url: &str, ext: &str, body: &[u8]) {
+    let stem: String = url.chars().filter(char::is_ascii_alphanumeric).collect();
+    let dir = mods.join(folder);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(format!("{stem}.{ext}")), body).unwrap();
+}
+
+/// A server that counts the requests it gets.
+fn serve_counting() -> (u16, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen = count.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            std::thread::spawn(move || handle(stream));
+        }
+    });
+    (port, count)
+}
+
+#[test]
+fn a_dead_url_is_recovered_from_the_cache() {
+    let port = serve();
+    let base = format!("http://127.0.0.1:{port}");
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("backup");
+    let mods = dir.path().join("Mods");
+    let dead = format!("{base}/gone.png");
+    cache_file(&mods, "Images", &dead, "png", PNG_B);
+    let save = save_with(dir.path(), &[dead.clone(), format!("{base}/a.png")]);
+    let output = run(&save, &out, &["--cache-dir", mods.to_str().unwrap()]);
+    assert_eq!(output.status.code(), Some(0), "{}", stdout(&output));
+    let text = stdout(&output);
+    assert!(text.contains("1 of them found in the cache"), "{text}");
+    assert!(
+        text.contains("downloaded 2 (1 from the cache), failed 0"),
+        "{text}"
+    );
+    assert_eq!(file_names(&out), {
+        let mut v = vec![format!("{}.png", sha(PNG_A)), format!("{}.png", sha(PNG_B))];
+        v.sort();
+        v
+    });
+    let idx = index(&out);
+    let entry = idx["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["url"] == dead.as_str())
+        .unwrap();
+    assert_eq!(entry["sha256"], sha(PNG_B));
+    assert!(entry.get("source").is_none());
+}
+
+#[test]
+fn offline_makes_no_request_and_exits_2_for_a_miss() {
+    let (port, count) = serve_counting();
+    let base = format!("http://127.0.0.1:{port}");
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("backup");
+    let mods = dir.path().join("Mods");
+    let hit = format!("{base}/a.png");
+    cache_file(&mods, "Images", &hit, "jpg", PNG_A);
+    let save = save_with(dir.path(), &[hit, format!("{base}/b.png")]);
+    let output = run(
+        &save,
+        &out,
+        &["--cache-dir", mods.to_str().unwrap(), "--offline"],
+    );
+    assert_eq!(output.status.code(), Some(2));
+    let text = stdout(&output);
+    assert!(text.contains("1 of them found in the cache"), "{text}");
+    assert!(text.contains("1 not in the cache (will fail)"), "{text}");
+    assert!(text.contains("not in the cache (offline)"), "{text}");
+    assert!(
+        text.contains("downloaded 1 (1 from the cache), failed 1"),
+        "{text}"
+    );
+    assert_eq!(file_names(&out), [format!("{}.png", sha(PNG_A))]);
+    assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+#[test]
+fn offline_needs_a_cache_dir() {
+    let dir = tempfile::tempdir().unwrap();
+    let save = save_with(dir.path(), &[]);
+    let output = run(&save, &dir.path().join("o"), &["--offline"]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--cache-dir"));
+    assert!(!dir.path().join("o").exists());
+}
+
+#[test]
+fn dry_run_reports_what_the_cache_has() {
+    let port = serve();
+    let base = format!("http://127.0.0.1:{port}");
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("backup");
+    let mods = dir.path().join("Mods");
+    let hit = format!("{base}/a.png");
+    cache_file(&mods, "Images", &hit, "png", PNG_A);
+    let save = save_with(dir.path(), &[hit, format!("{base}/b.png")]);
+    let mods_arg = mods.to_str().unwrap();
+    let output = run(&save, &out, &["--dry-run", "--cache-dir", mods_arg]);
+    assert_eq!(output.status.code(), Some(0));
+    let text = stdout(&output);
+    assert!(text.contains("1 of them found in the cache"), "{text}");
+    assert!(!text.contains("will fail"), "{text}");
+    assert!(!out.exists());
+    let output = run(
+        &save,
+        &out,
+        &["--dry-run", "--offline", "--cache-dir", mods_arg],
+    );
+    let text = stdout(&output);
+    assert!(text.contains("1 not in the cache (will fail)"), "{text}");
+    assert!(!out.exists());
+}
+
+#[test]
+fn an_invalid_cache_dir_exits_1() {
+    let dir = tempfile::tempdir().unwrap();
+    let save = save_with(dir.path(), &[]);
+    let not_mods = dir.path().join("Other");
+    std::fs::create_dir(&not_mods).unwrap();
+    for bad in [not_mods, dir.path().join("missing")] {
+        let output = run(
+            &save,
+            &dir.path().join("o"),
+            &["--cache-dir", bad.to_str().unwrap()],
+        );
+        assert_eq!(output.status.code(), Some(1));
+        let err = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            err.contains("Mods folder") || err.contains("not a directory"),
+            "{err}"
+        );
+    }
+    assert!(!dir.path().join("o").exists());
+}
+
+#[test]
+fn json_with_a_cache() {
+    let port = serve();
+    let base = format!("http://127.0.0.1:{port}");
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("backup");
+    let mods = dir.path().join("Mods");
+    let hit = format!("{base}/gone.png");
+    cache_file(&mods, "Images", &hit, "png", PNG_B);
+    let save = save_with(dir.path(), &[hit, format!("{base}/a.png")]);
+    let output = run(
+        &save,
+        &out,
+        &["--json", "--cache-dir", mods.to_str().unwrap()],
+    );
+    assert_eq!(output.status.code(), Some(0));
+    let report = json(&output);
+    assert_eq!(report["plan"]["in_cache"], 1);
+    assert_eq!(report["offline"], false);
+    let shown = mods
+        .to_str()
+        .unwrap()
+        .replace(std::path::MAIN_SEPARATOR, "/");
+    assert_eq!(report["cache_dir"], shown.as_str());
+    let sources: Vec<&str> = report["downloaded"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["source"].as_str().unwrap())
+        .collect();
+    assert_eq!(sources, ["network", "cache"]);
 }

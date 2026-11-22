@@ -6,7 +6,8 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 use ttskit_core::{
-    AssetUrl, Download, DownloadError, DownloadResponse, FetchConfig, FetchPlan, FetchReport, Store,
+    AssetUrl, CacheDir, Download, DownloadError, DownloadResponse, FetchConfig, FetchPlan,
+    FetchReport, Store,
 };
 
 use crate::http::HttpClient;
@@ -147,6 +148,8 @@ pub struct Options<'a> {
     pub out: &'a Path,
     pub dry_run: bool,
     pub json: bool,
+    /// The game's `Mods` folder to take files from before downloading.
+    pub cache_dir: Option<&'a Path>,
     pub config: FetchConfig,
 }
 
@@ -165,6 +168,7 @@ pub fn fetch_assets(
         out: out_dir,
         dry_run,
         json,
+        cache_dir,
         config,
     } = options;
     let data = std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
@@ -173,12 +177,23 @@ pub fn fetch_assets(
     if out_dir.exists() && !out_dir.is_dir() {
         return Err(format!("{} is not a directory", out_dir.display()));
     }
+    let cache = cache_dir
+        .map(|dir| CacheDir::open(dir).map_err(|e| e.to_string()))
+        .transpose()?;
     let store = Store::open(*out_dir).map_err(|e| e.to_string())?;
     let urls: Vec<AssetUrl> = save.asset_urls();
     let plan = ttskit_core::plan_fetch(urls, &store, config);
+    // None without a cache; else how many of the URLs to fetch it has.
+    let in_cache = cache.as_ref().map(|c| {
+        plan.to_download
+            .iter()
+            .filter(|a| c.lookup(&a.url).is_some())
+            .count()
+    });
     let io = |e: io::Error| e.to_string();
     if !json {
-        write_plan(&plan, config.verify, *dry_run, out).map_err(io)?;
+        let cache_line = in_cache.map(|n| (n, plan.to_download.len() - n, config.offline));
+        write_plan(&plan, config.verify, *dry_run, cache_line, out).map_err(io)?;
         out.flush().map_err(io)?;
     }
     let report = if *dry_run {
@@ -187,15 +202,24 @@ pub fn fetch_assets(
             ..FetchReport::default()
         }
     } else {
-        ttskit_core::fetch_assets_with_plan(plan, client, &store, config)
+        ttskit_core::fetch_assets_with_plan(plan, client, cache.as_ref(), &store, config)
     };
     if *json {
-        let mut text = serde_json::to_string_pretty(&report_json(path, out_dir, &report))
-            .map_err(|e| e.to_string())?;
+        let mut text = serde_json::to_string_pretty(&report_json(
+            path,
+            out_dir,
+            &report,
+            &JsonExtras {
+                in_cache,
+                offline: config.offline,
+                cache_dir: cache_dir.map(display_path),
+            },
+        ))
+        .map_err(|e| e.to_string())?;
         text.push('\n');
         out.write_all(text.as_bytes()).map_err(io)?;
     } else if !dry_run {
-        write_result(&report, out_dir, out).map_err(io)?;
+        write_result(&report, out_dir, cache.is_some(), out).map_err(io)?;
     }
     Ok(if report.has_failures() {
         FetchStatus::Problems
@@ -208,6 +232,8 @@ fn write_plan(
     plan: &FetchPlan,
     verify: bool,
     dry_run: bool,
+    // With a cache: URLs it has, URLs it lacks, offline.
+    cache_line: Option<(usize, usize, bool)>,
     out: &mut dyn Write,
 ) -> io::Result<()> {
     writeln!(
@@ -218,6 +244,12 @@ fn write_plan(
         plan.to_download.len(),
         plan.skipped.len()
     )?;
+    if let Some((found, missing, offline)) = cache_line {
+        writeln!(out, "{found} of them found in the cache")?;
+        if offline && missing > 0 {
+            writeln!(out, "{missing} not in the cache (will fail)")?;
+        }
+    }
     if verify {
         writeln!(out, "{} verified", plan.verified)?;
     }
@@ -239,7 +271,12 @@ fn write_plan(
     Ok(())
 }
 
-fn write_result(report: &FetchReport, out_dir: &Path, out: &mut dyn Write) -> io::Result<()> {
+fn write_result(
+    report: &FetchReport,
+    out_dir: &Path,
+    with_cache: bool,
+    out: &mut dyn Write,
+) -> io::Result<()> {
     for f in &report.failed {
         writeln!(out, "failed: {}: {}", f.asset.url, f.reason)?;
         for o in &f.asset.occurrences {
@@ -248,9 +285,14 @@ fn write_result(report: &FetchReport, out_dir: &Path, out: &mut dyn Write) -> io
             writeln!(out, "    {}  (nickname: {nickname}, guid: {guid})", o.path)?;
         }
     }
+    let from_cache = if with_cache {
+        format!(" ({} from the cache)", report.from_cache())
+    } else {
+        String::new()
+    };
     writeln!(
         out,
-        "downloaded {}, failed {} (files in {}, index {})",
+        "downloaded {}{from_cache}, failed {} (files in {}, index {})",
         report.downloaded.len(),
         report.failed.len(),
         display_path(&out_dir.join("files")),
@@ -262,7 +304,14 @@ fn write_result(report: &FetchReport, out_dir: &Path, out: &mut dyn Write) -> io
     Ok(())
 }
 
-fn report_json(path: &Path, out_dir: &Path, report: &FetchReport) -> Value {
+/// The JSON fields that do not come from the report.
+struct JsonExtras {
+    in_cache: Option<usize>,
+    offline: bool,
+    cache_dir: Option<String>,
+}
+
+fn report_json(path: &Path, out_dir: &Path, report: &FetchReport, extras: &JsonExtras) -> Value {
     let p = &report.plan;
     let downloaded: Vec<Value> = report
         .downloaded
@@ -274,6 +323,7 @@ fn report_json(path: &Path, out_dir: &Path, report: &FetchReport) -> Value {
                 "size": d.size,
                 "sha256": d.sha256,
                 "type": d.file_type,
+                "source": d.source.as_str(),
             })
         })
         .collect();
@@ -294,20 +344,26 @@ fn report_json(path: &Path, out_dir: &Path, report: &FetchReport) -> Value {
             })
         })
         .collect();
+    let mut plan = json!({
+        "total": p.total,
+        "present": p.present.len(),
+        "to_download": p.to_download.len(),
+        "skipped": p.skipped.len(),
+        "invalid": p.invalid.len(),
+        "verified": p.verified,
+    });
+    if let Some(n) = extras.in_cache {
+        plan["in_cache"] = json!(n);
+    }
     json!({
         "save": display_path(path),
         "out": display_path(out_dir),
-        "plan": {
-            "total": p.total,
-            "present": p.present.len(),
-            "to_download": p.to_download.len(),
-            "skipped": p.skipped.len(),
-            "invalid": p.invalid.len(),
-            "verified": p.verified,
-        },
+        "plan": plan,
         "downloaded": downloaded,
         "failed": failed,
         "index_error": report.index_error,
+        "offline": extras.offline,
+        "cache_dir": extras.cache_dir,
     })
 }
 

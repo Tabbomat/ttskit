@@ -97,3 +97,12 @@ fn url_extension(url: &str) -> Option<String> {
     let (_, ext) = name.rsplit_once('.')?;
     Some(ext.to_ascii_lowercase())
 }
+
+/// The stored type for a lowercase file extension, if it is in the fixed
+/// list.
+pub fn type_from_extension(ext: &str) -> Option<&'static str> {
+    URL_EXTENSIONS
+        .iter()
+        .find(|(e, _)| *e == ext)
+        .map(|(_, stored)| *stored)
+}

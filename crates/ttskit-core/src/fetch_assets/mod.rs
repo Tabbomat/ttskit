@@ -19,6 +19,7 @@
 //! extensions, so no URL text reaches the file system. Identical content
 //! from several URLs is stored once.
 
+mod cache;
 mod detect;
 mod engine;
 mod store;
@@ -35,6 +36,7 @@ use engine::Engine;
 
 use crate::save::AssetUrl;
 
+pub use cache::{CACHE_FOLDERS, CacheDir, CacheError, cache_key};
 pub use detect::detect_type;
 pub use store::{Index, IndexEntry, Store, StoreError};
 
@@ -102,6 +104,8 @@ pub struct FetchConfig {
     /// Rehash files that are already present instead of only comparing
     /// their size.
     pub verify: bool,
+    /// Never use the network: URLs that are not in the cache fail.
+    pub offline: bool,
 }
 
 impl Default for FetchConfig {
@@ -116,6 +120,7 @@ impl Default for FetchConfig {
             only_hosts: Vec::new(),
             skip_hosts: Vec::new(),
             verify: false,
+            offline: false,
         }
     }
 }
@@ -144,7 +149,23 @@ pub struct FetchPlan {
     pub to_download: Vec<AssetUrl>,
 }
 
-/// One downloaded file.
+/// Where the bytes of a stored file came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Source {
+    Network,
+    Cache,
+}
+
+impl Source {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Source::Network => "network",
+            Source::Cache => "cache",
+        }
+    }
+}
+
+/// One stored file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Fetched {
     pub url: String,
@@ -153,6 +174,7 @@ pub struct Fetched {
     pub size: u64,
     pub sha256: String,
     pub file_type: String,
+    pub source: Source,
 }
 
 /// A URL that could not be downloaded.
@@ -178,6 +200,14 @@ impl FetchReport {
     /// Whether any URL failed, or the index could not be saved.
     pub fn has_failures(&self) -> bool {
         !self.failed.is_empty() || self.index_error.is_some()
+    }
+
+    /// How many of `downloaded` were copied from the cache.
+    pub fn from_cache(&self) -> usize {
+        self.downloaded
+            .iter()
+            .filter(|f| f.source == Source::Cache)
+            .count()
     }
 }
 
@@ -261,16 +291,19 @@ fn hex(bytes: &[u8]) -> String {
     })
 }
 
-/// Downloads every URL in `urls` (as returned by `Save::asset_urls`) that is
-/// not yet in `store`, then writes `index.json`.
+/// Stores every URL in `urls` (as returned by `Save::asset_urls`) that is
+/// not yet in `store`, then writes `index.json`. Each URL is taken from
+/// `cache` if it is there, else downloaded (or, with `config.offline`,
+/// failed).
 pub fn fetch_assets(
     urls: Vec<AssetUrl>,
     client: &dyn Download,
+    cache: Option<&CacheDir>,
     store: &Store,
     config: &FetchConfig,
 ) -> FetchReport {
     let p = plan(urls, store, config);
-    fetch_assets_with_plan(p, client, store, config)
+    fetch_assets_with_plan(p, client, cache, store, config)
 }
 
 /// Like [`fetch_assets`], but runs a plan made earlier by [`plan`] (with the
@@ -279,6 +312,7 @@ pub fn fetch_assets(
 pub fn fetch_assets_with_plan(
     mut plan: FetchPlan,
     client: &dyn Download,
+    cache: Option<&CacheDir>,
     store: &Store,
     config: &FetchConfig,
 ) -> FetchReport {
@@ -295,7 +329,7 @@ pub fn fetch_assets_with_plan(
     // Leftovers of an interrupted run.
     let _ = std::fs::remove_dir_all(store.partial_dir());
 
-    let engine = Engine::new(client, store, config);
+    let engine = Engine::new(client, cache, store, config);
     let queue: Mutex<std::collections::VecDeque<AssetUrl>> = Mutex::new(queue.into());
     let results: Mutex<Vec<Result<Fetched, Failed>>> = Mutex::new(Vec::new());
     std::thread::scope(|scope| {
