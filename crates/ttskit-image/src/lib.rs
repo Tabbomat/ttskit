@@ -7,12 +7,16 @@
 
 mod convert;
 mod optimize;
+mod quantize;
 
 pub use convert::{
     ConvertOptions, Converted, DEFAULT_JPEG_QUALITY, OutputFormat, convert, parse_color,
 };
 pub use optimize::{
     DEFAULT_LEVEL, MAX_LEVEL, OptimizeOptions, Optimized, Outcome, Skipped, StripMode, optimize,
+};
+pub use quantize::{
+    DEFAULT_COLORS, MAX_COLORS, MIN_COLORS, QuantizeOptions, QuantizeOutcome, Quantized, quantize,
 };
 
 use std::fs::File;

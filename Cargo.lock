@@ -478,6 +478,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "exoquant"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5048aeecde83b7455a63b44aa54da5321d6171cff2adb8a5959849e142e5e4aa"
+
+[[package]]
 name = "fastrand"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1931,6 +1937,7 @@ dependencies = [
 name = "ttskit-image"
 version = "0.1.1"
 dependencies = [
+ "exoquant",
  "image",
  "oxipng",
  "png",

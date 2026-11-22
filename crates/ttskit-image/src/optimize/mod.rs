@@ -18,7 +18,7 @@ pub const DEFAULT_LEVEL: u8 = 2;
 /// Highest level; slowest and smallest.
 pub const MAX_LEVEL: u8 = 6;
 
-const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+pub(crate) const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
 
 /// Which metadata chunks to remove.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -80,7 +80,7 @@ pub enum Outcome {
 }
 
 /// Whether the file has an `acTL` chunk before its image data.
-fn is_animated(data: &[u8]) -> bool {
+pub(crate) fn is_animated(data: &[u8]) -> bool {
     let mut pos = PNG_SIGNATURE.len();
     while let Some(header) = data.get(pos..pos + 8) {
         let len = u32::from_be_bytes([header[0], header[1], header[2], header[3]]) as usize;
@@ -96,6 +96,24 @@ fn is_animated(data: &[u8]) -> bool {
 
 fn decoded(data: &[u8]) -> Result<image::DynamicImage, image::ImageError> {
     image::load_from_memory_with_format(data, image::ImageFormat::Png)
+}
+
+/// Runs the lossless `oxipng` pass over PNG data in memory. The error is a
+/// message without a path.
+pub(crate) fn optimize_bytes(data: &[u8], level: u8, strip: StripMode) -> Result<Vec<u8>, String> {
+    let mut oxi = Options::from_preset(level);
+    oxi.strip = match strip {
+        StripMode::None => StripChunks::None,
+        StripMode::Safe => StripChunks::Safe,
+        StripMode::All => StripChunks::All,
+    };
+    // Keep the interlacing as it is; the pixels are identical either way,
+    // but the result should not depend on a library default.
+    oxi.interlace = None;
+    // Altering the colour of transparent pixels would change the decoded data.
+    oxi.optimize_alpha = false;
+    oxi.fix_errors = false;
+    oxipng::optimize_from_memory(data, &oxi).map_err(|e| format!("optimization failed: {e}"))
 }
 
 /// Optimizes the PNG at `path` in memory; nothing is written. Anything that
@@ -130,22 +148,8 @@ pub fn optimize(path: &Path, options: &OptimizeOptions) -> Result<Outcome, Image
         }));
     }
 
-    let mut oxi = Options::from_preset(options.level);
-    oxi.strip = match options.strip {
-        StripMode::None => StripChunks::None,
-        StripMode::Safe => StripChunks::Safe,
-        StripMode::All => StripChunks::All,
-    };
-    // Keep the interlacing as it is; the pixels are identical either way,
-    // but the result should not depend on a library default.
-    oxi.interlace = None;
-    // Altering the colour of transparent pixels would change the decoded data.
-    oxi.optimize_alpha = false;
-    oxi.fix_errors = false;
-
     let before = decoded(&original).map_err(|e| fail(format!("not a readable PNG: {e}")))?;
-    let candidate = oxipng::optimize_from_memory(&original, &oxi)
-        .map_err(|e| fail(format!("optimization failed: {e}")))?;
+    let candidate = optimize_bytes(&original, options.level, options.strip).map_err(fail)?;
 
     let (width, height) = (before.width(), before.height());
     let original_bytes = original.len() as u64;
