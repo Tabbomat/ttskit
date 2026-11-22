@@ -16,6 +16,8 @@ mods. Not affiliated with or endorsed by Berserk Games.
   asset URLs a save uses (done).
 - **Asset backup (done):** `save fetch-assets` downloads the asset URLs of a save into a
   local directory with a stable `index.json`; reruns fetch only what is missing.
+- **URL rewrite (done):** `save rewrite-urls` replaces asset URLs in a save from a
+  mapping, losslessly.
 - **Dead-link check (done):** `save check-urls` tells which asset URLs of a save no
   longer load.
 - **External Editor API client (done):** talk to a running game to read and write
@@ -132,6 +134,60 @@ Behavior:
 - Cache files are copied, never modified or moved, through the same hashing writer as downloads, then stored under `files/<sha256>.<type>`. `--max-size` applies (`larger than the size limit`), an empty file fails (`cache file is empty`) and so does a file that is an HTML page (`cached file is an HTML page`), since the game may have cached an error page. The type comes from the first bytes, then the URL, then the extension of the cache file (same fixed list), else `bin`. A cache file that cannot be read falls through to the network, or fails with `--offline`. The index is identical whichever source a file came from: `index.json` has no `source` field and stays stable.
 - With `--cache-dir` the plan has the extra line `N of them found in the cache` (how many of the URLs to download the cache has; `--dry-run` prints it too and only reads file names), with `--offline` also `M not in the cache (will fail)`, and the result line reads `downloaded X (C from the cache), failed Y (...)`. Without `--cache-dir` the output is as before.
 - Exit status: 0 when everything is downloaded or present, 2 when a URL failed (the others are still downloaded and indexed) or the index could not be written, 1 on errors (unreadable save, invalid `index.json`, unusable directory) and for invalid arguments such as a bad `--max-size`.
+
+## Rewriting asset URLs
+
+```
+ttskit save rewrite-urls save.json --map urls.tsv --out new.json
+ttskit save rewrite-urls save.json --map urls.tsv --dry-run
+ttskit save rewrite-urls save.json --from-manifest ttskit.manifest.json --out new.json
+ttskit save rewrite-urls save.json --normalize-steam-hosts --in-place --yes
+```
+
+Replaces asset URLs in a save, for example after the assets moved to another
+host. It is local only. Only the matched strings change; key order, number
+text and everything else stay as they were, so a diff of input and output
+shows only the replaced URLs (for a save written by the game; other layouts
+are rewritten in the game's layout and the plan says so).
+
+- `--map FILE` is a TSV with `old URL<TAB>new URL` per line. Blank lines and
+  lines starting with `#` are skipped; a BOM and CRLF are fine. Both columns
+  must start with `http://` or `https://`. Every bad line is reported with its
+  line number, and nothing is changed if there is one.
+- `--from-manifest FILE` takes new URLs from a project manifest: a Steam
+  Cloud URL of the save whose SHA1 is in the manifest is replaced by the
+  manifest's URL for that SHA1 (the SHA1 is the content hash, so a file
+  re-uploaded under a new handle keeps it). A URL that already is one of the
+  manifest's URLs is left alone; a SHA1 with several different URLs in the
+  manifest is an error that asks you to use `--map` for it. `--map` and
+  `--from-manifest` can be combined. The index of `save fetch-assets` maps a
+  URL to a local file, not to another URL, so it is not a source.
+- `--normalize-steam-hosts` rewrites URLs that start with
+  `http://cloud-3.steamusercontent.com/ugc/` to
+  `https://steamusercontent-a.akamaihd.net/ugc/`; the rest of the URL is kept.
+  It is off by default and only applies to URLs no mapping line matched. The
+  two prefixes are the only ones ttskit knows; the list is short on purpose.
+- Matching is exact and whole-string: `https://x/a.png` does not match
+  `https://x/a.png?v=2`. Mapping lines never chain, so `A -> B` together with
+  `B -> A` swaps the two. The same old URL on two lines with the same new URL
+  is merged (and noted); with different new URLs it is an error.
+- Scripts: URLs inside `LuaScript`, `LuaScriptState` and `XmlUI` strings are
+  part of longer text. They are counted and listed separately in the plan, and
+  replaced only with `--in-scripts`. A URL there is the run of URL characters
+  after `http://` or `https://`, without trailing `.,;:!?)'*`; in `XmlUI`
+  `&amp;` is read as `&`. URLs in other free text (descriptions, notes) are
+  not touched.
+- The plan is printed first: per mapping line the number of occurrences in
+  values and in scripts, and the objects (nickname and GUID) they are in, then
+  the lines that match nothing. `--dry-run` stops there. `--json` prints the
+  plan and the result as one object, with every path, GUID and nickname.
+- Output: `--out FILE` writes a new file (an existing one needs `--yes`).
+  `--in-place --yes` replaces the input, through a temporary file; a save with
+  nothing to replace is not rewritten. Without either (and without
+  `--dry-run`) the command refuses.
+- Exit status: 0 on success, also when mapping lines match nothing; 1 on
+  errors (unreadable files, bad mapping, conflicts, missing `--out`).
+- Rewriting A to B and then B to A gives back the original bytes.
 
 ## MCP server
 
