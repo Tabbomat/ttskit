@@ -1,5 +1,6 @@
 mod cloud;
 mod editor;
+mod image;
 mod mcp;
 mod save;
 mod watch;
@@ -28,6 +29,11 @@ enum Command {
     Cloud {
         #[command(subcommand)]
         command: CloudCommand,
+    },
+    /// Inspect image files (local only; needs a build with the `image` feature; unofficial)
+    Image {
+        #[command(subcommand)]
+        command: ImageCommand,
     },
     /// Work with save files (local only, no Steam needed; unofficial)
     Save {
@@ -213,6 +219,23 @@ enum EditorCommand {
         json: bool,
         #[command(flatten)]
         ports: EditorPorts,
+    },
+}
+
+#[derive(Subcommand)]
+enum ImageCommand {
+    /// Show format, size, colour layout, bit depth, frames and ICC profile of images (read-only)
+    ///
+    /// Takes files and directories (scanned recursively for png, jpg, webp,
+    /// gif, bmp and tiff); output is sorted by path. Exits with status 1 if any
+    /// file could not be read.
+    Info {
+        /// Image files or directories
+        #[arg(required = true, value_name = "PATH")]
+        inputs: Vec<PathBuf>,
+        /// Print one JSON object with all results
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -1015,7 +1038,8 @@ fn run_simple(command: Command) -> Result<(), CliError> {
         }
         Command::Cloud {
             command: CloudCommand::Status { .. },
-        } => unreachable!("handled by run"),
+        }
+        | Command::Image { .. } => unreachable!("handled by run"),
     }
 }
 
@@ -1074,6 +1098,18 @@ fn run(cli: Cli) -> Result<ExitCode, CliError> {
             .map_err(|e| e.to_string())?;
             out.flush().map_err(|e| e.to_string())?;
             Ok(status_exit_code(in_sync))
+        }
+        Command::Image {
+            command: ImageCommand::Info { inputs, json },
+        } => {
+            let mut out = std::io::stdout().lock();
+            let ok = image::info(&inputs, json, &mut out)?;
+            out.flush().map_err(|e| e.to_string())?;
+            Ok(if ok {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            })
         }
         command => run_simple(command).map(|()| ExitCode::SUCCESS),
     }

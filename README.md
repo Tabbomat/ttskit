@@ -569,6 +569,28 @@ Releases will therefore ship two downloads:
 - a plain build without Steam support, which needs no DLL;
 - a Steam build: a zip with `ttskit.exe` and `steam_api64.dll` side by side.
 
+## Image tools
+
+`ttskit image` needs a build with the `image` feature; without it the command
+exits with an error that names the feature, and the image decoders are not
+built at all:
+
+```
+cargo build --release --features image
+ttskit image info card.png deck/
+ttskit image info --json deck/
+```
+
+`image info` is read-only. It takes files and directories (scanned
+recursively for png, jpg, webp, gif, bmp and tiff, sorted by path) and prints
+format, size, colour layout, bit depth, frame count and the size of an embedded
+ICC profile for each, plus a summary. It exits with status 1 if a file could
+not be read. `--json` prints one JSON object with `images` and `errors`.
+
+Which formats, animated images, 16-bit channels and colour profiles the future
+conversion and optimization commands will accept or produce is not decided yet;
+it depends on what the game itself accepts and is still to be tested.
+
 ## License
 
 [MIT](LICENSE)

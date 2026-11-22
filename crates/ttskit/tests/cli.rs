@@ -1087,3 +1087,65 @@ fn mcp_console_buffer_must_be_at_least_one() {
     let output = ttskit(&["mcp", "--console-buffer", "0"]);
     assert_eq!(output.status.code(), Some(2));
 }
+
+#[cfg(not(feature = "image"))]
+#[test]
+fn image_info_without_image_feature_fails() {
+    let output = ttskit(&["image", "info", "a.png"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--features image"));
+}
+
+#[cfg(feature = "image")]
+mod image_info {
+    use super::*;
+
+    fn png(path: &std::path::Path, w: u32, h: u32) {
+        image::RgbaImage::from_pixel(w, h, image::Rgba([1, 2, 3, 255]))
+            .save(path)
+            .unwrap();
+    }
+
+    #[test]
+    fn prints_one_line_per_file_and_a_summary() {
+        let dir = tempfile::tempdir().unwrap();
+        png(&dir.path().join("b.png"), 4, 2);
+        png(&dir.path().join("a.png"), 3, 3);
+        let output = ttskit(&["image", "info", dir.path().to_str().unwrap()]);
+        assert_eq!(output.status.code(), Some(0));
+        let text = stdout(&output);
+        let a = text.find("a.png: png 3x3").expect(&text);
+        let b = text.find("b.png: png 4x2").expect(&text);
+        assert!(a < b, "sorted by path: {text}");
+        assert!(text.contains("2 inspected, 0 failed"));
+    }
+
+    #[test]
+    fn json_is_one_object_and_failures_set_exit_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let good = dir.path().join("a.png");
+        png(&good, 2, 2);
+        let bad = dir.path().join("bad.png");
+        std::fs::write(&bad, b"nope").unwrap();
+        let output = ttskit(&[
+            "image",
+            "info",
+            "--json",
+            good.to_str().unwrap(),
+            bad.to_str().unwrap(),
+        ]);
+        assert_eq!(output.status.code(), Some(1));
+        let value: serde_json::Value = serde_json::from_str(&stdout(&output)).unwrap();
+        assert_eq!(value["images"].as_array().unwrap().len(), 1);
+        assert_eq!(value["images"][0]["width"], 2);
+        assert_eq!(value["errors"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn output_is_identical_between_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        png(&dir.path().join("a.png"), 5, 5);
+        let args = ["image", "info", "--json", dir.path().to_str().unwrap()];
+        assert_eq!(ttskit(&args).stdout, ttskit(&args).stdout);
+    }
+}

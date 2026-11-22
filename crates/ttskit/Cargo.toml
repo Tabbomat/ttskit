@@ -36,6 +36,7 @@ ttskit-image = { path = "../ttskit-image", optional = true }
 
 [dev-dependencies]
 tempfile = "3"
+image = { version = "0.25.10", default-features = false, features = ["png"] }
 ttskit-testutil = { path = "../ttskit-testutil" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "test-util"] }
 
