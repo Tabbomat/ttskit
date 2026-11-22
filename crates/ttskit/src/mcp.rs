@@ -25,6 +25,7 @@ use ttskit_editor::{EditorError, FieldChange, MessageSource, ScriptPlan};
 use self::buffer::{EventKind, Query};
 use self::cloud_tools::{CloudListArgs, CloudStatusArgs};
 use self::hub::{Hub, Replies};
+use self::image_tools::ImageCheckArgs;
 use self::save_tools::{
     ManifestShowArgs, SaveCheckUrlsArgs, SaveDiffArgs, SaveLintArgs, SaveScanArgs,
 };
@@ -51,7 +52,7 @@ nextSince as `since` next time to get only newer events. execute_lua and save_an
 lastSeq for the same purpose. The save_scan, save_lint, save_diff, save_check_urls and \
 manifest_show tools are read-only, work on files inside the server's root and need no game \
 (only save_check_urls uses the network); their results are the JSON of the matching ttskit \
-commands. The cloud_list and cloud_status tools (only in builds with Steam support) are read-only and open Steam for each call, so Steam must be running and logged in; if it is not, they fail with the reason.";
+commands. The cloud_list and cloud_status tools (only in builds with Steam support) are read-only and open Steam for each call, so Steam must be running and logged in; if it is not, they fail with the reason. image_check (only in builds with image support) is local and read-only too.";
 
 #[derive(Debug, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
@@ -179,19 +180,23 @@ impl EditorServer {
             fetcher: save_tools::http_fetcher(),
             backend: cloud_tools::production_backend(),
             cloud_lock: Arc::default(),
-            tool_router: cloud_tools::with_cloud_tools(
-                Self::tool_router(),
-                cloud_tools::production_backend().is_some(),
-            ),
+            tool_router: Self::router(cloud_tools::production_backend().is_some()),
             lock: Arc::default(),
         }
+    }
+
+    /// All tools of this build: the cloud tools need a backend factory, the
+    /// image tool needs the `image` feature; without them they are not listed.
+    fn router(cloud: bool) -> ToolRouter<Self> {
+        let router = cloud_tools::with_cloud_tools(Self::tool_router(), cloud);
+        image_tools::with_image_tools(router, image_tools::available())
     }
 
     /// Use another cloud backend factory (tests); this lists the cloud tools.
     #[cfg(test)]
     fn with_backend(mut self, backend: cloud_tools::BackendFactory) -> Self {
         self.backend = Some(backend);
-        self.tool_router = cloud_tools::with_cloud_tools(Self::tool_router(), true);
+        self.tool_router = Self::router(true);
         self
     }
 
@@ -720,6 +725,14 @@ impl EditorServer {
     }
 
     #[tool(
+        description = "Report images that are larger than the game can use well (same JSON as `ttskit image check --json`): for each image its format, size and findings such as side-too-long, plus an `errors` list of files that could not be read. Findings are a normal result. Local, read-only, needs no game; inputs (files or directories) must be inside the server's root. Only in builds with the `image` feature."
+    )]
+    async fn image_check(&self, Parameters(args): Parameters<ImageCheckArgs>) -> CallToolResult {
+        let root = self.root.clone();
+        save_tools::run(move || image_tools::check(&root, args)).await
+    }
+
+    #[tool(
         description = "List the files in the Steam Cloud of the running Steam account, grouped by folder, with sizes and the quota (same JSON as `ttskit cloud list --json`). Read-only. Opens Steam for this call: Steam must be running and logged in, otherwise the call fails with the reason. Optional `folder` limits the listing."
     )]
     async fn cloud_list(&self, Parameters(args): Parameters<CloudListArgs>) -> CallToolResult {
@@ -785,4 +798,5 @@ mod tests;
 mod buffer;
 mod cloud_tools;
 mod hub;
+mod image_tools;
 mod save_tools;

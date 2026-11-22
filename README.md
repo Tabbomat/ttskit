@@ -382,8 +382,11 @@ the game and check that the images load, run `ttskit cloud status` and look at
 | `save_diff` | Compare two saves semantically (`save diff --json`) |
 | `save_check_urls` | Request every asset URL of a save and report dead ones (`save check-urls --json`; uses the network) |
 | `manifest_show` | Show the asset manifest (`cloud manifest --json`) |
+| `image_check` | Report images that are too large for the game (`image check --json`) |
 | `cloud_list` | List the Steam Cloud files, optionally of one folder (`cloud list --json`) |
 | `cloud_status` | Compare a local directory with a cloud folder (`cloud status --json`) |
+
+`image_check` exists only in builds with the `image` feature; its findings, and the files it could not read (`errors`), are in the JSON result, not tool errors. Inputs may be files or directories inside the root.
 
 `cloud_list` and `cloud_status` exist only in builds with the `steam` feature (other builds do not list them). They are read-only and open Steam for each call, never at server start: Steam must be running and logged in, otherwise the call fails with the reason. Cloud calls run one at a time. `cloud_status` reads the project config (`ttskit.toml` in the root by default) for its ignore patterns; "not in sync" is a normal result, see `in_sync` in the JSON.
 

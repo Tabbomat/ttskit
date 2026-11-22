@@ -211,7 +211,7 @@ async fn tools_list_has_the_editor_and_save_tools() {
     let tools = r["result"]["tools"].as_array().unwrap();
     let mut names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     // The cloud tools exist only in builds with Steam support.
-    names.retain(|n| !n.starts_with("cloud_"));
+    names.retain(|n| !n.starts_with("cloud_") && *n != "image_check");
     names.sort_unstable();
     assert_eq!(
         names,
@@ -1975,5 +1975,179 @@ async fn the_cloud_tools_are_listed_with_a_backend() {
         .map(|t| t["name"].as_str().unwrap())
         .collect();
     assert!(names.contains(&"cloud_list") && names.contains(&"cloud_status"));
-    assert_eq!(names.len(), 13);
+    assert_eq!(names.len(), 13 + usize::from(cfg!(feature = "image")));
+}
+
+// ---- Image tool ----
+
+#[test]
+fn the_image_tool_is_dropped_without_image_support() {
+    let with = image_tools::with_image_tools(EditorServer::tool_router(), true);
+    let without = image_tools::with_image_tools(EditorServer::tool_router(), false);
+    assert!(with.has_route("image_check"));
+    assert!(!without.has_route("image_check"));
+    assert!(without.has_route("save_scan") && without.has_route("get_status"));
+    assert_eq!(with.list_all().len(), without.list_all().len() + 1);
+    // The server gates on the build's feature.
+    assert_eq!(image_tools::available(), cfg!(feature = "image"));
+}
+
+#[tokio::test]
+async fn the_production_server_lists_image_check_only_with_image_support() {
+    let (mut client, _root) = without_editor(None).await;
+    let r = client.request("tools/list", json!({})).await;
+    let listed = r["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|t| t["name"] == "image_check");
+    assert_eq!(listed, cfg!(feature = "image"));
+}
+
+#[cfg(feature = "image")]
+fn png(root: &tempfile::TempDir, name: &str, w: u32, h: u32) {
+    let path = root.path().join(name);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    ::image::RgbImage::from_pixel(w, h, ::image::Rgb([1, 2, 3]))
+        .save(path)
+        .unwrap();
+}
+
+#[cfg(feature = "image")]
+#[tokio::test]
+async fn image_check_reports_findings_as_a_normal_result() {
+    let (mut client, root) = without_editor(None).await;
+    png(&root, "ok.png", 16, 8);
+    png(&root, "big.png", 40, 8);
+
+    let r = client
+        .call("image_check", json!({"inputs": ["ok.png"]}))
+        .await;
+    assert!(!is_error(&r), "{r}");
+    let doc = body(&r);
+    assert_eq!(doc["images"].as_array().unwrap().len(), 1);
+    assert_eq!(doc["images"][0]["findings"], json!([]));
+    assert_eq!(doc["errors"], json!([]));
+    assert_eq!(doc["max_side"], 4096);
+
+    let r = client
+        .call(
+            "image_check",
+            json!({"inputs": ["big.png"], "max_side": 32}),
+        )
+        .await;
+    assert!(!is_error(&r), "{r}");
+    assert!(body(&r).to_string().contains("side-too-long"), "{r}");
+
+    // max_bytes as text and as a number.
+    for max_bytes in [json!("1"), json!(1)] {
+        let r = client
+            .call(
+                "image_check",
+                json!({"inputs": ["ok.png"], "max_bytes": max_bytes}),
+            )
+            .await;
+        assert!(!is_error(&r), "{r}");
+        let doc = body(&r);
+        assert_eq!(doc["max_bytes"], 1);
+        assert!(!doc["images"][0]["findings"].as_array().unwrap().is_empty());
+    }
+    let r = client
+        .call(
+            "image_check",
+            json!({"inputs": ["ok.png"], "max_bytes": "2m"}),
+        )
+        .await;
+    assert_eq!(body(&r)["max_bytes"], 2 << 20);
+}
+
+#[cfg(feature = "image")]
+#[tokio::test]
+async fn image_check_scans_directories() {
+    let (mut client, root) = without_editor(None).await;
+    png(&root, "art/a.png", 8, 8);
+    png(&root, "art/deep/b.png", 8, 8);
+    let r = client.call("image_check", json!({"inputs": ["art"]})).await;
+    assert!(!is_error(&r), "{r}");
+    assert_eq!(body(&r)["images"].as_array().unwrap().len(), 2);
+}
+
+#[cfg(feature = "image")]
+#[tokio::test]
+async fn image_check_failures_are_tool_errors() {
+    let (mut client, root) = without_editor(None).await;
+    png(&root, "ok.png", 8, 8);
+    std::fs::create_dir_all(root.path().join("empty")).unwrap();
+
+    let r = client
+        .call("image_check", json!({"inputs": ["missing.png"]}))
+        .await;
+    assert!(error_text(&r).contains("missing.png"));
+    let r = client.call("image_check", json!({"inputs": []})).await;
+    assert!(error_text(&r).contains("inputs"));
+    let r = client
+        .call("image_check", json!({"inputs": ["empty"]}))
+        .await;
+    assert!(error_text(&r).contains("no image files"));
+    let r = client
+        .call(
+            "image_check",
+            json!({"inputs": ["ok.png"], "max_bytes": "12x"}),
+        )
+        .await;
+    assert!(error_text(&r).contains("invalid size"));
+    let r = client
+        .call("image_check", json!({"inputs": ["ok.png"], "max_side": 0}))
+        .await;
+    assert!(error_text(&r).contains("max_side"));
+}
+
+#[cfg(feature = "image")]
+#[tokio::test]
+async fn image_check_lists_unreadable_files_in_the_result() {
+    let (mut client, root) = without_editor(None).await;
+    png(&root, "art/ok.png", 8, 8);
+    write(&root, "art/broken.png", "not an image");
+    let r = client.call("image_check", json!({"inputs": ["art"]})).await;
+    // The CLI prints the JSON and then exits with status 1; the tool keeps
+    // the JSON as a normal result.
+    assert!(!is_error(&r), "{r}");
+    let doc = body(&r);
+    assert_eq!(doc["errors"].as_array().unwrap().len(), 1, "{doc}");
+    assert_eq!(doc["images"].as_array().unwrap().len(), 1, "{doc}");
+}
+
+#[cfg(feature = "image")]
+#[tokio::test]
+async fn image_check_refuses_paths_outside_the_root() {
+    let (mut client, root) = without_editor(None).await;
+    png(&root, "ok.png", 8, 8);
+    let outside = tempfile::tempdir().unwrap();
+    png(&outside, "out.png", 8, 8);
+    let outside_png = outside.path().join("out.png");
+    for path in ["../out.png", outside_png.to_str().unwrap()] {
+        for inputs in [json!([path]), json!(["ok.png", path])] {
+            let r = client.call("image_check", json!({"inputs": inputs})).await;
+            let error = error_text(&r);
+            assert!(
+                error.contains("`..`") || error.contains("outside the project root"),
+                "{path}: {error}"
+            );
+        }
+    }
+}
+
+#[cfg(not(feature = "image"))]
+#[tokio::test]
+async fn a_build_without_image_support_has_no_image_check() {
+    // Not listed, and calling it by name fails as an unknown tool.
+    let (mut client, _root) = without_editor(None).await;
+    let id = client
+        .send_call("image_check", json!({"inputs": ["a.png"]}))
+        .await;
+    let r = client.response(id).await;
+    assert!(
+        r.get("error").is_some() || r["result"]["isError"] == true,
+        "{r}"
+    );
 }
