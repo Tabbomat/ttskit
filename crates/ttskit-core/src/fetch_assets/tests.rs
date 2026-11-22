@@ -700,3 +700,16 @@ fn detect_type_table() {
         assert_eq!(detect_type(prefix, *ct, url), *want, "{ct:?} {url}");
     }
 }
+
+#[test]
+fn running_a_precomputed_plan_matches_fetch_assets() {
+    let dir = tempfile::tempdir().unwrap();
+    let mock = Mock::default().on("http://a.test/1", vec![ok(PNG)]);
+    let store = Store::open(dir.path()).unwrap();
+    let p = plan(assets(&["http://a.test/1"]), &store, &config());
+    assert_eq!(p.to_download.len(), 1);
+    let report = fetch_assets_with_plan(p.clone(), &mock, &store, &config());
+    assert_eq!(report.plan, p);
+    assert_eq!(report.downloaded.len(), 1);
+    assert!(index_text(dir.path()).contains("http://a.test/1"));
+}

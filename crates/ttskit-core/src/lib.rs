@@ -23,6 +23,7 @@ pub use check::{
 pub use fetch_assets::{
     Download, DownloadError, DownloadResponse, Failed, FetchConfig, FetchPlan, FetchReport,
     Fetched, Index, IndexEntry, Skipped, Store, StoreError, detect_type, fetch_assets,
+    fetch_assets_with_plan, plan as plan_fetch,
 };
 pub use pack::{PackError, PackOptions, Packed, pack};
 pub use save::write::Eol;

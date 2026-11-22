@@ -1,6 +1,8 @@
 mod check_urls;
 mod cloud;
 mod editor;
+mod fetch_assets;
+mod http;
 mod image;
 mod mcp;
 mod save;
@@ -825,6 +827,55 @@ enum SaveCommand {
     /// by --host / --skip-host). Exit status: 0 when nothing is dead or
     /// unreachable, 2 when something is, 1 on errors.
     CheckUrls(SaveCheckUrlsCli),
+    /// Download the asset URLs of a save into a local directory (needs the network)
+    ///
+    /// Downloads every distinct http(s) URL that is not yet in --out and
+    /// records it in <out>/index.json; files are stored as
+    /// <out>/files/<sha256>.<type>. Rerunning downloads only what is missing
+    /// (--verify rehashes the files already there). HTML pages answered
+    /// instead of a file are rejected. The save is not modified. Exit status:
+    /// 0 when everything is present, 2 when a URL failed (the rest is still
+    /// downloaded) or the index could not be written, 1 on errors.
+    FetchAssets(SaveFetchAssetsCli),
+}
+
+#[derive(clap::Args)]
+struct SaveFetchAssetsCli {
+    /// The save file (JSON)
+    save: PathBuf,
+    /// The output directory (created if missing; may already hold an earlier backup)
+    #[arg(long, value_name = "DIR")]
+    out: PathBuf,
+    /// Print the plan and download nothing; creates no files
+    #[arg(long)]
+    dry_run: bool,
+    /// Rehash the files already present instead of only comparing their size
+    #[arg(long)]
+    verify: bool,
+    /// Largest accepted file: bytes, optionally with a k, m or g suffix (binary multiples)
+    #[arg(long, value_name = "SIZE", default_value = "512m", value_parser = |s: &str| fetch_assets::parse_size(s))]
+    max_size: u64,
+    /// Only download URLs on this host or its subdomains; repeatable
+    #[arg(long, value_name = "HOST")]
+    host: Vec<String>,
+    /// Skip URLs on this host or its subdomains; repeatable
+    #[arg(long, value_name = "HOST")]
+    skip_host: Vec<String>,
+    /// Most downloads in flight at once
+    #[arg(long, value_name = "N", default_value_t = 16, value_parser = clap::value_parser!(u32).range(1..=256))]
+    concurrency: u32,
+    /// Most downloads in flight at once from one host
+    #[arg(long, value_name = "N", default_value_t = 4, value_parser = clap::value_parser!(u32).range(1..=64))]
+    per_host: u32,
+    /// Extra attempts after a timeout, network error, 429 or 5xx
+    #[arg(long, value_name = "N", default_value_t = 3, value_parser = clap::value_parser!(u32).range(0..=10))]
+    retries: u32,
+    /// Timeout for connecting, in seconds (a whole download may take up to an hour)
+    #[arg(long, value_name = "SECONDS", default_value_t = 30, value_parser = clap::value_parser!(u32).range(1..=600))]
+    timeout: u32,
+    /// Print machine-readable JSON instead of text
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(clap::Args)]
@@ -1691,7 +1742,7 @@ fn run_simple(command: Command) -> Result<(), CliError> {
         }
         | Command::Image { .. }
         | Command::Save {
-            command: SaveCommand::CheckUrls(_),
+            command: SaveCommand::CheckUrls(_) | SaveCommand::FetchAssets(_),
         } => unreachable!("handled by run"),
     }
 }
@@ -2139,8 +2190,7 @@ fn run(cli: Cli) -> Result<ExitCode, CliError> {
                     json,
                 }),
         } => {
-            let client =
-                check_urls::HttpClient::new(std::time::Duration::from_secs(u64::from(timeout)))?;
+            let client = http::HttpClient::new(std::time::Duration::from_secs(u64::from(timeout)))?;
             let config = ttskit_core::CheckConfig {
                 concurrency: concurrency as usize,
                 per_host: per_host as usize,
@@ -2158,8 +2208,40 @@ fn run(cli: Cli) -> Result<ExitCode, CliError> {
                 check_urls::CheckStatus::Problems => ExitCode::from(2),
             })
         }
+        Command::Save {
+            command: SaveCommand::FetchAssets(args),
+        } => run_fetch_assets(args),
         command => run_simple(command).map(|()| ExitCode::SUCCESS),
     }
+}
+
+#[inline(never)]
+fn run_fetch_assets(args: SaveFetchAssetsCli) -> Result<ExitCode, CliError> {
+    let client =
+        http::HttpClient::for_downloads(std::time::Duration::from_secs(u64::from(args.timeout)))?;
+    let options = fetch_assets::Options {
+        save: &args.save,
+        out: &args.out,
+        dry_run: args.dry_run,
+        json: args.json,
+        config: ttskit_core::FetchConfig {
+            concurrency: args.concurrency as usize,
+            per_host: args.per_host as usize,
+            retries: args.retries,
+            max_size: args.max_size,
+            only_hosts: args.host,
+            skip_hosts: args.skip_host,
+            verify: args.verify,
+            ..ttskit_core::FetchConfig::default()
+        },
+    };
+    let mut out = std::io::stdout().lock();
+    let status = fetch_assets::fetch_assets(&options, &client, &mut out)?;
+    out.flush().map_err(|e| e.to_string())?;
+    Ok(match status {
+        fetch_assets::FetchStatus::Clean => ExitCode::SUCCESS,
+        fetch_assets::FetchStatus::Problems => ExitCode::from(2),
+    })
 }
 
 /// Kept out of `run`, whose stack frame in a debug build is already close to

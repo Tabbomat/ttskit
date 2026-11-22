@@ -1,43 +1,14 @@
 //! `ttskit save check-urls`: finds the asset URLs of a save that no longer load.
 
+use crate::http::{HttpClient, describe};
 use std::io::{Read, Write};
 use std::path::Path;
-use std::time::Duration;
 
 use serde_json::{Value, json};
 use ttskit_core::{
     CheckConfig, CheckReport, Fetch, FetchError, FetchMethod, FetchRequest, FetchResponse, Outcome,
     UrlResult,
 };
-
-/// A blocking `reqwest` client that never follows redirects (the engine does).
-pub struct HttpClient {
-    client: reqwest::blocking::Client,
-}
-
-impl HttpClient {
-    pub fn new(timeout: Duration) -> Result<Self, String> {
-        let client = reqwest::blocking::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(timeout)
-            .user_agent(concat!("ttskit/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .map_err(|e| format!("cannot create the HTTP client: {}", describe(&e)))?;
-        Ok(HttpClient { client })
-    }
-}
-
-/// The error with its causes, since `reqwest` hides them behind a generic text.
-fn describe(e: &reqwest::Error) -> String {
-    let mut text = e.to_string();
-    let mut source = std::error::Error::source(e);
-    while let Some(s) = source {
-        text.push_str(": ");
-        text.push_str(&s.to_string());
-        source = s.source();
-    }
-    text
-}
 
 fn map_error(e: reqwest::Error) -> FetchError {
     if e.is_timeout() {

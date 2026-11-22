@@ -269,7 +269,19 @@ pub fn fetch_assets(
     store: &Store,
     config: &FetchConfig,
 ) -> FetchReport {
-    let mut plan = plan(urls, store, config);
+    let p = plan(urls, store, config);
+    fetch_assets_with_plan(p, client, store, config)
+}
+
+/// Like [`fetch_assets`], but runs a plan made earlier by [`plan`] (with the
+/// same `store` and `config`), so that a caller that prints the plan first
+/// does not have to compute it, and with `verify` rehash the files, twice.
+pub fn fetch_assets_with_plan(
+    mut plan: FetchPlan,
+    client: &dyn Download,
+    store: &Store,
+    config: &FetchConfig,
+) -> FetchReport {
     let queue = std::mem::take(&mut plan.to_download);
     let mut report = FetchReport {
         plan,
