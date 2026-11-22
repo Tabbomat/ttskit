@@ -50,3 +50,11 @@ trait and use a mock; real-environment checks are manual and documented.
   require `--yes`; always print a plan first.
 - Save JSON is kept lossless (key order and number text preserved); do not
   round-trip it through `f64`.
+- CLI subcommands: every variant of a clap `Subcommand` enum holds its own
+  `#[derive(clap::Args)]` struct (`Convert(ImageConvertCli)`), never inline
+  fields (`Convert { ... }`). With inline fields, clap's derive builds all of
+  an enum's arguments in one function. In a debug build, that function's stack
+  frame is hundreds of KiB, and nested subcommand enums stack those frames.
+  `ttskit --help` then overflowed the 1 MiB main-thread stack of Windows.
+  Separate structs give each command its own small function. New commands
+  follow the same style; do not raise the stack size instead.

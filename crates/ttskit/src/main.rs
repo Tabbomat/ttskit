@@ -51,16 +51,7 @@ enum Command {
     /// server holds the editor port for its whole life and buffers what the
     /// game sends; it does not start if the port is in use. Exits when stdin
     /// closes.
-    Mcp {
-        /// Project directory; save_and_play may only read paths inside it (default: the current directory)
-        #[arg(long, value_name = "DIR")]
-        root: Option<PathBuf>,
-        /// Keep at most this many events (print, error, custom, saved, loaded) for get_console; the buffer also holds at most 4 MiB of text
-        #[arg(long, value_name = "EVENTS", default_value_t = 1000, value_parser = clap::value_parser!(u32).range(1..))]
-        console_buffer: u32,
-        #[command(flatten)]
-        ports: EditorPorts,
-    },
+    Mcp(McpCli),
     /// Push scripts and UI to the running game whenever the unpacked tree changes
     ///
     /// Watches DIR (written by `save unpack`) and the --include directories.
@@ -71,29 +62,44 @@ enum Command {
     /// pushed: other changes are reported and need a full pack and load.
     /// Errors are printed and the watch keeps running. The game's `print`
     /// output and Lua errors are shown. Ctrl+C stops.
-    Watch {
-        /// The directory written by `save unpack`
-        dir: PathBuf,
-        /// Inline `require("Name")` and `<Include src="Name"/>` from this directory
-        /// and watch it too; repeatable, searched in order
-        #[arg(long, value_name = "LIB_DIR")]
-        include: Vec<PathBuf>,
-        /// Push once and exit (for editor tasks), then show the game's console
-        /// output until --quiet-ms pass without a message
-        #[arg(long)]
-        once: bool,
-        /// Also write the packed save to this file on every change (atomically;
-        /// an existing file is overwritten, and only when its content changes)
-        #[arg(long, value_name = "SAVE.json")]
-        pack_to: Option<PathBuf>,
-        /// Milliseconds without file changes before a push starts
-        #[arg(long, default_value_t = watch::DEFAULT_DEBOUNCE.as_millis() as u64, value_name = "MILLISECONDS")]
-        debounce_ms: u64,
-        #[command(flatten)]
-        quiet: QuietWindow,
-        #[command(flatten)]
-        ports: EditorPorts,
-    },
+    Watch(WatchCli),
+}
+
+#[derive(clap::Args)]
+struct McpCli {
+    /// Project directory; save_and_play may only read paths inside it (default: the current directory)
+    #[arg(long, value_name = "DIR")]
+    root: Option<PathBuf>,
+    /// Keep at most this many events (print, error, custom, saved, loaded) for get_console; the buffer also holds at most 4 MiB of text
+    #[arg(long, value_name = "EVENTS", default_value_t = 1000, value_parser = clap::value_parser!(u32).range(1..))]
+    console_buffer: u32,
+    #[command(flatten)]
+    ports: EditorPorts,
+}
+
+#[derive(clap::Args)]
+struct WatchCli {
+    /// The directory written by `save unpack`
+    dir: PathBuf,
+    /// Inline `require("Name")` and `<Include src="Name"/>` from this directory
+    /// and watch it too; repeatable, searched in order
+    #[arg(long, value_name = "LIB_DIR")]
+    include: Vec<PathBuf>,
+    /// Push once and exit (for editor tasks), then show the game's console
+    /// output until --quiet-ms pass without a message
+    #[arg(long)]
+    once: bool,
+    /// Also write the packed save to this file on every change (atomically;
+    /// an existing file is overwritten, and only when its content changes)
+    #[arg(long, value_name = "SAVE.json")]
+    pack_to: Option<PathBuf>,
+    /// Milliseconds without file changes before a push starts
+    #[arg(long, default_value_t = watch::DEFAULT_DEBOUNCE.as_millis() as u64, value_name = "MILLISECONDS")]
+    debounce_ms: u64,
+    #[command(flatten)]
+    quiet: QuietWindow,
+    #[command(flatten)]
+    ports: EditorPorts,
 }
 
 /// How long to keep listening after the last message (shared by `exec` and
@@ -130,40 +136,13 @@ impl EditorPorts {
 #[derive(Subcommand)]
 enum EditorCommand {
     /// List the objects with a script or UI in the loaded game (read-only)
-    GetScripts {
-        /// Print the full scripts and UI as JSON instead of a summary
-        #[arg(long)]
-        json: bool,
-        #[command(flatten)]
-        ports: EditorPorts,
-    },
+    GetScripts(EditorGetScriptsCli),
     /// Send the scripts and UI of an unpacked save to the game and reload it (Save & Play)
     ///
     /// Reloads the whole game and discards unsaved changes in it. Only objects
     /// whose script or UI differ from the game are sent, each with both fields
     /// in full. Without --yes the changes are shown and nothing is sent.
-    SaveAndPlay {
-        /// A directory written by `save unpack`; objects are matched by GUID
-        dir: PathBuf,
-        /// Inline `require("Name")` and `<Include src="Name"/>` from this
-        /// directory, as `save pack --include` does; repeatable
-        #[arg(long, value_name = "LIB_DIR")]
-        include: Vec<PathBuf>,
-        /// Show the changes and send nothing
-        #[arg(long)]
-        dry_run: bool,
-        /// Really send the changes (required; the game reloads)
-        #[arg(long)]
-        yes: bool,
-        /// Allow scripts or UI that exist in the game but not in the source to be deleted
-        #[arg(long)]
-        allow_delete: bool,
-        /// Print machine-readable JSON instead of text
-        #[arg(long)]
-        json: bool,
-        #[command(flatten)]
-        ports: EditorPorts,
-    },
+    SaveAndPlay(EditorSaveAndPlayCli),
     /// Run Lua in the game and print what it reports
     ///
     /// Runs in the context of an object (default: Global). The object must
@@ -172,20 +151,7 @@ enum EditorCommand {
     /// a returned value is shown if the game sends one. Output printed by the
     /// game's own scripts in the meantime is included. A Lua error makes the
     /// command fail.
-    Exec {
-        /// The Lua code to run
-        code: String,
-        /// GUID of the object to run in; the default `-1` is Global
-        #[arg(long, default_value = ttskit_editor::GLOBAL_GUID)]
-        guid: String,
-        #[command(flatten)]
-        quiet: QuietWindow,
-        /// Print machine-readable JSON instead of text
-        #[arg(long)]
-        json: bool,
-        #[command(flatten)]
-        ports: EditorPorts,
-    },
+    Exec(EditorExecCli),
     /// Print the game's `print` output and Lua errors, stamped on arrival
     ///
     /// Without --follow, listens until --quiet-ms pass without a message (or
@@ -195,31 +161,86 @@ enum EditorCommand {
     /// game sends no timestamp and no origin for `print`; a Lua error shows the
     /// GUID of the failing object. Lua errors are output and do not change the
     /// exit status. `--json` prints one JSON object per line.
-    Console {
-        /// Keep running until interrupted instead of exiting when output stops
-        #[arg(long, conflicts_with_all = ["quiet_ms"])]
-        follow: bool,
-        /// Print one JSON object per line instead of text
-        #[arg(long)]
-        json: bool,
-        #[command(flatten)]
-        quiet: QuietWindow,
-        #[command(flatten)]
-        ports: EditorPorts,
-    },
+    Console(EditorConsoleCli),
     /// Send a custom message to the game's `onExternalMessage` handler
     ///
     /// The message must be a JSON object; the game ignores anything else.
     /// The game does not acknowledge it, so success only means it was sent.
-    Send {
-        /// A JSON object, for example '{"action":"ping"}'
-        message: String,
-        /// Print machine-readable JSON instead of text
-        #[arg(long)]
-        json: bool,
-        #[command(flatten)]
-        ports: EditorPorts,
-    },
+    Send(EditorSendCli),
+}
+
+#[derive(clap::Args)]
+struct EditorGetScriptsCli {
+    /// Print the full scripts and UI as JSON instead of a summary
+    #[arg(long)]
+    json: bool,
+    #[command(flatten)]
+    ports: EditorPorts,
+}
+
+#[derive(clap::Args)]
+struct EditorSaveAndPlayCli {
+    /// A directory written by `save unpack`; objects are matched by GUID
+    dir: PathBuf,
+    /// Inline `require("Name")` and `<Include src="Name"/>` from this
+    /// directory, as `save pack --include` does; repeatable
+    #[arg(long, value_name = "LIB_DIR")]
+    include: Vec<PathBuf>,
+    /// Show the changes and send nothing
+    #[arg(long)]
+    dry_run: bool,
+    /// Really send the changes (required; the game reloads)
+    #[arg(long)]
+    yes: bool,
+    /// Allow scripts or UI that exist in the game but not in the source to be deleted
+    #[arg(long)]
+    allow_delete: bool,
+    /// Print machine-readable JSON instead of text
+    #[arg(long)]
+    json: bool,
+    #[command(flatten)]
+    ports: EditorPorts,
+}
+
+#[derive(clap::Args)]
+struct EditorExecCli {
+    /// The Lua code to run
+    code: String,
+    /// GUID of the object to run in; the default `-1` is Global
+    #[arg(long, default_value = ttskit_editor::GLOBAL_GUID)]
+    guid: String,
+    #[command(flatten)]
+    quiet: QuietWindow,
+    /// Print machine-readable JSON instead of text
+    #[arg(long)]
+    json: bool,
+    #[command(flatten)]
+    ports: EditorPorts,
+}
+
+#[derive(clap::Args)]
+struct EditorConsoleCli {
+    /// Keep running until interrupted instead of exiting when output stops
+    #[arg(long, conflicts_with_all = ["quiet_ms"])]
+    follow: bool,
+    /// Print one JSON object per line instead of text
+    #[arg(long)]
+    json: bool,
+    #[command(flatten)]
+    quiet: QuietWindow,
+    #[command(flatten)]
+    ports: EditorPorts,
+}
+
+#[derive(clap::Args)]
+struct EditorSendCli {
+    /// A JSON object, for example '{"action":"ping"}'
+    message: String,
+    /// Print machine-readable JSON instead of text
+    #[arg(long)]
+    json: bool,
+    #[command(flatten)]
+    ports: EditorPorts,
 }
 
 #[derive(Subcommand)]
@@ -233,14 +254,7 @@ enum ImageCommand {
     /// and directories (scanned recursively for png, jpg, webp, gif, bmp and
     /// tiff); output is sorted by path. Exits with status 1 if a file could not
     /// be read or has errors; warnings and notes do not change the exit status.
-    Info {
-        /// Image files or directories
-        #[arg(required = true, value_name = "PATH")]
-        inputs: Vec<PathBuf>,
-        /// Print one JSON object with all results
-        #[arg(long)]
-        json: bool,
-    },
+    Info(ImageInfoCli),
     /// Report images that are larger than the game can use well (read-only)
     ///
     /// Reads only the file header where it can (format, size, colour layout)
@@ -255,20 +269,7 @@ enum ImageCommand {
     /// decoding them). Takes files and directories (scanned recursively).
     /// Exit status: 0 without findings, 2 with findings, 1 if a file could not
     /// be read (this wins over 2). To fix oversized images, see `image resize`.
-    Check {
-        /// Image files or directories
-        #[arg(required = true, value_name = "PATH")]
-        inputs: Vec<PathBuf>,
-        /// Longest allowed side in pixels
-        #[arg(long, value_name = "N", default_value_t = 4096, value_parser = clap::value_parser!(u32).range(1..))]
-        max_side: u32,
-        /// Largest allowed file size in bytes; k, m and g suffixes mean 1024-based units (e.g. 2m)
-        #[arg(long, value_name = "BYTES", value_parser = image::parse_bytes)]
-        max_bytes: Option<u64>,
-        /// Print one JSON object with all results
-        #[arg(long)]
-        json: bool,
-    },
+    Check(ImageCheckCli),
     /// Convert images to PNG or JPEG, the formats Tabletop Simulator loads
     ///
     /// Reads png, jpg, webp, bmp, tiff and gif (decided by content, not by
@@ -284,38 +285,7 @@ enum ImageCommand {
     /// if two inputs would write the same file. Each file is converted
     /// independently: a failure is reported and the other files still convert.
     /// Output is deterministic. Exits with status 1 if any file failed.
-    Convert {
-        /// Image files or directories (scanned recursively)
-        #[arg(required = true, value_name = "INPUT")]
-        inputs: Vec<PathBuf>,
-        /// Output format
-        #[arg(long, value_enum)]
-        to: image::Target,
-        /// JPEG quality, 1 to 100 [default: 85]
-        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u8).range(1..=100))]
-        quality: Option<u8>,
-        /// Colour to flatten transparency onto for JPEG output: #RRGGBB, #RGB, white or black
-        #[arg(long, value_name = "COLOR")]
-        background: Option<String>,
-        /// Keep the colour profile and EXIF data
-        #[arg(long)]
-        keep_metadata: bool,
-        /// Output file (for exactly one input)
-        #[arg(long, value_name = "FILE", conflicts_with = "out_dir")]
-        out: Option<PathBuf>,
-        /// Output directory (created if missing); files are named like their input
-        #[arg(long, value_name = "DIR")]
-        out_dir: Option<PathBuf>,
-        /// Overwrite existing output files
-        #[arg(long)]
-        yes: bool,
-        /// Show what would be written, but write nothing
-        #[arg(long)]
-        dry_run: bool,
-        /// Print one JSON object with all results
-        #[arg(long)]
-        json: bool,
-    },
+    Convert(ImageConvertCli),
     /// Shrink PNG files without changing a pixel
     ///
     /// Re-encodes each PNG losslessly with oxipng (filters, compression, colour
@@ -333,35 +303,7 @@ enum ImageCommand {
     /// chunk. Output is deterministic for the same level, strip mode and ttskit
     /// build, so an optimized file stays stable; a ttskit upgrade (new oxipng
     /// version) may produce other bytes. Exits with status 1 if any file failed.
-    Optimize {
-        /// PNG files or directories (scanned recursively)
-        #[arg(required = true, value_name = "INPUT")]
-        inputs: Vec<PathBuf>,
-        /// Effort from 0 (fastest) to 6 (smallest, slowest)
-        #[arg(long, value_name = "N", default_value_t = 2, value_parser = clap::value_parser!(u8).range(0..=6))]
-        level: u8,
-        /// Metadata to remove: safe, all or none
-        #[arg(long, value_enum, default_value = "safe")]
-        strip: image::Strip,
-        /// Output file (for exactly one input)
-        #[arg(long, value_name = "FILE", conflicts_with_all = ["out_dir", "in_place"])]
-        out: Option<PathBuf>,
-        /// Output directory (created if missing); files are named like their input
-        #[arg(long, value_name = "DIR", conflicts_with = "in_place")]
-        out_dir: Option<PathBuf>,
-        /// Replace the input files (needs --yes)
-        #[arg(long)]
-        in_place: bool,
-        /// Confirm --in-place, or overwrite existing output files
-        #[arg(long)]
-        yes: bool,
-        /// Optimize in memory and report the savings, but write nothing
-        #[arg(long)]
-        dry_run: bool,
-        /// Print one JSON object with all results
-        #[arg(long)]
-        json: bool,
-    },
+    Optimize(ImageOptimizeCli),
     /// Scale PNG and JPEG images down, keeping the aspect ratio
     ///
     /// Give exactly one size: --max-side N (the longer side becomes N),
@@ -381,51 +323,7 @@ enum ImageCommand {
     /// --dry-run alone runs in memory and only reports the new sizes.
     /// Existing outputs are never overwritten without --yes. Output is
     /// deterministic. Exits with status 1 if any file failed.
-    #[command(group(clap::ArgGroup::new("size").required(true).multiple(false).args(["max_side", "width", "height", "scale"])))]
-    Resize {
-        /// Image files or directories (scanned recursively)
-        #[arg(required = true, value_name = "INPUT")]
-        inputs: Vec<PathBuf>,
-        /// Make the longer side this many pixels
-        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
-        max_side: Option<u32>,
-        /// Make the width this many pixels
-        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
-        width: Option<u32>,
-        /// Make the height this many pixels
-        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
-        height: Option<u32>,
-        /// Multiply both sides by this factor, e.g. 0.5
-        #[arg(long, value_name = "F", value_parser = image::parse_scale)]
-        scale: Option<f64>,
-        /// Allow results larger than the input
-        #[arg(long)]
-        allow_enlarge: bool,
-        /// Resampling filter
-        #[arg(long, value_enum, default_value = "lanczos3")]
-        filter: image::FilterKind,
-        /// JPEG quality, 1 to 100 [default: 85]
-        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u8).range(1..=100))]
-        quality: Option<u8>,
-        /// Output file (for exactly one input)
-        #[arg(long, value_name = "FILE", conflicts_with_all = ["out_dir", "in_place"])]
-        out: Option<PathBuf>,
-        /// Output directory (created if missing); files are named like their input
-        #[arg(long, value_name = "DIR", conflicts_with = "in_place")]
-        out_dir: Option<PathBuf>,
-        /// Replace the input files (needs --yes)
-        #[arg(long)]
-        in_place: bool,
-        /// Confirm --in-place, or overwrite existing output files
-        #[arg(long)]
-        yes: bool,
-        /// Resize in memory and report the new sizes, but write nothing
-        #[arg(long)]
-        dry_run: bool,
-        /// Print one JSON object with all results
-        #[arg(long)]
-        json: bool,
-    },
+    Resize(ImageResizeCli),
     /// Build deck sheets from card images, or cut them into cards
     ///
     /// A custom deck is one or more grid sheets of card images. `deck build`
@@ -453,50 +351,7 @@ enum ImageCommand {
     /// --in-place with --yes; --dry-run alone runs in memory and only reports
     /// the savings. Existing outputs are never overwritten without --yes.
     /// Exits with status 1 if any file failed or pngquant cannot be run.
-    Quantize {
-        /// PNG files or directories (scanned recursively)
-        #[arg(required = true, value_name = "INPUT")]
-        inputs: Vec<PathBuf>,
-        /// Largest palette size, 2 to 256
-        #[arg(long, value_name = "N", default_value_t = 256, value_parser = clap::value_parser!(u16).range(2..=256))]
-        colors: u16,
-        /// Quality floor and target, MIN-MAX, each 0 to 100 (e.g. 60-90)
-        #[arg(long, value_name = "MIN-MAX", value_parser = image::parse_quality)]
-        quality: Option<(u8, u8)>,
-        /// Dithering strength, 0.0 (none) to 1.0 (full)
-        #[arg(long, value_name = "F", default_value_t = 1.0, value_parser = image::parse_dither)]
-        dither: f32,
-        /// Effort of the final lossless pass, 0 (fastest) to 6 (smallest, slowest)
-        #[arg(long, value_name = "N", default_value_t = 2, value_parser = clap::value_parser!(u8).range(0..=6))]
-        level: u8,
-        /// Metadata to remove: safe, all or none
-        #[arg(long, value_enum, default_value = "safe")]
-        strip: image::Strip,
-        /// Quantizer: builtin (default) or pngquant
-        #[arg(long, value_enum)]
-        engine: Option<image::EngineKind>,
-        /// Path of the pngquant executable (implies --engine pngquant)
-        #[arg(long, value_name = "PATH")]
-        pngquant: Option<PathBuf>,
-        /// Output file (for exactly one input)
-        #[arg(long, value_name = "FILE", conflicts_with_all = ["out_dir", "in_place"])]
-        out: Option<PathBuf>,
-        /// Output directory (created if missing); files are named like their input
-        #[arg(long, value_name = "DIR", conflicts_with = "in_place")]
-        out_dir: Option<PathBuf>,
-        /// Replace the input files (needs --yes)
-        #[arg(long)]
-        in_place: bool,
-        /// Confirm --in-place, or overwrite existing output files
-        #[arg(long)]
-        yes: bool,
-        /// Quantize in memory and report the savings, but write nothing
-        #[arg(long)]
-        dry_run: bool,
-        /// Print one JSON object with all results
-        #[arg(long)]
-        json: bool,
-    },
+    Quantize(ImageQuantizeCli),
     /// Build the images of the project config's `[[image.pipeline]]` rules
     ///
     /// Reads the rules from `[[image.pipeline]]` in ttskit.toml (source glob,
@@ -512,27 +367,216 @@ enum ImageCommand {
     /// writes nothing, not even the lock file. Exits with status 1 if a job
     /// failed. The usual flow is `ttskit image build`, then
     /// `ttskit cloud sync push`.
-    Build {
-        /// The project config; its directory is the base of all paths in it
-        #[arg(
-            long,
-            value_name = "PATH",
-            default_value = ttskit_cloud::ProjectConfig::FILE_NAME
-        )]
-        config: PathBuf,
-        /// Print the plan and write nothing
-        #[arg(long)]
-        dry_run: bool,
-        /// Also delete stale outputs (needs --yes)
-        #[arg(long)]
-        prune: bool,
-        /// Confirm --prune
-        #[arg(long)]
-        yes: bool,
-        /// Print one JSON object with the plan and the results
-        #[arg(long)]
-        json: bool,
-    },
+    Build(ImageBuildCli),
+}
+
+#[derive(clap::Args)]
+struct ImageInfoCli {
+    /// Image files or directories
+    #[arg(required = true, value_name = "PATH")]
+    inputs: Vec<PathBuf>,
+    /// Print one JSON object with all results
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(clap::Args)]
+struct ImageCheckCli {
+    /// Image files or directories
+    #[arg(required = true, value_name = "PATH")]
+    inputs: Vec<PathBuf>,
+    /// Longest allowed side in pixels
+    #[arg(long, value_name = "N", default_value_t = 4096, value_parser = clap::value_parser!(u32).range(1..))]
+    max_side: u32,
+    /// Largest allowed file size in bytes; k, m and g suffixes mean 1024-based units (e.g. 2m)
+    #[arg(long, value_name = "BYTES", value_parser = image::parse_bytes)]
+    max_bytes: Option<u64>,
+    /// Print one JSON object with all results
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(clap::Args)]
+struct ImageConvertCli {
+    /// Image files or directories (scanned recursively)
+    #[arg(required = true, value_name = "INPUT")]
+    inputs: Vec<PathBuf>,
+    /// Output format
+    #[arg(long, value_enum)]
+    to: image::Target,
+    /// JPEG quality, 1 to 100 [default: 85]
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u8).range(1..=100))]
+    quality: Option<u8>,
+    /// Colour to flatten transparency onto for JPEG output: #RRGGBB, #RGB, white or black
+    #[arg(long, value_name = "COLOR")]
+    background: Option<String>,
+    /// Keep the colour profile and EXIF data
+    #[arg(long)]
+    keep_metadata: bool,
+    /// Output file (for exactly one input)
+    #[arg(long, value_name = "FILE", conflicts_with = "out_dir")]
+    out: Option<PathBuf>,
+    /// Output directory (created if missing); files are named like their input
+    #[arg(long, value_name = "DIR")]
+    out_dir: Option<PathBuf>,
+    /// Overwrite existing output files
+    #[arg(long)]
+    yes: bool,
+    /// Show what would be written, but write nothing
+    #[arg(long)]
+    dry_run: bool,
+    /// Print one JSON object with all results
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(clap::Args)]
+struct ImageOptimizeCli {
+    /// PNG files or directories (scanned recursively)
+    #[arg(required = true, value_name = "INPUT")]
+    inputs: Vec<PathBuf>,
+    /// Effort from 0 (fastest) to 6 (smallest, slowest)
+    #[arg(long, value_name = "N", default_value_t = 2, value_parser = clap::value_parser!(u8).range(0..=6))]
+    level: u8,
+    /// Metadata to remove: safe, all or none
+    #[arg(long, value_enum, default_value = "safe")]
+    strip: image::Strip,
+    /// Output file (for exactly one input)
+    #[arg(long, value_name = "FILE", conflicts_with_all = ["out_dir", "in_place"])]
+    out: Option<PathBuf>,
+    /// Output directory (created if missing); files are named like their input
+    #[arg(long, value_name = "DIR", conflicts_with = "in_place")]
+    out_dir: Option<PathBuf>,
+    /// Replace the input files (needs --yes)
+    #[arg(long)]
+    in_place: bool,
+    /// Confirm --in-place, or overwrite existing output files
+    #[arg(long)]
+    yes: bool,
+    /// Optimize in memory and report the savings, but write nothing
+    #[arg(long)]
+    dry_run: bool,
+    /// Print one JSON object with all results
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(clap::Args)]
+#[command(group(clap::ArgGroup::new("size").required(true).multiple(false).args(["max_side", "width", "height", "scale"])))]
+struct ImageResizeCli {
+    /// Image files or directories (scanned recursively)
+    #[arg(required = true, value_name = "INPUT")]
+    inputs: Vec<PathBuf>,
+    /// Make the longer side this many pixels
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
+    max_side: Option<u32>,
+    /// Make the width this many pixels
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
+    width: Option<u32>,
+    /// Make the height this many pixels
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
+    height: Option<u32>,
+    /// Multiply both sides by this factor, e.g. 0.5
+    #[arg(long, value_name = "F", value_parser = image::parse_scale)]
+    scale: Option<f64>,
+    /// Allow results larger than the input
+    #[arg(long)]
+    allow_enlarge: bool,
+    /// Resampling filter
+    #[arg(long, value_enum, default_value = "lanczos3")]
+    filter: image::FilterKind,
+    /// JPEG quality, 1 to 100 [default: 85]
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u8).range(1..=100))]
+    quality: Option<u8>,
+    /// Output file (for exactly one input)
+    #[arg(long, value_name = "FILE", conflicts_with_all = ["out_dir", "in_place"])]
+    out: Option<PathBuf>,
+    /// Output directory (created if missing); files are named like their input
+    #[arg(long, value_name = "DIR", conflicts_with = "in_place")]
+    out_dir: Option<PathBuf>,
+    /// Replace the input files (needs --yes)
+    #[arg(long)]
+    in_place: bool,
+    /// Confirm --in-place, or overwrite existing output files
+    #[arg(long)]
+    yes: bool,
+    /// Resize in memory and report the new sizes, but write nothing
+    #[arg(long)]
+    dry_run: bool,
+    /// Print one JSON object with all results
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(clap::Args)]
+struct ImageQuantizeCli {
+    /// PNG files or directories (scanned recursively)
+    #[arg(required = true, value_name = "INPUT")]
+    inputs: Vec<PathBuf>,
+    /// Largest palette size, 2 to 256
+    #[arg(long, value_name = "N", default_value_t = 256, value_parser = clap::value_parser!(u16).range(2..=256))]
+    colors: u16,
+    /// Quality floor and target, MIN-MAX, each 0 to 100 (e.g. 60-90)
+    #[arg(long, value_name = "MIN-MAX", value_parser = image::parse_quality)]
+    quality: Option<(u8, u8)>,
+    /// Dithering strength, 0.0 (none) to 1.0 (full)
+    #[arg(long, value_name = "F", default_value_t = 1.0, value_parser = image::parse_dither)]
+    dither: f32,
+    /// Effort of the final lossless pass, 0 (fastest) to 6 (smallest, slowest)
+    #[arg(long, value_name = "N", default_value_t = 2, value_parser = clap::value_parser!(u8).range(0..=6))]
+    level: u8,
+    /// Metadata to remove: safe, all or none
+    #[arg(long, value_enum, default_value = "safe")]
+    strip: image::Strip,
+    /// Quantizer: builtin (default) or pngquant
+    #[arg(long, value_enum)]
+    engine: Option<image::EngineKind>,
+    /// Path of the pngquant executable (implies --engine pngquant)
+    #[arg(long, value_name = "PATH")]
+    pngquant: Option<PathBuf>,
+    /// Output file (for exactly one input)
+    #[arg(long, value_name = "FILE", conflicts_with_all = ["out_dir", "in_place"])]
+    out: Option<PathBuf>,
+    /// Output directory (created if missing); files are named like their input
+    #[arg(long, value_name = "DIR", conflicts_with = "in_place")]
+    out_dir: Option<PathBuf>,
+    /// Replace the input files (needs --yes)
+    #[arg(long)]
+    in_place: bool,
+    /// Confirm --in-place, or overwrite existing output files
+    #[arg(long)]
+    yes: bool,
+    /// Quantize in memory and report the savings, but write nothing
+    #[arg(long)]
+    dry_run: bool,
+    /// Print one JSON object with all results
+    #[arg(long)]
+    json: bool,
+}
+
+/// Arguments of `image build`, in their own struct so that clap builds them
+/// in a function of their own.
+#[derive(clap::Args)]
+struct ImageBuildCli {
+    /// The project config; its directory is the base of all paths in it
+    #[arg(
+        long,
+        value_name = "PATH",
+        default_value = ttskit_cloud::ProjectConfig::FILE_NAME
+    )]
+    config: PathBuf,
+    /// Print the plan and write nothing
+    #[arg(long)]
+    dry_run: bool,
+    /// Also delete stale outputs (needs --yes)
+    #[arg(long)]
+    prune: bool,
+    /// Confirm --prune
+    #[arg(long)]
+    yes: bool,
+    /// Print one JSON object with the plan and the results
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Subcommand)]
@@ -562,59 +606,7 @@ enum DeckCommand {
     /// without --yes, and the run is refused up front if outputs collide or
     /// overwrite an input. --dry-run builds in memory and writes nothing.
     /// Output is deterministic. Exits with status 1 on any error.
-    Build {
-        /// Card image files or directories (not scanned recursively)
-        #[arg(value_name = "CARD")]
-        cards: Vec<PathBuf>,
-        /// Text file with one card file or directory per line (after the CARD arguments)
-        #[arg(long, value_name = "FILE")]
-        list: Option<PathBuf>,
-        /// Directory for the sheets and the description (created if missing)
-        #[arg(long, value_name = "DIR")]
-        out_dir: Option<PathBuf>,
-        /// File name of the output, without extension
-        #[arg(long, value_name = "NAME", default_value = "deck")]
-        name: String,
-        /// Output format of the sheets
-        #[arg(long, value_enum, default_value = "png")]
-        to: image::Target,
-        /// JPEG quality, 1 to 100 [default: 85]
-        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u8).range(1..=100))]
-        quality: Option<u8>,
-        /// Columns of every sheet, 1 to 10 (the limit of the game)
-        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..=10))]
-        columns: Option<u32>,
-        /// Rows of every sheet, 1 to 7 (the limit of the game)
-        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..=7))]
-        rows: Option<u32>,
-        /// Size of a card in pixels, e.g. 300x420 [default: the size of the first card]
-        #[arg(long, value_name = "WxH", value_parser = image::parse_card_size)]
-        card_size: Option<(u32, u32)>,
-        /// How a card of another size is fitted: contain, cover or stretch [default: refuse]
-        #[arg(long, value_enum)]
-        fit: Option<image::FitKind>,
-        /// Image for the hidden-card slot (the last slot of every sheet)
-        #[arg(long, value_name = "FILE")]
-        hidden: Option<PathBuf>,
-        /// Use the last slot for a card too (the deck must then use a separate back image)
-        #[arg(long)]
-        no_hidden_slot: bool,
-        /// Colour of unused slots, of --fit contain bands and of flattened transparency: #RRGGBB, #RGB, white or black
-        #[arg(long, value_name = "COLOR", default_value = "808080")]
-        fill: String,
-        /// Scale the cards down so that no sheet side exceeds this many pixels
-        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
-        max_sheet_side: Option<u32>,
-        /// Overwrite existing output files
-        #[arg(long)]
-        yes: bool,
-        /// Build in memory and report the plan, but write nothing
-        #[arg(long)]
-        dry_run: bool,
-        /// Print one JSON object with all results
-        #[arg(long)]
-        json: bool,
-    },
+    Build(DeckBuildCli),
     /// Write the saved-object JSON of a deck built by `deck build`
     ///
     /// Reads DESCRIPTION, the NAME.json of `deck build`, and writes FILE, an
@@ -641,41 +633,7 @@ enum DeckCommand {
     /// content, so output is identical between runs. An existing FILE is
     /// not overwritten without --yes. --dry-run writes nothing. Exits with
     /// status 1 on any error.
-    Object {
-        /// The description file (NAME.json) written by `deck build`
-        #[arg(value_name = "DESCRIPTION")]
-        description: PathBuf,
-        /// The object file to write
-        #[arg(long, value_name = "FILE")]
-        out: Option<PathBuf>,
-        /// URL (or local path of an uploaded file) of a face sheet; once per sheet [default: look the sheets up in the manifest]
-        #[arg(long = "face-url", value_name = "URL")]
-        face_urls: Vec<String>,
-        /// URL (or local path of an uploaded file) of the card back; with --unique-backs once per sheet
-        #[arg(long = "back-url", value_name = "URL")]
-        back_urls: Vec<String>,
-        /// Every card has its own back: one back sheet per face sheet (UniqueBack)
-        #[arg(long)]
-        unique_backs: bool,
-        /// The project config for the manifest lookup [default: ttskit.toml in the current directory if it exists]
-        #[arg(long, value_name = "PATH")]
-        config: Option<PathBuf>,
-        /// JSON file with the name, description and GM notes of the deck and its cards
-        #[arg(long, value_name = "FILE")]
-        meta: Option<PathBuf>,
-        /// Name each card after its source file (without extension)
-        #[arg(long)]
-        nicknames_from_files: bool,
-        /// Overwrite an existing output file
-        #[arg(long)]
-        yes: bool,
-        /// Build the object and report it, but write nothing
-        #[arg(long)]
-        dry_run: bool,
-        /// Print one JSON object with all results
-        #[arg(long)]
-        json: bool,
-    },
+    Object(DeckObjectCli),
     /// Cut a deck sheet into single card images (the reverse of `deck build`)
     ///
     /// Writes NAME_00.png, NAME_01.png, ... into --out-dir, one per card slot
@@ -700,336 +658,470 @@ enum DeckCommand {
     /// and the run is refused up front if outputs collide or overwrite an
     /// input. --dry-run cuts in memory and writes nothing. Output is
     /// deterministic. Exits with status 1 on any error.
-    #[command(group(clap::ArgGroup::new("grid_source").required(true).multiple(false).args(["columns", "description", "save"])))]
-    Split {
-        /// The sheet image (PNG, JPEG or WebP)
-        #[arg(value_name = "SHEET")]
-        sheet: PathBuf,
-        /// Directory for the card images (created if missing)
-        #[arg(long, value_name = "DIR")]
-        out_dir: Option<PathBuf>,
-        /// Start of the output file names [default: the file name of SHEET without extension]
-        #[arg(long, value_name = "NAME")]
-        name: Option<String>,
-        /// Output format of the cards
-        #[arg(long, value_enum, default_value = "png")]
-        to: image::Target,
-        /// JPEG quality, 1 to 100 [default: 85]
-        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u8).range(1..=100))]
-        quality: Option<u8>,
-        /// Colour that transparency is flattened onto for --to jpg: #RRGGBB, #RGB, white or black
-        #[arg(long, value_name = "COLOR", default_value = "808080")]
-        fill: String,
-        /// Columns of the sheet, 1 to 10 (with --rows; the last slot is assumed to be the hidden-card slot)
-        #[arg(long, value_name = "N", requires = "rows", value_parser = clap::value_parser!(u32).range(1..=10))]
-        columns: Option<u32>,
-        /// Rows of the sheet, 1 to 7 (with --columns)
-        #[arg(long, value_name = "N", requires = "columns", value_parser = clap::value_parser!(u32).range(1..=7))]
-        rows: Option<u32>,
-        /// Description file written by `deck build`: grid, card count and hidden-card slot of SHEET
-        #[arg(long, value_name = "FILE")]
-        description: Option<PathBuf>,
-        /// Save file (JSON) with the CustomDeck entry of the sheet (needs --deck-id)
-        #[arg(long, value_name = "FILE", requires = "deck_id")]
-        save: Option<PathBuf>,
-        /// Key of the CustomDeck entry in the save, e.g. 1 (needs --save)
-        #[arg(long, value_name = "ID", requires = "save", conflicts_with_all = ["columns", "description"])]
-        deck_id: Option<String>,
-        /// Write only the first N card slots [default: all, or the card count of the description]
-        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
-        count: Option<u32>,
-        /// The last slot is a card too (overrides the description or save)
-        #[arg(long)]
-        no_hidden_slot: bool,
-        /// Do not write the hidden-card slot
-        #[arg(long, conflicts_with = "no_hidden_slot")]
-        skip_hidden: bool,
-        /// Overwrite existing output files
-        #[arg(long)]
-        yes: bool,
-        /// Cut in memory and report the plan, but write nothing
-        #[arg(long)]
-        dry_run: bool,
-        /// Print one JSON object with all results
-        #[arg(long)]
-        json: bool,
-    },
+    Split(DeckSplitCli),
+}
+
+#[derive(clap::Args)]
+struct DeckBuildCli {
+    /// Card image files or directories (not scanned recursively)
+    #[arg(value_name = "CARD")]
+    cards: Vec<PathBuf>,
+    /// Text file with one card file or directory per line (after the CARD arguments)
+    #[arg(long, value_name = "FILE")]
+    list: Option<PathBuf>,
+    /// Directory for the sheets and the description (created if missing)
+    #[arg(long, value_name = "DIR")]
+    out_dir: Option<PathBuf>,
+    /// File name of the output, without extension
+    #[arg(long, value_name = "NAME", default_value = "deck")]
+    name: String,
+    /// Output format of the sheets
+    #[arg(long, value_enum, default_value = "png")]
+    to: image::Target,
+    /// JPEG quality, 1 to 100 [default: 85]
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u8).range(1..=100))]
+    quality: Option<u8>,
+    /// Columns of every sheet, 1 to 10 (the limit of the game)
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..=10))]
+    columns: Option<u32>,
+    /// Rows of every sheet, 1 to 7 (the limit of the game)
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..=7))]
+    rows: Option<u32>,
+    /// Size of a card in pixels, e.g. 300x420 [default: the size of the first card]
+    #[arg(long, value_name = "WxH", value_parser = image::parse_card_size)]
+    card_size: Option<(u32, u32)>,
+    /// How a card of another size is fitted: contain, cover or stretch [default: refuse]
+    #[arg(long, value_enum)]
+    fit: Option<image::FitKind>,
+    /// Image for the hidden-card slot (the last slot of every sheet)
+    #[arg(long, value_name = "FILE")]
+    hidden: Option<PathBuf>,
+    /// Use the last slot for a card too (the deck must then use a separate back image)
+    #[arg(long)]
+    no_hidden_slot: bool,
+    /// Colour of unused slots, of --fit contain bands and of flattened transparency: #RRGGBB, #RGB, white or black
+    #[arg(long, value_name = "COLOR", default_value = "808080")]
+    fill: String,
+    /// Scale the cards down so that no sheet side exceeds this many pixels
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
+    max_sheet_side: Option<u32>,
+    /// Overwrite existing output files
+    #[arg(long)]
+    yes: bool,
+    /// Build in memory and report the plan, but write nothing
+    #[arg(long)]
+    dry_run: bool,
+    /// Print one JSON object with all results
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(clap::Args)]
+struct DeckObjectCli {
+    /// The description file (NAME.json) written by `deck build`
+    #[arg(value_name = "DESCRIPTION")]
+    description: PathBuf,
+    /// The object file to write
+    #[arg(long, value_name = "FILE")]
+    out: Option<PathBuf>,
+    /// URL (or local path of an uploaded file) of a face sheet; once per sheet [default: look the sheets up in the manifest]
+    #[arg(long = "face-url", value_name = "URL")]
+    face_urls: Vec<String>,
+    /// URL (or local path of an uploaded file) of the card back; with --unique-backs once per sheet
+    #[arg(long = "back-url", value_name = "URL")]
+    back_urls: Vec<String>,
+    /// Every card has its own back: one back sheet per face sheet (UniqueBack)
+    #[arg(long)]
+    unique_backs: bool,
+    /// The project config for the manifest lookup [default: ttskit.toml in the current directory if it exists]
+    #[arg(long, value_name = "PATH")]
+    config: Option<PathBuf>,
+    /// JSON file with the name, description and GM notes of the deck and its cards
+    #[arg(long, value_name = "FILE")]
+    meta: Option<PathBuf>,
+    /// Name each card after its source file (without extension)
+    #[arg(long)]
+    nicknames_from_files: bool,
+    /// Overwrite an existing output file
+    #[arg(long)]
+    yes: bool,
+    /// Build the object and report it, but write nothing
+    #[arg(long)]
+    dry_run: bool,
+    /// Print one JSON object with all results
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(clap::Args)]
+#[command(group(clap::ArgGroup::new("grid_source").required(true).multiple(false).args(["columns", "description", "save"])))]
+struct DeckSplitCli {
+    /// The sheet image (PNG, JPEG or WebP)
+    #[arg(value_name = "SHEET")]
+    sheet: PathBuf,
+    /// Directory for the card images (created if missing)
+    #[arg(long, value_name = "DIR")]
+    out_dir: Option<PathBuf>,
+    /// Start of the output file names [default: the file name of SHEET without extension]
+    #[arg(long, value_name = "NAME")]
+    name: Option<String>,
+    /// Output format of the cards
+    #[arg(long, value_enum, default_value = "png")]
+    to: image::Target,
+    /// JPEG quality, 1 to 100 [default: 85]
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u8).range(1..=100))]
+    quality: Option<u8>,
+    /// Colour that transparency is flattened onto for --to jpg: #RRGGBB, #RGB, white or black
+    #[arg(long, value_name = "COLOR", default_value = "808080")]
+    fill: String,
+    /// Columns of the sheet, 1 to 10 (with --rows; the last slot is assumed to be the hidden-card slot)
+    #[arg(long, value_name = "N", requires = "rows", value_parser = clap::value_parser!(u32).range(1..=10))]
+    columns: Option<u32>,
+    /// Rows of the sheet, 1 to 7 (with --columns)
+    #[arg(long, value_name = "N", requires = "columns", value_parser = clap::value_parser!(u32).range(1..=7))]
+    rows: Option<u32>,
+    /// Description file written by `deck build`: grid, card count and hidden-card slot of SHEET
+    #[arg(long, value_name = "FILE")]
+    description: Option<PathBuf>,
+    /// Save file (JSON) with the CustomDeck entry of the sheet (needs --deck-id)
+    #[arg(long, value_name = "FILE", requires = "deck_id")]
+    save: Option<PathBuf>,
+    /// Key of the CustomDeck entry in the save, e.g. 1 (needs --save)
+    #[arg(long, value_name = "ID", requires = "save", conflicts_with_all = ["columns", "description"])]
+    deck_id: Option<String>,
+    /// Write only the first N card slots [default: all, or the card count of the description]
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
+    count: Option<u32>,
+    /// The last slot is a card too (overrides the description or save)
+    #[arg(long)]
+    no_hidden_slot: bool,
+    /// Do not write the hidden-card slot
+    #[arg(long, conflicts_with = "no_hidden_slot")]
+    skip_hidden: bool,
+    /// Overwrite existing output files
+    #[arg(long)]
+    yes: bool,
+    /// Cut in memory and report the plan, but write nothing
+    #[arg(long)]
+    dry_run: bool,
+    /// Print one JSON object with all results
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Subcommand)]
 enum SaveCommand {
     /// Unpack a save file into a directory of scripts, UI, state and objects
-    Unpack {
-        /// The save file (JSON)
-        save: PathBuf,
-        /// The output directory. It must be missing or empty unless --force is given;
-        /// the path is never searched or guessed
-        #[arg(short, long, value_name = "DIR")]
-        output: PathBuf,
-        /// Write into a non-empty directory: files unpack creates are overwritten,
-        /// all other files are left alone [alias: --yes]
-        #[arg(long, visible_alias = "yes")]
-        force: bool,
-        /// With --force: also delete files a previous unpack created (listed in
-        /// .ttskit/unpack.json) that this unpack no longer creates; never deletes
-        /// anything else
-        #[arg(long, requires = "force")]
-        clean: bool,
-        /// Print the files that would be created, changed or removed and write nothing
-        #[arg(long)]
-        dry_run: bool,
-        /// Print machine-readable JSON instead of text
-        #[arg(long)]
-        json: bool,
-    },
+    Unpack(SaveUnpackCli),
     /// Pack an unpacked directory back into a save file
-    Pack {
-        /// The directory written by `save unpack`
-        dir: PathBuf,
-        /// The save file to write; it must not exist yet unless --force is given
-        #[arg(short, long, value_name = "FILE")]
-        output: PathBuf,
-        /// Overwrite an existing output file [alias: --yes]
-        #[arg(long, visible_alias = "yes")]
-        force: bool,
-        /// Print whether the output file would be created or changed and write nothing
-        #[arg(long)]
-        dry_run: bool,
-        /// Keep the line endings recorded at unpack (default: LF everywhere)
-        #[arg(long)]
-        keep_eol: bool,
-        /// Inline `require("Name")` (Name.lua, Name.ttslua) and `<Include src="Name"/>`
-        /// (Name.xml) from this directory; repeatable, searched in order
-        #[arg(long, value_name = "LIB_DIR")]
-        include: Vec<PathBuf>,
-        /// Print machine-readable JSON instead of text
-        #[arg(long)]
-        json: bool,
-    },
+    Pack(SavePackCli),
+}
+
+#[derive(clap::Args)]
+struct SaveUnpackCli {
+    /// The save file (JSON)
+    save: PathBuf,
+    /// The output directory. It must be missing or empty unless --force is given;
+    /// the path is never searched or guessed
+    #[arg(short, long, value_name = "DIR")]
+    output: PathBuf,
+    /// Write into a non-empty directory: files unpack creates are overwritten,
+    /// all other files are left alone [alias: --yes]
+    #[arg(long, visible_alias = "yes")]
+    force: bool,
+    /// With --force: also delete files a previous unpack created (listed in
+    /// .ttskit/unpack.json) that this unpack no longer creates; never deletes
+    /// anything else
+    #[arg(long, requires = "force")]
+    clean: bool,
+    /// Print the files that would be created, changed or removed and write nothing
+    #[arg(long)]
+    dry_run: bool,
+    /// Print machine-readable JSON instead of text
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(clap::Args)]
+struct SavePackCli {
+    /// The directory written by `save unpack`
+    dir: PathBuf,
+    /// The save file to write; it must not exist yet unless --force is given
+    #[arg(short, long, value_name = "FILE")]
+    output: PathBuf,
+    /// Overwrite an existing output file [alias: --yes]
+    #[arg(long, visible_alias = "yes")]
+    force: bool,
+    /// Print whether the output file would be created or changed and write nothing
+    #[arg(long)]
+    dry_run: bool,
+    /// Keep the line endings recorded at unpack (default: LF everywhere)
+    #[arg(long)]
+    keep_eol: bool,
+    /// Inline `require("Name")` (Name.lua, Name.ttslua) and `<Include src="Name"/>`
+    /// (Name.xml) from this directory; repeatable, searched in order
+    #[arg(long, value_name = "LIB_DIR")]
+    include: Vec<PathBuf>,
+    /// Print machine-readable JSON instead of text
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Subcommand)]
 enum CloudCommand {
     /// List the folders and files in the Steam Cloud (read-only)
-    List {
-        /// Only show this folder and its subfolders (separator `/`)
-        #[arg(long, value_name = "FOLDER")]
-        folder: Option<String>,
-        /// Print machine-readable JSON instead of a tree
-        #[arg(long)]
-        json: bool,
-    },
+    List(CloudListCli),
     /// Restore the cloud index from a local backup (dry run unless --yes)
-    Restore {
-        /// Backup to restore; omit to list the backups
-        backup: Option<String>,
-        /// Restore for real; without it only the plan is printed
-        #[arg(long)]
-        yes: bool,
-        /// Directory holding the backups [default: <local app data>/ttskit/cloud-backups]
-        #[arg(long, env = "TTSKIT_BACKUP_DIR", value_name = "DIR")]
-        backup_dir: Option<PathBuf>,
-    },
+    Restore(CloudRestoreCli),
     /// Upload a file to the Steam Cloud, share it and print its URL
-    Upload {
-        /// The local file to upload
-        file: PathBuf,
-        /// Target cloud folder (separator `/`); default is the root
-        #[arg(long, value_name = "FOLDER")]
-        folder: Option<String>,
-        /// Name in the cloud; default is the file name
-        #[arg(long, value_name = "NAME")]
-        name: Option<String>,
-        /// Only print the plan
-        #[arg(long, conflicts_with = "yes")]
-        dry_run: bool,
-        /// Do not ask for confirmation
-        #[arg(long)]
-        yes: bool,
-        /// Print machine-readable JSON instead of text
-        #[arg(long)]
-        json: bool,
-        /// The project config; its directory gets the manifest. Default: ttskit.toml in the current directory if it exists
-        #[arg(long, value_name = "PATH")]
-        config: Option<PathBuf>,
-        /// Directory for the index backups [default: <local app data>/ttskit/cloud-backups]
-        #[arg(long, env = "TTSKIT_BACKUP_DIR", value_name = "DIR")]
-        backup_dir: Option<PathBuf>,
-    },
+    Upload(CloudUploadCli),
     /// Delete a file or folder from the Steam Cloud (dry run unless --yes)
-    #[command(group(clap::ArgGroup::new("what").required(true).args(["name", "folder"])))]
-    Delete {
-        /// Folder path and name (`Decks/back.png`), display name, or cloud name
-        name: Option<String>,
-        /// Delete this folder with all its files and subfolders (separator `/`)
-        #[arg(long, value_name = "FOLDER")]
-        folder: Option<String>,
-        /// Delete for real; without it only the plan is printed
-        #[arg(long)]
-        yes: bool,
-        /// Print machine-readable JSON instead of text
-        #[arg(long)]
-        json: bool,
-        /// Directory for the index backups [default: <local app data>/ttskit/cloud-backups]
-        #[arg(long, env = "TTSKIT_BACKUP_DIR", value_name = "DIR")]
-        backup_dir: Option<PathBuf>,
-    },
+    Delete(CloudDeleteCli),
     /// Compare a local directory with a cloud folder (read-only)
-    Status {
-        /// The local directory; its subdirectories map to cloud subfolders
-        dir: PathBuf,
-        /// Cloud folder to compare with (separator `/`); default is the root
-        #[arg(long, value_name = "FOLDER")]
-        folder: Option<String>,
-        /// Print machine-readable JSON instead of text
-        #[arg(long)]
-        json: bool,
-        /// The project config; its [local] ignore patterns apply, relative to DIR. Default: ttskit.toml in the current directory if it exists
-        #[arg(long, value_name = "PATH")]
-        config: Option<PathBuf>,
-    },
+    Status(CloudStatusCli),
     /// Make a cloud folder match a local directory (unofficial)
     Sync {
         #[command(subcommand)]
         command: SyncCommand,
     },
     /// Print the project manifest (local only, no Steam needed)
-    Manifest {
-        /// Print the `filename<TAB>URL` list instead of JSON
-        #[arg(long, conflicts_with = "json")]
-        tsv: bool,
-        /// Print the manifest file content (the default)
-        #[arg(long)]
-        json: bool,
-        /// The project config; its directory holds the manifest
-        #[arg(
-            long,
-            value_name = "PATH",
-            default_value = ttskit_cloud::ProjectConfig::FILE_NAME
-        )]
-        config: PathBuf,
-    },
+    Manifest(CloudManifestCli),
     /// Add a `filename<TAB>URL` list of already shared files to the manifest
-    ImportTsv {
-        /// The text file with one `filename<TAB>URL` per line
-        file: PathBuf,
-        /// The project config; its directory holds the manifest
-        #[arg(
-            long,
-            value_name = "PATH",
-            default_value = ttskit_cloud::ProjectConfig::FILE_NAME
-        )]
-        config: PathBuf,
-        /// Only print the plan
-        #[arg(long, conflicts_with = "yes")]
-        dry_run: bool,
-        /// Do not ask for confirmation
-        #[arg(long)]
-        yes: bool,
-        /// Print machine-readable JSON instead of text
-        #[arg(long)]
-        json: bool,
-    },
+    ImportTsv(CloudImportTsvCli),
     /// List the asset URLs of a save file, grouped by host (local only, no Steam needed)
-    Scan {
-        /// The save file (JSON)
-        save: PathBuf,
-        /// Also add the files of your own Steam Cloud that the save uses to the manifest
-        #[arg(long)]
-        adopt: bool,
-        /// The project config; its directory holds the manifest
-        #[arg(
-            long,
-            value_name = "PATH",
-            default_value = ttskit_cloud::ProjectConfig::FILE_NAME,
-            requires = "adopt"
-        )]
-        config: PathBuf,
-        /// Only print the plan
-        #[arg(long, requires = "adopt", conflicts_with = "yes")]
-        dry_run: bool,
-        /// Do not ask for confirmation
-        #[arg(long, requires = "adopt")]
-        yes: bool,
-        /// Print machine-readable JSON instead of text
-        #[arg(long)]
-        json: bool,
-        /// In text output, list the path, nickname and GUID of every occurrence
-        /// (JSON always includes them)
-        #[arg(long)]
-        occurrences: bool,
-    },
+    Scan(CloudScanCli),
     /// Print the download URL of a cloud file
-    Url {
-        /// Folder path and name (`Decks/back.png`), display name, or cloud name
-        name: String,
-        /// Share the file first if it has no URL yet
-        #[arg(long)]
-        share: bool,
-        /// Only print the plan
-        #[arg(long, conflicts_with = "yes")]
-        dry_run: bool,
-        /// Do not ask for confirmation
-        #[arg(long)]
-        yes: bool,
-        /// Print machine-readable JSON instead of text
-        #[arg(long)]
-        json: bool,
-        /// Directory for the index backups [default: <local app data>/ttskit/cloud-backups]
-        #[arg(long, env = "TTSKIT_BACKUP_DIR", value_name = "DIR")]
-        backup_dir: Option<PathBuf>,
-    },
+    Url(CloudUrlCli),
+}
+
+#[derive(clap::Args)]
+struct CloudListCli {
+    /// Only show this folder and its subfolders (separator `/`)
+    #[arg(long, value_name = "FOLDER")]
+    folder: Option<String>,
+    /// Print machine-readable JSON instead of a tree
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(clap::Args)]
+struct CloudRestoreCli {
+    /// Backup to restore; omit to list the backups
+    backup: Option<String>,
+    /// Restore for real; without it only the plan is printed
+    #[arg(long)]
+    yes: bool,
+    /// Directory holding the backups [default: <local app data>/ttskit/cloud-backups]
+    #[arg(long, env = "TTSKIT_BACKUP_DIR", value_name = "DIR")]
+    backup_dir: Option<PathBuf>,
+}
+
+#[derive(clap::Args)]
+struct CloudUploadCli {
+    /// The local file to upload
+    file: PathBuf,
+    /// Target cloud folder (separator `/`); default is the root
+    #[arg(long, value_name = "FOLDER")]
+    folder: Option<String>,
+    /// Name in the cloud; default is the file name
+    #[arg(long, value_name = "NAME")]
+    name: Option<String>,
+    /// Only print the plan
+    #[arg(long, conflicts_with = "yes")]
+    dry_run: bool,
+    /// Do not ask for confirmation
+    #[arg(long)]
+    yes: bool,
+    /// Print machine-readable JSON instead of text
+    #[arg(long)]
+    json: bool,
+    /// The project config; its directory gets the manifest. Default: ttskit.toml in the current directory if it exists
+    #[arg(long, value_name = "PATH")]
+    config: Option<PathBuf>,
+    /// Directory for the index backups [default: <local app data>/ttskit/cloud-backups]
+    #[arg(long, env = "TTSKIT_BACKUP_DIR", value_name = "DIR")]
+    backup_dir: Option<PathBuf>,
+}
+
+#[derive(clap::Args)]
+#[command(group(clap::ArgGroup::new("what").required(true).args(["name", "folder"])))]
+struct CloudDeleteCli {
+    /// Folder path and name (`Decks/back.png`), display name, or cloud name
+    name: Option<String>,
+    /// Delete this folder with all its files and subfolders (separator `/`)
+    #[arg(long, value_name = "FOLDER")]
+    folder: Option<String>,
+    /// Delete for real; without it only the plan is printed
+    #[arg(long)]
+    yes: bool,
+    /// Print machine-readable JSON instead of text
+    #[arg(long)]
+    json: bool,
+    /// Directory for the index backups [default: <local app data>/ttskit/cloud-backups]
+    #[arg(long, env = "TTSKIT_BACKUP_DIR", value_name = "DIR")]
+    backup_dir: Option<PathBuf>,
+}
+
+#[derive(clap::Args)]
+struct CloudStatusCli {
+    /// The local directory; its subdirectories map to cloud subfolders
+    dir: PathBuf,
+    /// Cloud folder to compare with (separator `/`); default is the root
+    #[arg(long, value_name = "FOLDER")]
+    folder: Option<String>,
+    /// Print machine-readable JSON instead of text
+    #[arg(long)]
+    json: bool,
+    /// The project config; its [local] ignore patterns apply, relative to DIR. Default: ttskit.toml in the current directory if it exists
+    #[arg(long, value_name = "PATH")]
+    config: Option<PathBuf>,
+}
+
+#[derive(clap::Args)]
+struct CloudManifestCli {
+    /// Print the `filename<TAB>URL` list instead of JSON
+    #[arg(long, conflicts_with = "json")]
+    tsv: bool,
+    /// Print the manifest file content (the default)
+    #[arg(long)]
+    json: bool,
+    /// The project config; its directory holds the manifest
+    #[arg(
+        long,
+        value_name = "PATH",
+        default_value = ttskit_cloud::ProjectConfig::FILE_NAME
+    )]
+    config: PathBuf,
+}
+
+#[derive(clap::Args)]
+struct CloudImportTsvCli {
+    /// The text file with one `filename<TAB>URL` per line
+    file: PathBuf,
+    /// The project config; its directory holds the manifest
+    #[arg(
+        long,
+        value_name = "PATH",
+        default_value = ttskit_cloud::ProjectConfig::FILE_NAME
+    )]
+    config: PathBuf,
+    /// Only print the plan
+    #[arg(long, conflicts_with = "yes")]
+    dry_run: bool,
+    /// Do not ask for confirmation
+    #[arg(long)]
+    yes: bool,
+    /// Print machine-readable JSON instead of text
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(clap::Args)]
+struct CloudScanCli {
+    /// The save file (JSON)
+    save: PathBuf,
+    /// Also add the files of your own Steam Cloud that the save uses to the manifest
+    #[arg(long)]
+    adopt: bool,
+    /// The project config; its directory holds the manifest
+    #[arg(
+        long,
+        value_name = "PATH",
+        default_value = ttskit_cloud::ProjectConfig::FILE_NAME,
+        requires = "adopt"
+    )]
+    config: PathBuf,
+    /// Only print the plan
+    #[arg(long, requires = "adopt", conflicts_with = "yes")]
+    dry_run: bool,
+    /// Do not ask for confirmation
+    #[arg(long, requires = "adopt")]
+    yes: bool,
+    /// Print machine-readable JSON instead of text
+    #[arg(long)]
+    json: bool,
+    /// In text output, list the path, nickname and GUID of every occurrence
+    /// (JSON always includes them)
+    #[arg(long)]
+    occurrences: bool,
+}
+
+#[derive(clap::Args)]
+struct CloudUrlCli {
+    /// Folder path and name (`Decks/back.png`), display name, or cloud name
+    name: String,
+    /// Share the file first if it has no URL yet
+    #[arg(long)]
+    share: bool,
+    /// Only print the plan
+    #[arg(long, conflicts_with = "yes")]
+    dry_run: bool,
+    /// Do not ask for confirmation
+    #[arg(long)]
+    yes: bool,
+    /// Print machine-readable JSON instead of text
+    #[arg(long)]
+    json: bool,
+    /// Directory for the index backups [default: <local app data>/ttskit/cloud-backups]
+    #[arg(long, env = "TTSKIT_BACKUP_DIR", value_name = "DIR")]
+    backup_dir: Option<PathBuf>,
 }
 
 #[derive(Subcommand)]
 enum SyncCommand {
     /// Upload the local directory to the cloud folder named in the project config
-    Push {
-        /// The project config
-        #[arg(
-            long,
-            value_name = "PATH",
-            default_value = ttskit_cloud::ProjectConfig::FILE_NAME
-        )]
-        config: PathBuf,
-        /// Also replace changed files and delete cloud files that are not local (files matching [local] ignore are left alone)
-        #[arg(long)]
-        prune: bool,
-        /// Only print the plan
-        #[arg(long, conflicts_with = "yes")]
-        dry_run: bool,
-        /// Do not ask for confirmation
-        #[arg(long)]
-        yes: bool,
-        /// Print machine-readable JSON instead of text
-        #[arg(long)]
-        json: bool,
-        /// Directory for the index backups [default: <local app data>/ttskit/cloud-backups]
-        #[arg(long, env = "TTSKIT_BACKUP_DIR", value_name = "DIR")]
-        backup_dir: Option<PathBuf>,
-    },
+    Push(SyncPushCli),
     /// Download the cloud folder named in the project config into the local directory
-    Pull {
-        /// The project config
-        #[arg(
-            long,
-            value_name = "PATH",
-            default_value = ttskit_cloud::ProjectConfig::FILE_NAME
-        )]
-        config: PathBuf,
-        /// Also move local files that are not in the cloud folder to the recycle bin (files matching [local] ignore are left alone)
-        #[arg(long)]
-        prune: bool,
-        /// Only print the plan
-        #[arg(long, conflicts_with = "yes")]
-        dry_run: bool,
-        /// Do not ask for confirmation
-        #[arg(long)]
-        yes: bool,
-        /// Print machine-readable JSON instead of text
-        #[arg(long)]
-        json: bool,
-    },
+    Pull(SyncPullCli),
+}
+
+#[derive(clap::Args)]
+struct SyncPushCli {
+    /// The project config
+    #[arg(
+        long,
+        value_name = "PATH",
+        default_value = ttskit_cloud::ProjectConfig::FILE_NAME
+    )]
+    config: PathBuf,
+    /// Also replace changed files and delete cloud files that are not local (files matching [local] ignore are left alone)
+    #[arg(long)]
+    prune: bool,
+    /// Only print the plan
+    #[arg(long, conflicts_with = "yes")]
+    dry_run: bool,
+    /// Do not ask for confirmation
+    #[arg(long)]
+    yes: bool,
+    /// Print machine-readable JSON instead of text
+    #[arg(long)]
+    json: bool,
+    /// Directory for the index backups [default: <local app data>/ttskit/cloud-backups]
+    #[arg(long, env = "TTSKIT_BACKUP_DIR", value_name = "DIR")]
+    backup_dir: Option<PathBuf>,
+}
+
+#[derive(clap::Args)]
+struct SyncPullCli {
+    /// The project config
+    #[arg(
+        long,
+        value_name = "PATH",
+        default_value = ttskit_cloud::ProjectConfig::FILE_NAME
+    )]
+    config: PathBuf,
+    /// Also move local files that are not in the cloud folder to the recycle bin (files matching [local] ignore are left alone)
+    #[arg(long)]
+    prune: bool,
+    /// Only print the plan
+    #[arg(long, conflicts_with = "yes")]
+    dry_run: bool,
+    /// Do not ask for confirmation
+    #[arg(long)]
+    yes: bool,
+    /// Print machine-readable JSON instead of text
+    #[arg(long)]
+    json: bool,
 }
 
 /// Asks on the terminal; the prompt goes to stderr so that stdout stays clean.
@@ -1071,12 +1163,12 @@ fn config_dir_of(config: &Path) -> &Path {
 
 fn run_simple(command: Command) -> Result<(), CliError> {
     match command {
-        Command::Mcp {
+        Command::Mcp(McpCli {
             root,
             console_buffer,
             ports,
-        } => mcp::run(root.as_deref(), ports.endpoints(), console_buffer as usize),
-        Command::Watch {
+        }) => mcp::run(root.as_deref(), ports.endpoints(), console_buffer as usize),
+        Command::Watch(WatchCli {
             dir,
             include,
             once,
@@ -1084,7 +1176,7 @@ fn run_simple(command: Command) -> Result<(), CliError> {
             debounce_ms,
             quiet,
             ports,
-        } => {
+        }) => {
             let options = watch::WatchOptions {
                 dir,
                 includes: include,
@@ -1100,7 +1192,7 @@ fn run_simple(command: Command) -> Result<(), CliError> {
             out.flush().map_err(|e| e.to_string().into())
         }
         Command::Editor {
-            command: EditorCommand::GetScripts { json, ports },
+            command: EditorCommand::GetScripts(EditorGetScriptsCli { json, ports }),
         } => {
             let mut out = std::io::stdout().lock();
             editor::get_scripts(ports.endpoints(), json, &mut out)?;
@@ -1108,7 +1200,7 @@ fn run_simple(command: Command) -> Result<(), CliError> {
         }
         Command::Editor {
             command:
-                EditorCommand::SaveAndPlay {
+                EditorCommand::SaveAndPlay(EditorSaveAndPlayCli {
                     dir,
                     include,
                     dry_run,
@@ -1116,7 +1208,7 @@ fn run_simple(command: Command) -> Result<(), CliError> {
                     allow_delete,
                     json,
                     ports,
-                },
+                }),
         } => {
             // Read and pack the tree before touching the game.
             let desired = editor::desired_from_tree(&dir, include)?;
@@ -1132,13 +1224,13 @@ fn run_simple(command: Command) -> Result<(), CliError> {
         }
         Command::Editor {
             command:
-                EditorCommand::Exec {
+                EditorCommand::Exec(EditorExecCli {
                     code,
                     guid,
                     quiet,
                     json,
                     ports,
-                },
+                }),
         } => {
             let mut out = std::io::stdout().lock();
             let wait = std::time::Duration::from_millis(quiet.quiet_ms);
@@ -1147,12 +1239,12 @@ fn run_simple(command: Command) -> Result<(), CliError> {
         }
         Command::Editor {
             command:
-                EditorCommand::Console {
+                EditorCommand::Console(EditorConsoleCli {
                     follow,
                     json,
                     quiet,
                     ports,
-                },
+                }),
         } => {
             let mode = if follow {
                 editor::ConsoleMode::Follow
@@ -1167,11 +1259,11 @@ fn run_simple(command: Command) -> Result<(), CliError> {
         }
         Command::Editor {
             command:
-                EditorCommand::Send {
+                EditorCommand::Send(EditorSendCli {
                     message,
                     json,
                     ports,
-                },
+                }),
         } => {
             let mut out = std::io::stdout().lock();
             editor::send_message(&message, json, ports.endpoints(), &mut out)?;
@@ -1179,14 +1271,14 @@ fn run_simple(command: Command) -> Result<(), CliError> {
         }
         Command::Save {
             command:
-                SaveCommand::Unpack {
+                SaveCommand::Unpack(SaveUnpackCli {
                     save,
                     output,
                     force,
                     clean,
                     dry_run,
                     json,
-                },
+                }),
         } => {
             let mut out = std::io::stdout().lock();
             let safety = save::Safety {
@@ -1199,7 +1291,7 @@ fn run_simple(command: Command) -> Result<(), CliError> {
         }
         Command::Save {
             command:
-                SaveCommand::Pack {
+                SaveCommand::Pack(SavePackCli {
                     dir,
                     output,
                     force,
@@ -1207,7 +1299,7 @@ fn run_simple(command: Command) -> Result<(), CliError> {
                     keep_eol,
                     include,
                     json,
-                },
+                }),
         } => {
             let mut out = std::io::stdout().lock();
             let mut err = std::io::stderr().lock();
@@ -1224,7 +1316,7 @@ fn run_simple(command: Command) -> Result<(), CliError> {
             out.flush().map_err(|e| e.to_string().into())
         }
         Command::Cloud {
-            command: CloudCommand::List { folder, json },
+            command: CloudCommand::List(CloudListCli { folder, json }),
         } => {
             let backend = connect()?;
             let mut out = std::io::stdout().lock();
@@ -1234,11 +1326,11 @@ fn run_simple(command: Command) -> Result<(), CliError> {
         }
         Command::Cloud {
             command:
-                CloudCommand::Restore {
+                CloudCommand::Restore(CloudRestoreCli {
                     backup,
                     yes,
                     backup_dir,
-                },
+                }),
         } => {
             let dir = cloud::backup_dir(backup_dir).map_err(|e| e.to_string())?;
             let store = BackupStore::new(dir);
@@ -1264,7 +1356,7 @@ fn run_simple(command: Command) -> Result<(), CliError> {
         }
         Command::Cloud {
             command:
-                CloudCommand::Upload {
+                CloudCommand::Upload(CloudUploadCli {
                     file,
                     folder,
                     name,
@@ -1273,7 +1365,7 @@ fn run_simple(command: Command) -> Result<(), CliError> {
                     json,
                     config,
                     backup_dir,
-                },
+                }),
         } => {
             // Check everything local before connecting to Steam.
             let (name, data) =
@@ -1322,13 +1414,13 @@ fn run_simple(command: Command) -> Result<(), CliError> {
         }
         Command::Cloud {
             command:
-                CloudCommand::Delete {
+                CloudCommand::Delete(CloudDeleteCli {
                     name,
                     folder,
                     yes,
                     json,
                     backup_dir,
-                },
+                }),
         } => {
             let store = BackupStore::new(cloud::backup_dir(backup_dir).map_err(|e| e.to_string())?);
             let target = match (&name, &folder) {
@@ -1352,14 +1444,14 @@ fn run_simple(command: Command) -> Result<(), CliError> {
         }
         Command::Cloud {
             command:
-                CloudCommand::Url {
+                CloudCommand::Url(CloudUrlCli {
                     name,
                     share,
                     dry_run,
                     yes,
                     json,
                     backup_dir,
-                },
+                }),
         } => {
             let store = BackupStore::new(cloud::backup_dir(backup_dir).map_err(|e| e.to_string())?);
             let mut backend = connect()?;
@@ -1384,14 +1476,14 @@ fn run_simple(command: Command) -> Result<(), CliError> {
             command:
                 CloudCommand::Sync {
                     command:
-                        SyncCommand::Push {
+                        SyncCommand::Push(SyncPushCli {
                             config,
                             prune,
                             dry_run,
                             yes,
                             json,
                             backup_dir,
-                        },
+                        }),
                 },
         } => {
             // Do all the local work before connecting to Steam.
@@ -1428,13 +1520,13 @@ fn run_simple(command: Command) -> Result<(), CliError> {
             command:
                 CloudCommand::Sync {
                     command:
-                        SyncCommand::Pull {
+                        SyncCommand::Pull(SyncPullCli {
                             config,
                             prune,
                             dry_run,
                             yes,
                             json,
-                        },
+                        }),
                 },
         } => {
             // Do all the local work before connecting to Steam.
@@ -1471,11 +1563,11 @@ fn run_simple(command: Command) -> Result<(), CliError> {
         }
         Command::Cloud {
             command:
-                CloudCommand::Manifest {
+                CloudCommand::Manifest(CloudManifestCli {
                     tsv,
                     json: _,
                     config,
-                },
+                }),
         } => {
             ttskit_cloud::ProjectConfig::load(&config).map_err(|e| e.to_string())?;
             let file = config_dir_of(&config).join(ttskit_cloud::Manifest::FILE_NAME);
@@ -1490,13 +1582,13 @@ fn run_simple(command: Command) -> Result<(), CliError> {
         }
         Command::Cloud {
             command:
-                CloudCommand::ImportTsv {
+                CloudCommand::ImportTsv(CloudImportTsvCli {
                     file,
                     config,
                     dry_run,
                     yes,
                     json,
-                },
+                }),
         } => {
             // Do all the local work before connecting to Steam.
             let text = cloud::read_tsv_file(&file).map_err(|e| e.to_string())?;
@@ -1517,7 +1609,7 @@ fn run_simple(command: Command) -> Result<(), CliError> {
         }
         Command::Cloud {
             command:
-                CloudCommand::Scan {
+                CloudCommand::Scan(CloudScanCli {
                     save,
                     adopt,
                     config,
@@ -1525,7 +1617,7 @@ fn run_simple(command: Command) -> Result<(), CliError> {
                     yes,
                     json,
                     occurrences,
-                },
+                }),
         } => {
             if !adopt {
                 let mut out = std::io::stdout().lock();
@@ -1554,7 +1646,7 @@ fn run_simple(command: Command) -> Result<(), CliError> {
             out.flush().map_err(|e| e.to_string().into())
         }
         Command::Cloud {
-            command: CloudCommand::Status { .. },
+            command: CloudCommand::Status(CloudStatusCli { .. }),
         }
         | Command::Image { .. } => unreachable!("handled by run"),
     }
@@ -1577,12 +1669,12 @@ fn run(cli: Cli) -> Result<ExitCode, CliError> {
     match cli.command {
         Command::Cloud {
             command:
-                CloudCommand::Status {
+                CloudCommand::Status(CloudStatusCli {
                     dir,
                     folder,
                     json,
                     config,
-                },
+                }),
         } => {
             // Scan the local side before connecting to Steam.
             let config = match config {
@@ -1617,7 +1709,7 @@ fn run(cli: Cli) -> Result<ExitCode, CliError> {
             Ok(status_exit_code(in_sync))
         }
         Command::Image {
-            command: ImageCommand::Info { inputs, json },
+            command: ImageCommand::Info(ImageInfoCli { inputs, json }),
         } => {
             let mut out = std::io::stdout().lock();
             let ok = image::info(&inputs, json, &mut out)?;
@@ -1630,12 +1722,12 @@ fn run(cli: Cli) -> Result<ExitCode, CliError> {
         }
         Command::Image {
             command:
-                ImageCommand::Check {
+                ImageCommand::Check(ImageCheckCli {
                     inputs,
                     max_side,
                     max_bytes,
                     json,
-                },
+                }),
         } => {
             let mut stdout = std::io::stdout().lock();
             let status = image::check(
@@ -1656,7 +1748,7 @@ fn run(cli: Cli) -> Result<ExitCode, CliError> {
         }
         Command::Image {
             command:
-                ImageCommand::Convert {
+                ImageCommand::Convert(ImageConvertCli {
                     inputs,
                     to,
                     quality,
@@ -1667,7 +1759,7 @@ fn run(cli: Cli) -> Result<ExitCode, CliError> {
                     yes,
                     dry_run,
                     json,
-                },
+                }),
         } => {
             let mut stdout = std::io::stdout().lock();
             let ok = image::convert(
@@ -1694,7 +1786,7 @@ fn run(cli: Cli) -> Result<ExitCode, CliError> {
         }
         Command::Image {
             command:
-                ImageCommand::Optimize {
+                ImageCommand::Optimize(ImageOptimizeCli {
                     inputs,
                     level,
                     strip,
@@ -1704,7 +1796,7 @@ fn run(cli: Cli) -> Result<ExitCode, CliError> {
                     yes,
                     dry_run,
                     json,
-                },
+                }),
         } => {
             let mut stdout = std::io::stdout().lock();
             let ok = image::optimize(
@@ -1730,7 +1822,7 @@ fn run(cli: Cli) -> Result<ExitCode, CliError> {
         }
         Command::Image {
             command:
-                ImageCommand::Resize {
+                ImageCommand::Resize(ImageResizeCli {
                     inputs,
                     max_side,
                     width,
@@ -1745,7 +1837,7 @@ fn run(cli: Cli) -> Result<ExitCode, CliError> {
                     yes,
                     dry_run,
                     json,
-                },
+                }),
         } => {
             let mut stdout = std::io::stdout().lock();
             let ok = image::resize(
@@ -1776,7 +1868,7 @@ fn run(cli: Cli) -> Result<ExitCode, CliError> {
         }
         Command::Image {
             command:
-                ImageCommand::Quantize {
+                ImageCommand::Quantize(ImageQuantizeCli {
                     inputs,
                     colors,
                     quality,
@@ -1791,7 +1883,7 @@ fn run(cli: Cli) -> Result<ExitCode, CliError> {
                     yes,
                     dry_run,
                     json,
-                },
+                }),
         } => {
             let mut stdout = std::io::stdout().lock();
             let ok = image::quantize(
@@ -1824,7 +1916,7 @@ fn run(cli: Cli) -> Result<ExitCode, CliError> {
             command:
                 ImageCommand::Deck {
                     command:
-                        DeckCommand::Build {
+                        DeckCommand::Build(DeckBuildCli {
                             cards,
                             list,
                             out_dir,
@@ -1842,7 +1934,7 @@ fn run(cli: Cli) -> Result<ExitCode, CliError> {
                             yes,
                             dry_run,
                             json,
-                        },
+                        }),
                 },
         } => {
             let mut stdout = std::io::stdout().lock();
@@ -1879,7 +1971,7 @@ fn run(cli: Cli) -> Result<ExitCode, CliError> {
             command:
                 ImageCommand::Deck {
                     command:
-                        DeckCommand::Split {
+                        DeckCommand::Split(DeckSplitCli {
                             sheet,
                             out_dir,
                             name,
@@ -1897,7 +1989,7 @@ fn run(cli: Cli) -> Result<ExitCode, CliError> {
                             yes,
                             dry_run,
                             json,
-                        },
+                        }),
                 },
         } => {
             let mut stdout = std::io::stdout().lock();
@@ -1934,7 +2026,7 @@ fn run(cli: Cli) -> Result<ExitCode, CliError> {
             command:
                 ImageCommand::Deck {
                     command:
-                        DeckCommand::Object {
+                        DeckCommand::Object(DeckObjectCli {
                             description,
                             out,
                             face_urls,
@@ -1946,7 +2038,7 @@ fn run(cli: Cli) -> Result<ExitCode, CliError> {
                             yes,
                             dry_run,
                             json,
-                        },
+                        }),
                 },
         } => {
             let mut stdout = std::io::stdout().lock();
@@ -1975,13 +2067,13 @@ fn run(cli: Cli) -> Result<ExitCode, CliError> {
         }
         Command::Image {
             command:
-                ImageCommand::Build {
+                ImageCommand::Build(ImageBuildCli {
                     config,
                     dry_run,
                     prune,
                     yes,
                     json,
-                },
+                }),
         } => run_image_build(image::BuildArgs {
             config,
             dry_run,
@@ -2047,7 +2139,7 @@ mod tests {
         let cli = Cli::try_parse_from(["ttskit", "cloud", "scan", "s.json", "--json"]).unwrap();
         let Command::Cloud {
             command:
-                CloudCommand::Scan {
+                CloudCommand::Scan(CloudScanCli {
                     save,
                     adopt,
                     config,
@@ -2055,7 +2147,7 @@ mod tests {
                     yes,
                     json,
                     occurrences: _,
-                },
+                }),
         } = cli.command
         else {
             panic!("expected scan");
@@ -2078,13 +2170,13 @@ mod tests {
         };
         let Command::Cloud {
             command:
-                CloudCommand::Scan {
+                CloudCommand::Scan(CloudScanCli {
                     adopt,
                     config,
                     dry_run,
                     yes,
                     ..
-                },
+                }),
         } = scan(&["--adopt", "--config", "p/x.toml", "--yes"])
             .unwrap()
             .command
@@ -2117,14 +2209,14 @@ mod tests {
 
     #[test]
     fn sync_push_defaults() {
-        let SyncCommand::Push {
+        let SyncCommand::Push(SyncPushCli {
             config,
             prune,
             dry_run,
             yes,
             json,
             ..
-        } = parse_push(&[]).unwrap()
+        }) = parse_push(&[]).unwrap()
         else {
             panic!("expected push");
         };
@@ -2134,9 +2226,9 @@ mod tests {
 
     #[test]
     fn sync_push_options() {
-        let SyncCommand::Push {
+        let SyncCommand::Push(SyncPushCli {
             config, prune, yes, ..
-        } = parse_push(&["--config", "proj/my.toml", "--prune", "--yes"]).unwrap()
+        }) = parse_push(&["--config", "proj/my.toml", "--prune", "--yes"]).unwrap()
         else {
             panic!("expected push");
         };
@@ -2166,13 +2258,13 @@ mod tests {
 
     #[test]
     fn sync_pull_defaults() {
-        let SyncCommand::Pull {
+        let SyncCommand::Pull(SyncPullCli {
             config,
             prune,
             dry_run,
             yes,
             json,
-        } = parse_pull(&[]).unwrap()
+        }) = parse_pull(&[]).unwrap()
         else {
             panic!("expected pull");
         };
@@ -2182,9 +2274,9 @@ mod tests {
 
     #[test]
     fn sync_pull_options() {
-        let SyncCommand::Pull {
+        let SyncCommand::Pull(SyncPullCli {
             config, prune, yes, ..
-        } = parse_pull(&["--config", "proj/my.toml", "--prune", "--yes"]).unwrap()
+        }) = parse_pull(&["--config", "proj/my.toml", "--prune", "--yes"]).unwrap()
         else {
             panic!("expected pull");
         };
@@ -2211,7 +2303,7 @@ mod tests {
         )?;
         match cli.command {
             Command::Cloud {
-                command: CloudCommand::Status { config, .. },
+                command: CloudCommand::Status(CloudStatusCli { config, .. }),
             } => Ok(config),
             _ => unreachable!("parsed status"),
         }
@@ -2241,13 +2333,13 @@ mod tests {
         match cli.command {
             Command::Image {
                 command:
-                    ImageCommand::Build {
+                    ImageCommand::Build(ImageBuildCli {
                         config,
                         dry_run,
                         prune,
                         yes,
                         json,
-                    },
+                    }),
             } => Ok((config, dry_run, prune, yes, json)),
             _ => unreachable!("parsed image build"),
         }
