@@ -15,7 +15,19 @@
 //! 3. The result is encoded as an indexed PNG and optimized losslessly. The
 //!    decoded final pixels must equal the quantized pixels, or the call fails.
 //!
-//! The output is deterministic for a given input, options and ttskit release.
+//! The output is deterministic for a given input, options and ttskit release
+//! (built-in engine).
+//!
+//! # Engines
+//!
+//! The built-in engine is the default. `Engine::Pngquant` instead runs the
+//! user's own `pngquant` executable (not shipped with ttskit) with explicit
+//! arguments and no shell, passing the PNG on stdin and reading the result
+//! from stdout. Its output depends on the installed pngquant version, so it
+//! can differ between machines. The rest is shared: the result goes through
+//! the lossless pass (the smaller file wins), the decoded final pixels must
+//! equal those of pngquant's output, and the quality score below is computed
+//! against the original whatever the engine.
 //!
 //! The file is re-encoded, so ancillary chunks of the input (colour profile,
 //! pixel density, text, ...) are not carried over.
@@ -39,7 +51,9 @@
 //! (`quality-too-low`). Colours are then reduced further (halving `colors`
 //! down to 2) as long as the score stays at or above `max`, to save bytes.
 
-use std::path::Path;
+mod external;
+
+use std::path::{Path, PathBuf};
 
 use exoquant::ditherer::{self, Ditherer};
 use exoquant::optimizer::{KMeans, Optimizer};
@@ -60,18 +74,33 @@ pub const MAX_COLORS: u16 = 256;
 const PSNR_FLOOR: f64 = 20.0;
 const PSNR_CEIL: f64 = 50.0;
 
-#[derive(Debug, Clone, Copy)]
+/// Which quantizer produces the palette image.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Engine {
+    /// The built-in quantizer.
+    #[default]
+    Builtin,
+    /// The user's `pngquant` executable. `program` is its path; `None` looks
+    /// `pngquant` up on `PATH`.
+    Pngquant { program: Option<PathBuf> },
+}
+
+#[derive(Debug, Clone)]
 pub struct QuantizeOptions {
     /// Largest palette size, 2 to 256.
     pub colors: u16,
-    /// `(min, max)` quality, each 0 to 100: results below `min` are skipped,
-    /// and colours are reduced while the score stays at or above `max`.
+    /// `(min, max)` quality, each 0 to 100. Built-in engine: results below
+    /// `min` are skipped, and colours are halved while the score stays at or
+    /// above `max`. `pngquant`: passed as `--quality MIN-MAX` on its own scale
+    /// (its scores differ from the built-in ones); it does the reduction
+    /// itself, and its exit code 99 is reported as `quality-too-low`.
     pub quality: Option<(u8, u8)>,
     /// Dithering strength, 0.0 (none) to 1.0 (full Floyd-Steinberg).
     pub dither: f32,
     /// Level of the final lossless pass, 0 to 6.
     pub level: u8,
     pub strip: StripMode,
+    pub engine: Engine,
 }
 
 impl Default for QuantizeOptions {
@@ -82,6 +111,7 @@ impl Default for QuantizeOptions {
             dither: 1.0,
             level: DEFAULT_LEVEL,
             strip: StripMode::Safe,
+            engine: Engine::Builtin,
         }
     }
 }
@@ -513,37 +543,23 @@ pub fn quantize(path: &Path, options: &QuantizeOptions) -> Result<QuantizeOutcom
         .map(|p| if p.0[3] == 0 { [0; 4] } else { p.0 })
         .collect();
 
-    let run = |colors: usize| {
-        let indexed = quantize_pixels(&pixels, width as usize, colors, f64::from(options.dither));
-        let quality = score(&pixels, &indexed.rgba());
-        (indexed, quality)
+    let produced = match &options.engine {
+        Engine::Builtin => builtin_candidate(&pixels, width, height, options, &fail)?,
+        Engine::Pngquant { program } => {
+            external_candidate(program.as_deref(), &original, &pixels, options, &fail)?
+        }
     };
-    let (mut indexed, mut quality) = run(usize::from(options.colors));
-    if let Some((min, max)) = options.quality {
-        if quality < min {
-            return skip(
-                "quality-too-low",
-                &format!(
-                    "quality {quality} with {} colors is below the minimum {min}",
-                    options.colors
-                ),
-            );
-        }
-        let mut colors = usize::from(options.colors);
-        while colors / 2 >= usize::from(MIN_COLORS) {
-            colors /= 2;
-            let (candidate, candidate_quality) = run(colors);
-            if candidate_quality < max {
-                break;
-            }
-            (indexed, quality) = (candidate, candidate_quality);
-        }
-    }
+    let Candidate {
+        encoded,
+        pixels: result,
+        colors_used,
+        quality,
+    } = match produced {
+        Ok(candidate) => candidate,
+        Err(skipped) => return Ok(QuantizeOutcome::Skipped(skipped)),
+    };
 
-    let colors_used = indexed.palette.len() as u16;
-    let encoded = encode(&indexed, width, height)
-        .map_err(|e| fail(format!("could not encode the result: {e}")))?;
-    let candidate = optimize_bytes(&encoded, options.level, options.strip).map_err(fail)?;
+    let candidate = optimize_bytes(&encoded, options.level, options.strip).map_err(&fail)?;
     let candidate = if candidate.len() < encoded.len() {
         candidate
     } else {
@@ -567,7 +583,7 @@ pub fn quantize(path: &Path, options: &QuantizeOptions) -> Result<QuantizeOutcom
     let after = image::load_from_memory_with_format(&candidate, image::ImageFormat::Png)
         .map_err(|e| fail(format!("quantized data could not be read back: {e}")))?;
     let after: Vec<[u8; 4]> = after.to_rgba8().pixels().map(|p| p.0).collect();
-    if after != indexed.rgba() {
+    if after != result {
         return Err(fail(
             "quantized pixels differ from the computed result; the file was left alone".to_owned(),
         ));
@@ -581,6 +597,104 @@ pub fn quantize(path: &Path, options: &QuantizeOptions) -> Result<QuantizeOutcom
         height,
         colors_used,
         quality,
+    }))
+}
+
+/// What an engine produced: an encoded PNG, the pixels it decodes to, and its
+/// palette size and score.
+struct Candidate {
+    encoded: Vec<u8>,
+    pixels: Vec<[u8; 4]>,
+    colors_used: u16,
+    quality: u8,
+}
+
+/// `Err(Skipped)` when the engine's result is rejected, e.g. below the quality
+/// floor.
+type Produced = Result<Candidate, Skipped>;
+
+fn builtin_candidate(
+    pixels: &[[u8; 4]],
+    width: u32,
+    height: u32,
+    options: &QuantizeOptions,
+    fail: &dyn Fn(String) -> ImageError,
+) -> Result<Produced, ImageError> {
+    let run = |colors: usize| {
+        let indexed = quantize_pixels(pixels, width as usize, colors, f64::from(options.dither));
+        let quality = score(pixels, &indexed.rgba());
+        (indexed, quality)
+    };
+    let (mut indexed, mut quality) = run(usize::from(options.colors));
+    if let Some((min, max)) = options.quality {
+        if quality < min {
+            return Ok(Err(Skipped {
+                code: "quality-too-low",
+                message: format!(
+                    "quality {quality} with {} colors is below the minimum {min}",
+                    options.colors
+                ),
+            }));
+        }
+        let mut colors = usize::from(options.colors);
+        while colors / 2 >= usize::from(MIN_COLORS) {
+            colors /= 2;
+            let (candidate, candidate_quality) = run(colors);
+            if candidate_quality < max {
+                break;
+            }
+            (indexed, quality) = (candidate, candidate_quality);
+        }
+    }
+    let encoded = encode(&indexed, width, height)
+        .map_err(|e| fail(format!("could not encode the result: {e}")))?;
+    Ok(Ok(Candidate {
+        encoded,
+        pixels: indexed.rgba(),
+        colors_used: indexed.palette.len() as u16,
+        quality,
+    }))
+}
+
+fn external_candidate(
+    program: Option<&Path>,
+    original: &[u8],
+    pixels: &[[u8; 4]],
+    options: &QuantizeOptions,
+    fail: &dyn Fn(String) -> ImageError,
+) -> Result<Produced, ImageError> {
+    let encoded = match external::run(program, original, options) {
+        Ok(external::Run::Png(bytes)) => bytes,
+        Ok(external::Run::BelowQuality(message)) => {
+            return Ok(Err(Skipped {
+                code: "quality-too-low",
+                message,
+            }));
+        }
+        Err(external::RunError::NotFound(message)) => return Err(ImageError::Options(message)),
+        Err(external::RunError::Failed(message)) => return Err(fail(message)),
+    };
+    if !encoded.starts_with(&PNG_SIGNATURE) {
+        return Err(fail("pngquant did not write a PNG".to_owned()));
+    }
+    let decoded = image::load_from_memory_with_format(&encoded, image::ImageFormat::Png)
+        .map_err(|e| fail(format!("pngquant wrote an unreadable PNG: {e}")))?;
+    let result: Vec<[u8; 4]> = decoded.to_rgba8().pixels().map(|p| p.0).collect();
+    if result.len() != pixels.len() {
+        return Err(fail(
+            "pngquant changed the image dimensions; the file was left alone".to_owned(),
+        ));
+    }
+    let mut distinct = result.clone();
+    distinct.sort_unstable();
+    distinct.dedup();
+    // The score is premultiplied, so the colour of invisible pixels does not
+    // matter.
+    Ok(Ok(Candidate {
+        quality: score(pixels, &result),
+        colors_used: u16::try_from(distinct.len()).unwrap_or(u16::MAX),
+        encoded,
+        pixels: result,
     }))
 }
 

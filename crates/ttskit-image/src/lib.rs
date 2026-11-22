@@ -16,7 +16,8 @@ pub use optimize::{
     DEFAULT_LEVEL, MAX_LEVEL, OptimizeOptions, Optimized, Outcome, Skipped, StripMode, optimize,
 };
 pub use quantize::{
-    DEFAULT_COLORS, MAX_COLORS, MIN_COLORS, QuantizeOptions, QuantizeOutcome, Quantized, quantize,
+    DEFAULT_COLORS, Engine, MAX_COLORS, MIN_COLORS, QuantizeOptions, QuantizeOutcome, Quantized,
+    quantize,
 };
 
 use std::fs::File;

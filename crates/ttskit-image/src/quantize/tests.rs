@@ -305,3 +305,201 @@ fn score_endpoints_and_monotony() {
     let worse = vec![[25, 35, 45, 245]; 16];
     assert!(score(&a, &worse) < s);
 }
+
+// External engine, against a fake `pngquant`.
+
+/// A fake executable in `dir`: it logs its arguments on one line to
+/// `args.txt`, ignores stdin, writes `stdout` and `stderr` and exits with
+/// `code`.
+fn fake_pngquant(dir: &Path, stdout: &[u8], stderr: &str, code: i32) -> PathBuf {
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::write(dir.join("out.bin"), stdout).unwrap();
+    std::fs::write(dir.join("err.txt"), stderr).unwrap();
+    #[cfg(windows)]
+    {
+        let script = format!(
+            "@echo off\r\necho %* > \"%~dp0args.txt\"\r\ntype \"%~dp0err.txt\" 1>&2\r\ntype \"%~dp0out.bin\"\r\nexit /b {code}\r\n"
+        );
+        let path = dir.join("pngquant.cmd");
+        std::fs::write(&path, script).unwrap();
+        path
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let script = format!(
+            "#!/bin/sh\nd=\"$(dirname \"$0\")\"\necho \"$*\" > \"$d/args.txt\"\ncat \"$d/err.txt\" >&2\ncat \"$d/out.bin\"\nexit {code}\n"
+        );
+        let path = dir.join("pngquant");
+        std::fs::write(&path, script).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+}
+
+/// The logged line. Rust quotes arguments containing `=` when it starts a
+/// `.cmd` file on Windows (batch hardening), so quotes are dropped; a real
+/// `pngquant.exe` receives the plain argument.
+fn logged_args(dir: &Path) -> String {
+    std::fs::read_to_string(dir.join("args.txt"))
+        .unwrap()
+        .trim()
+        .replace('"', "")
+}
+
+fn external(program: &Path) -> QuantizeOptions {
+    QuantizeOptions {
+        engine: Engine::Pngquant {
+            program: Some(program.to_owned()),
+        },
+        ..QuantizeOptions::default()
+    }
+}
+
+/// A gradient file and a small indexed PNG made from it by the built-in
+/// engine, to serve as the fake's output.
+fn gradient_and_canned(dir: &Path) -> (PathBuf, Vec<u8>) {
+    let path = dir.join("a.png");
+    write(&path, &gradient());
+    let canned = quantized(quantize(&path, &with_colors(16)).unwrap()).bytes;
+    (path, canned)
+}
+
+#[test]
+fn external_success_uses_pngquant_output_and_exact_args() {
+    let dir = tmp();
+    let (path, canned) = gradient_and_canned(dir.path());
+    let bin = dir.path().join("bin");
+    let program = fake_pngquant(&bin, &canned, "", 0);
+    let options = QuantizeOptions {
+        quality: Some((40, 80)),
+        dither: 0.5,
+        ..external(&program)
+    };
+    let q = quantized(quantize(&path, &options).unwrap());
+    assert!(q.smaller);
+    assert_eq!(rgba(&q.bytes), rgba(&canned));
+    assert_eq!(q.colors_used, 16);
+    assert!(q.quality > 0 && q.quality < 100);
+    assert_eq!((q.width, q.height), (64, 64));
+    assert_eq!(
+        logged_args(&bin),
+        "--quality 40-80 --floyd=0.5 --strip --output - 256 -"
+    );
+}
+
+#[test]
+fn external_args_without_quality_dither_or_strip() {
+    let dir = tmp();
+    let (path, canned) = gradient_and_canned(dir.path());
+    let bin = dir.path().join("bin");
+    let program = fake_pngquant(&bin, &canned, "", 0);
+    let options = QuantizeOptions {
+        colors: 32,
+        dither: 0.0,
+        strip: StripMode::None,
+        ..external(&program)
+    };
+    quantized(quantize(&path, &options).unwrap());
+    assert_eq!(logged_args(&bin), "--nofs --output - 32 -");
+}
+
+#[test]
+fn external_exit_99_is_quality_too_low() {
+    let dir = tmp();
+    let (path, canned) = gradient_and_canned(dir.path());
+    let program = fake_pngquant(&dir.path().join("bin"), &canned, "", 99);
+    let options = QuantizeOptions {
+        quality: Some((90, 100)),
+        ..external(&program)
+    };
+    let s = skipped(quantize(&path, &options).unwrap());
+    assert_eq!(s.code, "quality-too-low");
+}
+
+#[test]
+fn external_failure_reports_exit_code_and_stderr() {
+    let dir = tmp();
+    let (path, canned) = gradient_and_canned(dir.path());
+    let program = fake_pngquant(&dir.path().join("bin"), &canned, "boom: bad input", 1);
+    let err = quantize(&path, &external(&program)).unwrap_err();
+    assert!(matches!(err, ImageError::Optimize { .. }));
+    let message = err.to_string();
+    assert!(message.contains("exit code 1"), "{message}");
+    assert!(message.contains("boom: bad input"), "{message}");
+}
+
+#[test]
+fn external_garbage_output_is_an_error() {
+    let dir = tmp();
+    let (path, _) = gradient_and_canned(dir.path());
+    let program = fake_pngquant(&dir.path().join("bin"), b"garbage", "", 0);
+    let err = quantize(&path, &external(&program)).unwrap_err();
+    assert!(err.to_string().contains("did not write a PNG"), "{err}");
+
+    // A valid signature followed by junk.
+    let mut bad = PNG_SIGNATURE.to_vec();
+    bad.extend_from_slice(b"junk junk junk");
+    let program = fake_pngquant(&dir.path().join("bin2"), &bad, "", 0);
+    let err = quantize(&path, &external(&program)).unwrap_err();
+    assert!(err.to_string().contains("unreadable PNG"), "{err}");
+}
+
+#[test]
+fn external_empty_output_is_an_error() {
+    let dir = tmp();
+    let (path, _) = gradient_and_canned(dir.path());
+    let program = fake_pngquant(&dir.path().join("bin"), b"", "", 0);
+    let err = quantize(&path, &external(&program)).unwrap_err();
+    assert!(err.to_string().contains("no output"), "{err}");
+}
+
+#[test]
+fn external_missing_program_is_a_clear_error() {
+    let dir = tmp();
+    let (path, _) = gradient_and_canned(dir.path());
+    let missing = dir.path().join("nowhere").join("pngquant");
+    let err = quantize(&path, &external(&missing)).unwrap_err();
+    assert!(matches!(err, ImageError::Options(_)), "{err}");
+    assert!(err.to_string().contains("install pngquant"), "{err}");
+}
+
+#[test]
+fn external_works_from_a_directory_with_a_space() {
+    let dir = tmp();
+    let (path, canned) = gradient_and_canned(dir.path());
+    let bin = dir.path().join("with space & more");
+    let program = fake_pngquant(&bin, &canned, "", 0);
+    let q = quantized(quantize(&path, &external(&program)).unwrap());
+    assert_eq!(rgba(&q.bytes), rgba(&canned));
+    assert!(!logged_args(&bin).is_empty());
+}
+
+#[test]
+fn external_skips_before_running_the_program() {
+    let dir = tmp();
+    let text = dir.path().join("a.png");
+    std::fs::write(&text, b"not a png").unwrap();
+    // The program does not exist; a skip must not need it.
+    let options = external(&dir.path().join("missing"));
+    assert_eq!(skipped(quantize(&text, &options).unwrap()).code, "not-png");
+}
+
+#[test]
+fn external_options_are_validated() {
+    let dir = tmp();
+    let (path, _) = gradient_and_canned(dir.path());
+    let options = QuantizeOptions {
+        colors: 1,
+        ..external(&dir.path().join("missing"))
+    };
+    assert!(matches!(
+        quantize(&path, &options),
+        Err(ImageError::Options(_))
+    ));
+}
+
+#[test]
+fn external_without_a_path_looks_up_pngquant() {
+    assert_eq!(external::program_name(None), "pngquant");
+}
