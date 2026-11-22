@@ -368,4 +368,6 @@ pub use resize::{FilterKind, ResizeArgs, parse_scale, resize};
 mod deck;
 #[cfg(feature = "image")]
 mod deck_grid;
+#[cfg(feature = "image")]
+mod deck_object;
 pub use deck::{DeckBuildArgs, DeckSplitArgs, FitKind, deck_build, deck_split, parse_card_size};
