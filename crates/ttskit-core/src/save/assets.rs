@@ -84,7 +84,7 @@ fn has_url_scheme(s: &str) -> bool {
 }
 
 /// Lowercased host of `url` without userinfo and port.
-fn host_of(url: &str) -> String {
+pub(crate) fn host_of(url: &str) -> String {
     let rest = url.split_once("://").map_or(url, |(_, r)| r);
     let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
     let host_port = authority.rsplit_once('@').map_or(authority, |(_, h)| h);

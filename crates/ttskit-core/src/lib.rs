@@ -10,10 +10,15 @@
 //! See the module documentation for why the model is value-backed and which
 //! round-trip guarantees apply.
 
+pub mod check;
 pub mod pack;
 pub mod save;
 pub mod unpack;
 
+pub use check::{
+    CheckConfig, CheckReport, Fetch, FetchError, FetchMethod, FetchRequest, FetchResponse, Outcome,
+    UrlResult, check_urls,
+};
 pub use pack::{PackError, PackOptions, Packed, pack};
 pub use save::write::Eol;
 pub use save::{
