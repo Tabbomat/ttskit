@@ -598,6 +598,32 @@ notes do not change the exit status. `--json` prints one JSON object with
 `images` (each with `compatible` and `problems`, whose `code` values are
 stable) and `errors`.
 
+### Checking image sizes
+
+```
+ttskit image check deck/
+ttskit image check deck/ --max-side 2048 --max-bytes 2m
+ttskit image check --json deck/
+```
+
+`image check PATH...` finds images that are larger than the game can use well.
+It reads only the file header, except that a PNG or WebP with an alpha channel
+is decoded to see whether any pixel is actually transparent. Each file gets
+its size, format and alpha flag, then findings with a stable rule id:
+
+- `side-too-long`: a side over `--max-side` (default 4096, the largest size
+  seen to load fine in the game; 8192 loaded slowly);
+- `file-too-large`: over `--max-bytes` (no default; `k`, `m` and `g` suffixes
+  are 1024-based);
+- `extension-mismatch`: the extension does not match the real format;
+- `alpha-opaque`: an alpha channel in which every pixel is fully opaque;
+  `image optimize` removes it losslessly.
+
+Exit status: 0 without findings, 2 with findings, 1 if a file could not be
+read. `--json` prints one object with `max_side`, `max_bytes`, `images` (each
+with `findings`) and `errors`. Where the limits come from is in
+[docs/image-formats.md](docs/image-formats.md).
+
 ### Converting images
 
 ```

@@ -361,3 +361,5 @@ mod optimize;
 pub use optimize::{OptimizeArgs, Strip, optimize};
 mod quantize;
 pub use quantize::{EngineKind, QuantizeArgs, parse_dither, parse_quality, quantize};
+mod check;
+pub use check::{CheckArgs, CheckStatus, check, parse_bytes};

@@ -82,3 +82,18 @@ Each finding has a stable code, a severity and a message.
 
 A file is `compatible` unless it has an error. Other formats the image library
 knows (for example ICO) are reported as unreadable with the reason.
+
+## Limits used by `ttskit image check`
+
+`ttskit image check` flags images that are larger than the game can use well.
+The limits come from the observations above, not from documentation of the
+game:
+
+| Rule | Default | Where it comes from |
+|---|---|---|
+| `side-too-long` | longest side over 4096 px (`--max-side`) | 4096x4096 loaded fine, 8192x8192 loaded noticeably slowly. Sizes between the two were not tested, and no hard texture limit of the game is known. 4096 is the largest size seen to work well, so it is a practical limit. |
+| `file-too-large` | none (`--max-bytes`) | No file size limit has been verified, so the rule only runs when you give one. |
+| `extension-mismatch` | always | The game decides the format by content, so a wrong extension still loads. Other tools may go by the extension, so the file is flagged. |
+| `alpha-opaque` | always | A PNG or WebP with an alpha channel in which every pixel is fully opaque stores a channel that does nothing. `ttskit image optimize` removes it without changing the picture. |
+
+The `very-large` warning of `image info` (8192 px) is separate and unchanged.

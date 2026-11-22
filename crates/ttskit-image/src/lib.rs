@@ -5,10 +5,12 @@
 //! loading generated test images in the game; they are recorded in
 //! `docs/image-formats.md`.
 
+mod check;
 mod convert;
 mod optimize;
 mod quantize;
 
+pub use check::{CheckOptions, CheckReport, DEFAULT_MAX_SIDE, Finding, check};
 pub use convert::{
     ConvertOptions, Converted, DEFAULT_JPEG_QUALITY, OutputFormat, convert, parse_color,
 };

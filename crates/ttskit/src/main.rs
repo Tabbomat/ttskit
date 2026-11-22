@@ -30,7 +30,7 @@ enum Command {
         #[command(subcommand)]
         command: CloudCommand,
     },
-    /// Inspect, convert, optimize and quantize image files (local only; needs a build with the `image` feature; unofficial)
+    /// Inspect, check, convert, optimize and quantize image files (local only; needs a build with the `image` feature; unofficial)
     Image {
         #[command(subcommand)]
         command: ImageCommand,
@@ -237,6 +237,34 @@ enum ImageCommand {
         /// Image files or directories
         #[arg(required = true, value_name = "PATH")]
         inputs: Vec<PathBuf>,
+        /// Print one JSON object with all results
+        #[arg(long)]
+        json: bool,
+    },
+    /// Report images that are larger than the game can use well (read-only)
+    ///
+    /// Reads only the file header where it can (format, size, colour layout)
+    /// and reports per file: size, file size, format and whether it has an
+    /// alpha channel. Findings, each with a rule id: side-too-long (a side
+    /// over --max-side, default 4096: the largest size seen to load fine in
+    /// the game, 8192 loaded slowly; an observed limit, not a documented one),
+    /// file-too-large (over --max-bytes; no default limit), extension-mismatch
+    /// (the extension does not match the content; the game decides by content,
+    /// but other tools may not) and alpha-opaque (an alpha channel in which
+    /// every pixel is fully opaque; only checked for png and webp, which means
+    /// decoding them). Takes files and directories (scanned recursively).
+    /// Exit status: 0 without findings, 2 with findings, 1 if a file could not
+    /// be read (this wins over 2). To fix oversized images, see `image resize`.
+    Check {
+        /// Image files or directories
+        #[arg(required = true, value_name = "PATH")]
+        inputs: Vec<PathBuf>,
+        /// Longest allowed side in pixels
+        #[arg(long, value_name = "N", default_value_t = 4096, value_parser = clap::value_parser!(u32).range(1..))]
+        max_side: u32,
+        /// Largest allowed file size in bytes; k, m and g suffixes mean 1024-based units (e.g. 2m)
+        #[arg(long, value_name = "BYTES", value_parser = image::parse_bytes)]
+        max_bytes: Option<u64>,
         /// Print one JSON object with all results
         #[arg(long)]
         json: bool,
@@ -1269,6 +1297,32 @@ fn run(cli: Cli) -> Result<ExitCode, CliError> {
                 ExitCode::SUCCESS
             } else {
                 ExitCode::FAILURE
+            })
+        }
+        Command::Image {
+            command:
+                ImageCommand::Check {
+                    inputs,
+                    max_side,
+                    max_bytes,
+                    json,
+                },
+        } => {
+            let mut stdout = std::io::stdout().lock();
+            let status = image::check(
+                &image::CheckArgs {
+                    inputs,
+                    max_side,
+                    max_bytes,
+                    json,
+                },
+                &mut stdout,
+            )?;
+            stdout.flush().map_err(|e| e.to_string())?;
+            Ok(match status {
+                image::CheckStatus::Clean => ExitCode::SUCCESS,
+                image::CheckStatus::Findings => ExitCode::from(2),
+                image::CheckStatus::Errors => ExitCode::FAILURE,
             })
         }
         Command::Image {
