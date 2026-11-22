@@ -11,6 +11,7 @@
 //! round-trip guarantees apply.
 
 pub mod check;
+pub mod fetch_assets;
 pub mod pack;
 pub mod save;
 pub mod unpack;
@@ -18,6 +19,10 @@ pub mod unpack;
 pub use check::{
     CheckConfig, CheckReport, Fetch, FetchError, FetchMethod, FetchRequest, FetchResponse, Outcome,
     UrlResult, check_urls,
+};
+pub use fetch_assets::{
+    Download, DownloadError, DownloadResponse, Failed, FetchConfig, FetchPlan, FetchReport,
+    Fetched, Index, IndexEntry, Skipped, Store, StoreError, detect_type, fetch_assets,
 };
 pub use pack::{PackError, PackOptions, Packed, pack};
 pub use save::write::Eol;

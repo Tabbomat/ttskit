@@ -199,6 +199,23 @@ enum Answer {
     Failed(FetchError),
 }
 
+/// Why `url` is not requested, if so: not http(s), or excluded by the host
+/// filters.
+pub(crate) fn skip_reason(url: &str, only: &[String], skip: &[String]) -> Option<String> {
+    let lower = url.to_ascii_lowercase();
+    if !(lower.starts_with("http://") || lower.starts_with("https://")) {
+        return Some("not an http or https URL".into());
+    }
+    let host = host_of(url);
+    if !only.is_empty() && !host_matches(&host, only) {
+        return Some("host not selected by --host".into());
+    }
+    if host_matches(&host, skip) {
+        return Some("host excluded by --skip-host".into());
+    }
+    None
+}
+
 fn host_matches(host: &str, listed: &[String]) -> bool {
     listed.iter().any(|h| {
         let h = h.trim_start_matches('.').to_ascii_lowercase();
@@ -206,33 +223,20 @@ fn host_matches(host: &str, listed: &[String]) -> bool {
     })
 }
 
-fn is_redirect(status: u16) -> bool {
+pub(crate) fn is_redirect(status: u16) -> bool {
     matches!(status, 301 | 302 | 303 | 307 | 308)
 }
 
-fn is_retryable(status: u16) -> bool {
+pub(crate) fn is_retryable(status: u16) -> bool {
     status == 429 || (500..600).contains(&status)
 }
 
 impl Shared<'_> {
     fn check_one(&self, url: &str) -> Outcome {
-        let lower = url.to_ascii_lowercase();
-        if !(lower.starts_with("http://") || lower.starts_with("https://")) {
-            return Outcome::Skipped {
-                reason: "not an http or https URL".into(),
-            };
+        if let Some(reason) = skip_reason(url, &self.config.only_hosts, &self.config.skip_hosts) {
+            return Outcome::Skipped { reason };
         }
         let host = host_of(url);
-        if !self.config.only_hosts.is_empty() && !host_matches(&host, &self.config.only_hosts) {
-            return Outcome::Skipped {
-                reason: "host not selected by --host".into(),
-            };
-        }
-        if host_matches(&host, &self.config.skip_hosts) {
-            return Outcome::Skipped {
-                reason: "host excluded by --skip-host".into(),
-            };
-        }
         let _permit = self.gate.acquire(&host);
         let mut current = url.to_owned();
         let mut hops = 0;
@@ -344,19 +348,20 @@ fn unreachable(e: &FetchError) -> Outcome {
 /// Why a `2xx` answer is not an image, model or asset bundle, if so: an HTML
 /// page (by `Content-Type` or by what the body starts with).
 fn not_an_asset(r: &FetchResponse) -> Option<String> {
-    let ct = r
-        .content_type
-        .as_deref()
-        .unwrap_or("")
-        .trim()
-        .to_ascii_lowercase();
+    html_reason(r.content_type.as_deref(), &r.body)
+}
+
+/// Why a `2xx` answer is an HTML page, if so: by `Content-Type` or by what
+/// the body starts with (`prefix` is the first bytes of the body).
+pub(crate) fn html_reason(content_type: Option<&str>, prefix: &[u8]) -> Option<String> {
+    let ct = content_type.unwrap_or("").trim().to_ascii_lowercase();
     if ct.starts_with("text/html") || ct.starts_with("application/xhtml") {
         return Some(format!(
             "content type is {}",
             ct.split(';').next().unwrap_or("")
         ));
     }
-    let body = r.body.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&r.body);
+    let body = prefix.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(prefix);
     let start: Vec<u8> = body
         .iter()
         .copied()
@@ -371,7 +376,7 @@ fn not_an_asset(r: &FetchResponse) -> Option<String> {
 }
 
 /// Resolves a `Location` header against the URL that sent it.
-fn resolve_location(base: &str, location: &str) -> Option<String> {
+pub(crate) fn resolve_location(base: &str, location: &str) -> Option<String> {
     let location = location.trim();
     if location.is_empty() {
         return None;
@@ -398,19 +403,19 @@ fn resolve_location(base: &str, location: &str) -> Option<String> {
 }
 
 /// Limits the requests in flight per host.
-struct HostGate {
+pub(crate) struct HostGate {
     limit: usize,
     busy: Mutex<HashMap<String, usize>>,
     freed: Condvar,
 }
 
-struct Permit<'a> {
+pub(crate) struct Permit<'a> {
     gate: &'a HostGate,
     host: String,
 }
 
 impl HostGate {
-    fn new(limit: usize) -> Self {
+    pub(crate) fn new(limit: usize) -> Self {
         HostGate {
             limit,
             busy: Mutex::new(HashMap::new()),
@@ -418,7 +423,7 @@ impl HostGate {
         }
     }
 
-    fn acquire(&self, host: &str) -> Permit<'_> {
+    pub(crate) fn acquire(&self, host: &str) -> Permit<'_> {
         let mut busy = self.busy.lock().unwrap();
         while busy.get(host).copied().unwrap_or(0) >= self.limit {
             busy = self.freed.wait(busy).unwrap();
