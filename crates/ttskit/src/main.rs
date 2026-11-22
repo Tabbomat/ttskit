@@ -5,6 +5,7 @@ mod fetch_assets;
 mod http;
 mod image;
 mod mcp;
+mod rewrite_urls;
 mod save;
 mod watch;
 
@@ -839,6 +840,56 @@ enum SaveCommand {
     /// modified. Exit status: 0 when everything is present, 2 when a URL failed (the rest is still
     /// downloaded) or the index could not be written, 1 on errors.
     FetchAssets(SaveFetchAssetsCli),
+    /// Replace asset URLs in a save from a mapping (local only)
+    ///
+    /// The mapping is a TSV of `old URL<TAB>new URL` (--map; blank lines and
+    /// lines starting with # are skipped), and/or --from-manifest: a Steam
+    /// Cloud URL of the save whose SHA1 is in the project manifest gets the
+    /// manifest's URL. --normalize-steam-hosts also rewrites the legacy
+    /// http://cloud-3.steamusercontent.com/ugc/ prefix to the current one
+    /// (the rest of the URL is kept). Only whole URL values are replaced;
+    /// URLs inside Lua scripts and XML UI are counted and reported
+    /// separately, and replaced only with --in-scripts. Mapping lines never
+    /// chain, and the same old URL with two different new URLs is an error.
+    /// The plan (per line: occurrences, objects, lines that match nothing)
+    /// is printed first; --dry-run stops there. The new save goes to --out
+    /// (an existing file needs --yes); replacing the input needs --in-place
+    /// --yes. Everything except the replaced strings stays as it was.
+    RewriteUrls(SaveRewriteUrlsCli),
+}
+
+#[derive(clap::Args)]
+struct SaveRewriteUrlsCli {
+    /// The save file (JSON)
+    save: PathBuf,
+    /// Mapping file: one `old URL<TAB>new URL` per line
+    #[arg(long, value_name = "FILE")]
+    map: Option<PathBuf>,
+    /// Project manifest (ttskit.manifest.json): replace Steam Cloud URLs by the manifest's
+    /// URL for the same SHA1
+    #[arg(long, value_name = "FILE")]
+    from_manifest: Option<PathBuf>,
+    /// Rewrite the legacy Steam Cloud host (cloud-3.steamusercontent.com) to the current one
+    #[arg(long)]
+    normalize_steam_hosts: bool,
+    /// Also replace URLs inside LuaScript, LuaScriptState and XmlUI strings
+    #[arg(long)]
+    in_scripts: bool,
+    /// Write the new save here
+    #[arg(long, value_name = "FILE", conflicts_with = "in_place")]
+    out: Option<PathBuf>,
+    /// Replace the input file (needs --yes)
+    #[arg(long)]
+    in_place: bool,
+    /// Confirm replacing the input or overwriting --out
+    #[arg(long)]
+    yes: bool,
+    /// Print the plan and write nothing
+    #[arg(long)]
+    dry_run: bool,
+    /// Print the plan and the result as one JSON object
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(clap::Args)]
@@ -1751,7 +1802,8 @@ fn run_simple(command: Command) -> Result<(), CliError> {
         }
         | Command::Image { .. }
         | Command::Save {
-            command: SaveCommand::CheckUrls(_) | SaveCommand::FetchAssets(_),
+            command:
+                SaveCommand::CheckUrls(_) | SaveCommand::FetchAssets(_) | SaveCommand::RewriteUrls(_),
         } => unreachable!("handled by run"),
     }
 }
@@ -2220,8 +2272,31 @@ fn run(cli: Cli) -> Result<ExitCode, CliError> {
         Command::Save {
             command: SaveCommand::FetchAssets(args),
         } => run_fetch_assets(args),
+        Command::Save {
+            command: SaveCommand::RewriteUrls(args),
+        } => run_rewrite_urls(args),
         command => run_simple(command).map(|()| ExitCode::SUCCESS),
     }
+}
+
+#[inline(never)]
+fn run_rewrite_urls(args: SaveRewriteUrlsCli) -> Result<ExitCode, CliError> {
+    let options = rewrite_urls::Options {
+        save: &args.save,
+        map: args.map.as_deref(),
+        manifest: args.from_manifest.as_deref(),
+        normalize_steam_hosts: args.normalize_steam_hosts,
+        in_scripts: args.in_scripts,
+        out: args.out.as_deref(),
+        in_place: args.in_place,
+        yes: args.yes,
+        dry_run: args.dry_run,
+        json: args.json,
+    };
+    let mut out = std::io::stdout().lock();
+    rewrite_urls::rewrite_urls(&options, &mut out)?;
+    out.flush().map_err(|e| e.to_string())?;
+    Ok(ExitCode::SUCCESS)
 }
 
 #[inline(never)]
