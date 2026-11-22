@@ -1,0 +1,19 @@
+[package]
+name = "ttskit-lint"
+description = "Lint rules for Tabletop Simulator saves"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde_json = { version = "1", features = ["preserve_order", "arbitrary_precision"] }
+thiserror = "2"
+toml = "1"
+ttskit-core = { path = "../ttskit-core" }
+
+[dev-dependencies]
+ttskit-testutil = { path = "../ttskit-testutil" }
