@@ -11,6 +11,9 @@
 //! deck = { name = "base", hidden = "art/cards/hidden.png" }   # optional
 //! ```
 //!
+//! The `[cloud]`, `[local]` and `[lint]` tables belong to other tools and are
+//! ignored here.
+//!
 //! All keys are kebab-case and unknown keys are refused at every level.
 
 use std::path::PathBuf;
@@ -151,6 +154,8 @@ struct RawConfig {
     cloud: Option<IgnoredAny>,
     #[allow(dead_code)]
     local: Option<IgnoredAny>,
+    #[allow(dead_code)]
+    lint: Option<IgnoredAny>,
 }
 
 #[derive(Deserialize)]

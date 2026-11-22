@@ -34,6 +34,7 @@ ttskit-cloud = { path = "../ttskit-cloud" }
 ttskit-core = { path = "../ttskit-core" }
 ttskit-editor = { path = "../ttskit-editor" }
 ttskit-image = { path = "../ttskit-image", optional = true }
+ttskit-lint = { path = "../ttskit-lint" }
 
 [dev-dependencies]
 tempfile = "3"

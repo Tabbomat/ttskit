@@ -14,7 +14,8 @@
 //!
 //! The file may also hold an `[image]` section (`[[image.pipeline]]` rules).
 //! It belongs to the `ttskit-image` pipeline; this module only accepts it and
-//! does not look inside, so cloud commands keep working on such a config.
+//! does not look inside, so cloud commands keep working on such a config. The
+//! same goes for a `[lint]` table, which belongs to `ttskit-lint`.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -57,6 +58,10 @@ struct RawConfig {
     #[serde(default)]
     #[allow(dead_code)]
     image: Option<toml::Value>,
+    /// Read by `ttskit save lint` (`ttskit-lint`), not here.
+    #[serde(default)]
+    #[allow(dead_code)]
+    lint: Option<toml::Value>,
 }
 
 #[derive(Deserialize)]
@@ -245,6 +250,15 @@ mod tests {
 src = \"a/*.png\"
 out = \"b\"
 anything = 1
+",
+            cfg("G", "x")
+        );
+        assert_eq!(ProjectConfig::parse(&t).unwrap().cloud_folder, "G");
+        let t = format!(
+            "{}[lint]
+state_limit = 5
+[lint.rules]
+missing-guid = \"off\"
 ",
             cfg("G", "x")
         );

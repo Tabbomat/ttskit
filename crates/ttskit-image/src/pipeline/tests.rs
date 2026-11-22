@@ -112,8 +112,11 @@ fn no_image_section_is_an_empty_pipeline() {
 }
 
 #[test]
-fn cloud_and_local_are_not_checked() {
-    let t = format!("[cloud]\nanything = 1\n[local]\nx = [1]\n{}", rule(""));
+fn cloud_local_and_lint_are_not_checked() {
+    let t = format!(
+        "[cloud]\nanything = 1\n[local]\nx = [1]\n[lint]\nanything = 2\n{}",
+        rule("")
+    );
     assert_eq!(ok(&t).rules.len(), 1);
 }
 

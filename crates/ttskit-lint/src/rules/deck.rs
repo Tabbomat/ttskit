@@ -20,7 +20,7 @@ pub(super) const SIZE: RuleInfo = RuleInfo {
 pub(super) const ID_OUT_OF_RANGE: RuleInfo = RuleInfo {
     id: "deck-id-out-of-range",
     default: Severity::Error,
-    summary: "a DeckIDs entry or CardID points outside the object's CustomDeck sheets",
+    summary: "a DeckIDs entry points outside the object's CustomDeck sheets, or a card id is negative or not an integer",
 };
 
 pub(super) const ALL: [RuleInfo; 2] = [SIZE, ID_OUT_OF_RANGE];

@@ -2802,6 +2802,7 @@ dependencies = [
  "ttskit-core",
  "ttskit-editor",
  "ttskit-image",
+ "ttskit-lint",
  "ttskit-testutil",
 ]
 

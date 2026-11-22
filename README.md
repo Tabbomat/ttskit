@@ -20,6 +20,8 @@ mods. Not affiliated with or endorsed by Berserk Games.
   mapping, losslessly.
 - **Rehost (done):** `save rehost` moves assets from other hosts into the project's Steam
   Cloud folder and rewrites a copy of the save.
+- **Save lint (done):** `save lint` checks a save for duplicate GUIDs, bad URLs,
+  Lua and XML syntax errors, oversized script state and broken decks.
 - **Dead-link check (done):** `save check-urls` tells which asset URLs of a save no
   longer load.
 - **External Editor API client (done):** talk to a running game to read and write
@@ -75,6 +77,66 @@ ttskit save check-urls save.json --skip-host imgur.com
 - `--verify-content` fetches the first 1 KiB of each file and counts a `2xx` answer as `dead` when it is an HTML page (by `Content-Type` or by its first bytes), since some hosts answer 200 with a placeholder page. It does not check that the file is a valid image or model.
 - The text output lists each dead or unreachable URL with the JSON path, nickname and GUID of every use, then redirects and a summary line. `--json` lists all URLs sorted, with `result`, `status`/`target`/`reason`, `labels` and `occurrences`.
 - Exit status: 0 when nothing is dead or unreachable, 2 when something is, 1 on errors.
+
+## Save lint
+
+`ttskit save lint SAVE.json` checks a save for common mistakes: GUIDs, positions, asset URL fields, Lua and XML syntax, script state and deck data. It works on the file alone: no network, no Steam, no game. (Whether a URL still loads is a different question, answered by [`save check-urls`](#checking-asset-urls).)
+
+```
+ttskit save lint save.json                     # findings at warning level or above
+ttskit save lint save.json --level info        # also show info findings
+ttskit save lint save.json --json              # machine-readable
+ttskit save lint save.json --allow insecure-url --deny missing-guid
+ttskit save lint --list-rules                  # every rule with its default severity
+```
+
+- Findings are grouped by the object they belong to (`Nickname (GUID)`; findings outside any object under `(save)`), each line giving severity, rule, JSON path and a message. A summary line counts the findings and says how many were hidden because they are below `--level`.
+- `--level info|warning|error` (default `warning`) sets the lowest severity that is shown and counted. `--json` prints `{save, level, summary: {error, warning, info}, findings: [{rule, severity, message, path, nickname, guid}]}`.
+- `--allow RULE` switches a rule off; `--warn RULE` and `--deny RULE` make it a warning or an error. All three repeat, apply after the config file, and an unknown rule id is an error.
+- Exit status: 0 when nothing at or above the level is found, 2 when something is, 1 on errors (unreadable save, invalid JSON, bad config, unknown rule id or level).
+
+### Configuration
+
+Settings live in the `[lint]` table of `ttskit.toml`, which `save lint` reads from the current directory if the file exists, or from `--config FILE` (which must exist). Other tables in the file (`[cloud]`, `[local]`, `[image]`) are ignored by lint, and `[lint]` is ignored by the other commands, so one file serves all of them.
+
+```toml
+[lint]
+state_limit = 1048576        # bytes of LuaScriptState before large-script-state fires (default 1 MiB)
+
+[lint.rules]
+insecure-url = "off"         # off, info, warning or error
+missing-guid-nested = "warning"
+```
+
+### Rules
+
+| Rule | Default | What it finds |
+|---|---|---|
+| `deck-id-out-of-range` | error | a DeckIDs entry points outside the object's CustomDeck sheets, or a card id is negative or not an integer |
+| `deck-size` | warning | a CustomDeck sheet grid is outside the editor limits (1-10 by 1-7) |
+| `duplicate-guid` | error | the same GUID is used by more than one object |
+| `duplicate-guid-nested` | info | a GUID repeats and at least one of the objects is inside a container or a state |
+| `empty-url` | error | a required URL field is empty |
+| `insecure-url` | warning | a URL field uses http instead of https |
+| `invalid-url` | error | a URL field is not a valid http(s) URL |
+| `large-script-state` | warning | a LuaScriptState is longer than the configured state_limit |
+| `legacy-steam-url` | info | a URL uses the legacy http://cloud-3.steamusercontent.com host; `ttskit save rewrite-urls --normalize-steam-hosts` fixes it |
+| `local-url` | error | a URL field points at a file on the local machine |
+| `lua-syntax` | warning | a LuaScript has a syntax error by Lua 5.2 grammar (the game also accepts `!=` and `\|x\| expr` lambdas, which are reported) |
+| `missing-guid` | warning | an object has no GUID, or it is not a non-empty string |
+| `missing-guid-nested` | info | an object inside a container or a state has no GUID, or it is not a non-empty string |
+| `non-finite-number` | error | a Transform field is NaN or infinite |
+| `position-out-of-bounds` | warning | an object's position is far outside the playable area |
+| `script-state-not-json` | warning | a LuaScriptState is not JSON although its script calls JSON.decode |
+| `xml-malformed` | error | an XmlUI is not well-formed XML |
+
+Notes:
+
+- **Local only.** The URL rules look at the text of URL fields (keys ending in `URL`, such as `FaceURL`, `MeshURL`, the `URL` of `CustomUIAssets` items). They do not contact any host. A value like `<Name>file` is a game-internal placeholder and is skipped; a value starting with `{de}` style language markers holds one URL per language and each is checked; a leading `{verifycache}` is ignored.
+- **Lua syntax.** The Lua check parses the Lua 5.2 grammar only. The game's Lua dialect accepts a few more forms, notably `!=` and the `|x| expr` lambda shorthand; these are reported (by default as warnings), so expect findings on scripts that work in the game. Scripts are only parsed, never run. `#include` lines of the editor are ignored.
+- **GUID rules are split.** The game repeats GUIDs on copies of an object inside different containers, so `duplicate-guid` and `missing-guid` look only at the top-level objects of the save, and `duplicate-guid-nested` and `missing-guid-nested` (info by default) cover objects inside containers and states.
+- **Card ids.** `deck-id-out-of-range` checks `DeckIDs` as `sheet * 100 + card` against the object's own sheets. A card's own `CardID` is only checked to be a non-negative integer, because cards taken out of a deck keep the numbering of that deck.
+- **Speed.** Linting runs in a single pass over the save. With a release build, a 20 MB save with hundreds of thousands of values lints in about 2 seconds in total, most of it parsing Lua.
 
 ## Asset backup
 
@@ -1399,3 +1461,5 @@ in the example, if you do not want that; the file is still built.
 ## License
 
 [MIT](LICENSE)
+
+The Lua syntax check of `save lint` uses the [full_moon](https://crates.io/crates/full_moon) parser, which is licensed under MPL-2.0; its source is unchanged and available from its crate. The other dependencies are permissively licensed.

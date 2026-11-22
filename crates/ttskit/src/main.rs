@@ -4,6 +4,7 @@ mod editor;
 mod fetch_assets;
 mod http;
 mod image;
+mod lint;
 mod mcp;
 mod rehost;
 mod rewrite_urls;
@@ -877,6 +878,49 @@ enum SaveCommand {
     /// <folder>/index.json to [local] ignore so `cloud sync push` does not
     /// upload the download index.
     Rehost(SaveRehostCli),
+    /// Check a save for common mistakes (local only; no network, no game)
+    ///
+    /// Rules cover GUIDs (duplicates, missing), object positions, non-finite
+    /// numbers, URL fields (empty, malformed, http, legacy Steam host, local
+    /// paths), Lua syntax (Lua 5.2 grammar only; `!=` and `|x| expr`, which
+    /// the game accepts, are reported), XML UI well-formedness, script state
+    /// size and JSON, and deck sizes and card ids. --list-rules prints them
+    /// with their default severity. Settings come from the [lint] table of
+    /// ttskit.toml in the current directory (or --config), then --allow
+    /// (off), --warn and --deny (severity) override single rules. Only
+    /// findings at or above --level (default warning) are shown and counted.
+    /// Findings are grouped by owning object. Exit status: 0 when nothing is
+    /// shown, 2 when there are findings, 1 on errors (unreadable save, bad
+    /// config, unknown rule id).
+    Lint(SaveLintCli),
+}
+
+#[derive(clap::Args)]
+struct SaveLintCli {
+    /// The save file (JSON)
+    #[arg(required_unless_present = "list_rules")]
+    save: Option<PathBuf>,
+    /// Project config with a [lint] table [default: ./ttskit.toml if it exists]
+    #[arg(long, value_name = "FILE")]
+    config: Option<PathBuf>,
+    /// Switch a rule off; repeatable
+    #[arg(long, value_name = "RULE")]
+    allow: Vec<String>,
+    /// Report a rule as a warning; repeatable
+    #[arg(long, value_name = "RULE")]
+    warn: Vec<String>,
+    /// Report a rule as an error; repeatable
+    #[arg(long, value_name = "RULE")]
+    deny: Vec<String>,
+    /// Lowest severity to show and count: info, warning or error
+    #[arg(long, value_name = "LEVEL", default_value = "warning")]
+    level: String,
+    /// Print machine-readable JSON instead of text
+    #[arg(long)]
+    json: bool,
+    /// Print every rule with its default severity and exit
+    #[arg(long)]
+    list_rules: bool,
 }
 
 #[derive(clap::Args)]
@@ -1881,7 +1925,8 @@ fn run_simple(command: Command) -> Result<(), CliError> {
                 SaveCommand::CheckUrls(_)
                 | SaveCommand::FetchAssets(_)
                 | SaveCommand::RewriteUrls(_)
-                | SaveCommand::Rehost(_),
+                | SaveCommand::Rehost(_)
+                | SaveCommand::Lint(_),
         } => unreachable!("handled by run"),
     }
 }
@@ -2356,8 +2401,37 @@ fn run(cli: Cli) -> Result<ExitCode, CliError> {
         Command::Save {
             command: SaveCommand::Rehost(args),
         } => run_rehost(args),
+        Command::Save {
+            command: SaveCommand::Lint(args),
+        } => run_lint(args),
         command => run_simple(command).map(|()| ExitCode::SUCCESS),
     }
+}
+
+#[inline(never)]
+fn run_lint(args: SaveLintCli) -> Result<ExitCode, CliError> {
+    let mut out = std::io::stdout().lock();
+    if args.list_rules {
+        lint::list_rules(&mut out)?;
+        out.flush().map_err(|e| e.to_string())?;
+        return Ok(ExitCode::SUCCESS);
+    }
+    let save = args.save.ok_or("no save file given")?;
+    let options = lint::Options {
+        save: &save,
+        config: args.config.as_deref(),
+        allow: &args.allow,
+        warn: &args.warn,
+        deny: &args.deny,
+        level: lint::parse_level(&args.level)?,
+        json: args.json,
+    };
+    let status = lint::lint(&options, &mut out)?;
+    out.flush().map_err(|e| e.to_string())?;
+    Ok(match status {
+        lint::Status::Clean => ExitCode::SUCCESS,
+        lint::Status::Findings => ExitCode::from(2),
+    })
 }
 
 #[inline(never)]
